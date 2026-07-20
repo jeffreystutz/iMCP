@@ -1,4 +1,5 @@
 import AppKit
+import MCP
 import OSLog
 import SQLite3
 import UniformTypeIdentifiers
@@ -7,10 +8,26 @@ import iMessage
 private let log = Logger.service("messages")
 private let messagesDatabasePath = "/Users/\(NSUserName())/Library/Messages/chat.db"
 private let messagesDatabaseBookmarkKey: String = "me.mattt.iMCP.messagesDatabaseBookmark"
+let messagesSendConfirmationRequiredKey = "messagesSendConfirmationRequired"
 private let defaultLimit = 30
 
 final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     static let shared = MessageService()
+
+    private let sender: any MessagesSending
+    private let requiresSendConfirmation: @Sendable () -> Bool
+
+    init(
+        sender: any MessagesSending = AppleScriptMessagesSender(),
+        requiresSendConfirmation: @escaping @Sendable () -> Bool = {
+            UserDefaults.standard.object(forKey: messagesSendConfirmationRequiredKey) as? Bool
+                ?? true
+        }
+    ) {
+        self.sender = sender
+        self.requiresSendConfirmation = requiresSendConfirmation
+        super.init()
+    }
 
     func activate() async throws {
         log.debug("Starting message service activation")
@@ -168,6 +185,132 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 "hasPart": Value.array(messages.map({ .object($0) })),
             ]
         }
+
+        Tool(
+            name: "messages_send",
+            description:
+                "Submit one plain-text iMessage to one exact phone number or email address. Confirmation behavior is controlled by iMCP settings.",
+            inputSchema: .object(
+                properties: [
+                    "recipient": .string(
+                        description: "One exact E.164 phone number or email address"
+                    ),
+                    "body": .string(
+                        description: "Plain-text message body",
+                        minLength: 1
+                    ),
+                ],
+                required: ["recipient", "body"],
+                additionalProperties: false
+            ),
+            annotations: .init(
+                title: "Send iMessage",
+                readOnlyHint: false,
+                destructiveHint: false,
+                idempotentHint: false,
+                openWorldHint: true
+            )
+        ) { arguments, context in
+            let (recipient, body) = try await self.resolveSendInput(
+                arguments,
+                context: context
+            )
+            guard recipient.isExactMessageHandle else {
+                throw MessageSendError.invalidRecipient
+            }
+            guard !body.isEmpty else {
+                throw MessageSendError.emptyBody
+            }
+
+            if self.requiresSendConfirmation() {
+                let confirmation = try await context.elicitation.requestForm(
+                    message:
+                        "Submit this iMessage to Messages? Recipient and message text are intentionally omitted.",
+                    schema: .init(
+                        title: "Confirm iMessage submission",
+                        properties: [
+                            "confirmed": .object([
+                                "type": .string("boolean"),
+                                "description": .string(
+                                    "Confirm that Messages should submit this iMessage"
+                                ),
+                            ])
+                        ],
+                        required: ["confirmed"]
+                    )
+                )
+
+                switch confirmation.action {
+                case .decline:
+                    throw MessageSendError.confirmationDeclined
+                case .cancel:
+                    throw MessageSendError.confirmationCancelled
+                case .accept:
+                    guard confirmation.content?["confirmed"]?.boolValue == true else {
+                        throw MessageSendError.confirmationMalformed
+                    }
+                }
+            } else {
+                log.warning("Messages confirmation is disabled; proceeding without elicitation")
+            }
+
+            try Task.checkCancellation()
+            try await self.sender.submit(recipient: recipient, body: body)
+            log.notice("Messages accepted one iMessage submission")
+            return MessageSubmissionResult(status: "submitted", service: "iMessage")
+        }
+    }
+
+    private func resolveSendInput(
+        _ arguments: [String: Value],
+        context: ToolCallContext
+    ) async throws -> (recipient: String, body: String) {
+        var recipient = arguments["recipient"]?.stringValue
+        var body = arguments["body"]?.stringValue
+        guard recipient == nil || body == nil else {
+            return (recipient!, body!)
+        }
+
+        var properties: [String: MCP.Value] = [:]
+        var required: [String] = []
+        if recipient == nil {
+            properties["recipient"] = .object([
+                "type": .string("string"),
+                "description": .string("One exact E.164 phone number or email address"),
+            ])
+            required.append("recipient")
+        }
+        if body == nil {
+            properties["body"] = .object([
+                "type": .string("string"),
+                "description": .string("Plain-text message body"),
+                "minLength": .int(1),
+            ])
+            required.append("body")
+        }
+
+        let response = try await context.elicitation.requestForm(
+            message: "Provide the missing information required to prepare an iMessage.",
+            schema: .init(
+                title: "Complete iMessage",
+                properties: properties,
+                required: required
+            )
+        )
+        switch response.action {
+        case .decline:
+            throw MessageSendError.inputDeclined
+        case .cancel:
+            throw MessageSendError.inputCancelled
+        case .accept:
+            recipient = recipient ?? response.content?["recipient"]?.stringValue
+            body = body ?? response.content?["body"]?.stringValue
+        }
+
+        guard let recipient, let body else {
+            throw MessageSendError.inputMalformed
+        }
+        return (recipient, body)
     }
 
     private var canAccessDatabaseAtDefaultPath: Bool {
@@ -309,4 +452,9 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         )
         return shouldEnable
     }
+}
+
+private struct MessageSubmissionResult: Encodable {
+    let status: String
+    let service: String
 }

@@ -19,7 +19,8 @@ ambiguous result.
 
 ## Decision drivers
 
-- Require explicit user confirmation for every send.
+- Require explicit user confirmation by default, with a deliberate local
+  opt-out for clients that do not support form elicitation.
 - Keep Apple Events authority in the signed app rather than the CLI proxy.
 - Prevent script injection and duplicate sends.
 - Preserve the read-only Messages flow.
@@ -45,10 +46,16 @@ not be appropriate upstream.
 
 ## Decision
 
-Use an actor-serialized, in-process fixed AppleScript handler. Request TCC only
-after form-elicitation confirmation. Pass untrusted values through descriptors,
-dispatch no more than one `send` event, and never retry after dispatch or an
-ambiguous result.
+Use an actor-serialized, in-process fixed AppleScript handler. Require
+form-elicitation confirmation by default. Expose a persistent app setting that
+can disable only the final confirmation step after presenting a destructive
+warning; when disabled, any trusted client can submit immediately with a valid,
+complete tool call. Missing inputs continue to require generic elicitation.
+
+Request TCC only after confirmation when confirmation is enabled, or after
+input validation when the user has explicitly disabled confirmation. Pass
+untrusted values through descriptors, dispatch no more than one `send` event,
+and never retry after dispatch or an ambiguous result.
 
 The initial tool sends plain text by iMessage to one exact canonical phone or
 email handle. It does not resolve contacts, address groups, use SMS/RCS, or
@@ -68,6 +75,8 @@ Descriptor arguments avoid interpolating user-controlled content into source.
 ### Positive
 
 - Permission and confirmation boundaries are explicit.
+- Clients without elicitation can send only after the user explicitly disables
+  the default confirmation requirement in iMCP settings.
 - Tests can replace the automation adapter without touching Messages.
 - No private database or framework writes are required.
 
@@ -77,23 +86,48 @@ Descriptor arguments avoid interpolating user-controlled content into source.
 - Script execution is synchronous and cancellation after dispatch is
   inherently ambiguous.
 - Submission cannot establish delivery.
+- Disabling confirmation delegates authorization to the trusted MCP client;
+  each valid `messages_send` call can immediately cause an external side effect.
 
 ### Risks and mitigations
 
 - Duplicate sends: issue one event and prohibit automatic retry.
+- Confirmation bypass: default to confirmation enabled, require a destructive
+  warning before disabling it, and limit the bypass to the final confirmation
+  rather than missing-input collection or validation.
 - Privacy leakage: exclude recipient and body from logs, errors, and results.
 - Distribution rejection: document Developer ID/notarization uncertainty with
   the maintainer; local development viability is a separate gate.
 
 ## Validation
 
-- Before implementation, sign an ignored development probe with the app
-  sandbox and required entitlements.
-- Preflight a harmless core `get data` event through TCC without sending an
-  Apple Event.
-- Execute only a harmless fixed-handler Messages operation.
-- Unit-test every no-send path and the at-most-one dispatch invariant with
-  fakes.
+On 2026-07-20, an ignored probe and clean app copy were signed with an Apple
+Development identity and Hardened Runtime. Strict signature verification
+passed. Effective entitlements showed App Sandbox and Messages automation only
+on the app; the nested CLI had sandbox inheritance and no Apple Events
+authority.
+
+A no-prompt harmless core `get data` preflight returned consent-required.
+After explicit user approval, prompted preflight succeeded and a fixed handler
+obtained only the Messages application name. The probe contained no send
+command and performed no account, chat, participant, contact, or history
+enumeration. No message was sent.
+
+Automated tests use a fake dispatcher and cover every no-send confirmation
+path, missing-input elicitation, confirmation-disabled behavior, redacted
+results, fixed script source, and the at-most-one dispatch invariant.
+
+The app previously carried an Apple Events exception for Terminal, but no
+production source automates Terminal. Shortcuts invokes its command-line tool
+directly. The unused Terminal exception is removed, leaving Messages as the
+only Apple Events target exception.
+
+An apparent `CSSMERR_TP_NOT_TRUSTED` result was traced to strict verification
+running in a restricted context without login-keychain access. The Apple
+Development leaf chains through the installed WWDR G3 intermediate to the
+Apple root and passed revocation-aware verification. The original strict
+bundle verification passed when repeated with normal keychain access. No
+custom trust setting was added.
 
 ## References
 

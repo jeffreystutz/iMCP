@@ -93,8 +93,18 @@ def main():
                 "params": {"name": "round_trip_test", "arguments": {}},
             },
         )
+        send_line(
+            process.stdin,
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "second_round_trip_test", "arguments": {}},
+            },
+        )
         expect(read_line(app), "method", "notifications/initialized")
         expect(read_line(app), "id", 2)
+        expect(read_line(app), "id", 3)
 
         send_line(
             app,
@@ -118,13 +128,43 @@ def main():
         expect(elicitation, "method", "elicitation/create")
 
         send_line(
+            app,
+            {
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "elicitation/create",
+                "params": {
+                    "mode": "form",
+                    "message": "Confirm the second test operation",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {"confirmed": {"type": "boolean"}},
+                        "required": ["confirmed"],
+                    },
+                },
+            },
+        )
+        second_elicitation = read_line(process.stdout)
+        expect(second_elicitation, "id", 101)
+        expect(second_elicitation, "method", "elicitation/create")
+
+        send_line(
+            process.stdin,
+            {
+                "jsonrpc": "2.0",
+                "id": 101,
+                "result": {"action": "accept", "content": {"confirmed": True}},
+            },
+        )
+        send_line(
             process.stdin,
             {
                 "jsonrpc": "2.0",
                 "id": 100,
-                "result": {"action": "accept", "content": {"confirmed": True}},
+                "result": {"action": "decline"},
             },
         )
+        expect(read_line(app), "id", 101)
         expect(read_line(app), "id", 100)
 
         send_line(
@@ -143,6 +183,23 @@ def main():
         content = call_result["result"]["content"]
         if content[0]["text"] != "originating-call-resumed":
             raise AssertionError("tool result did not return to its originating call")
+
+        send_line(
+            app,
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": {
+                    "content": [{"type": "text", "text": "second-call-resumed"}],
+                    "isError": False,
+                },
+            },
+        )
+        second_call_result = read_line(process.stdout)
+        expect(second_call_result, "id", 3)
+        second_content = second_call_result["result"]["content"]
+        if second_content[0]["text"] != "second-call-resumed":
+            raise AssertionError("second tool result did not return to its originating call")
     finally:
         process.terminate()
         try:

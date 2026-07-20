@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A10400000000000000000001 /* FormElicitationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10200000000000000000001 /* FormElicitationTests.swift */; };
+		B10400000000000000000001 /* MessageSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10200000000000000000001 /* MessageSendTests.swift */; };
 		76F80A6E3EDBFB02048A6ED8 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0E66768348853754D32208C /* Cocoa.framework */; };
 		826C0834A5B647F8A918E54D /* ServiceLifecycle in Frameworks */ = {isa = PBXBuildFile; productRef = DCE061F8A68D0CD546D919E2 /* ServiceLifecycle */; };
 		8DFCE9E4CBCBEB93A32E8560 /* ServiceLifecycleTestKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1CD6B9E157EEC273F178543D /* ServiceLifecycleTestKit */; };
@@ -64,6 +65,7 @@
 
 /* Begin PBXFileReference section */
 		A10200000000000000000001 /* FormElicitationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormElicitationTests.swift; sourceTree = "<group>"; };
+		B10200000000000000000001 /* MessageSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageSendTests.swift; sourceTree = "<group>"; };
 		6A5CFBBEC66BC8CDA9D65496 /* imcp-serverTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "imcp-serverTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		75E148EAC5AC8B3263C5AA13 /* ServiceGroupConfigurationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ServiceGroupConfigurationTests.swift; sourceTree = "<group>"; };
 		E0E66768348853754D32208C /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
@@ -159,6 +161,7 @@
 			isa = PBXGroup;
 			children = (
 				A10200000000000000000001 /* FormElicitationTests.swift */,
+				B10200000000000000000001 /* MessageSendTests.swift */,
 			);
 			path = AppTests;
 			sourceTree = "<group>";
@@ -349,6 +352,7 @@
 			files = (
 				930214FCD680D7D74158F215 /* ServiceGroupConfigurationTests.swift in Sources */,
 				A10400000000000000000001 /* FormElicitationTests.swift in Sources */,
+				B10400000000000000000001 /* MessageSendTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -678,6 +682,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = R7AYS6Z734;
+				ENABLE_HARDENED_RUNTIME = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.loopwork.imcp-server";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -695,6 +700,7 @@
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=macosx*]" = TTY35UM57S;
+				ENABLE_HARDENED_RUNTIME = YES;
 				MACOSX_DEPLOYMENT_TARGET = 15.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.loopwork.imcp-server";
 				PRODUCT_NAME = "$(TARGET_NAME)";

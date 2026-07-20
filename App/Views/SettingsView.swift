@@ -66,7 +66,10 @@ struct SettingsView: View {
 
 struct GeneralSettingsView: View {
     @ObservedObject var serverController: ServerController
+    @AppStorage(messagesSendConfirmationRequiredKey)
+    private var messagesSendConfirmationRequired = true
     @State private var showingResetAlert = false
+    @State private var showingDisableConfirmationAlert = false
     @State private var selectedClients = Set<String>()
 
     private var trustedClients: [String] {
@@ -75,6 +78,32 @@ struct GeneralSettingsView: View {
 
     var body: some View {
         Form {
+            Section("Message Sending") {
+                Toggle(
+                    "Require confirmation before sending",
+                    isOn: Binding(
+                        get: { messagesSendConfirmationRequired },
+                        set: { enabled in
+                            if enabled {
+                                messagesSendConfirmationRequired = true
+                            } else {
+                                showingDisableConfirmationAlert = true
+                            }
+                        }
+                    )
+                )
+
+                Text(
+                    messagesSendConfirmationRequired
+                        ? "Each message requires confirmation through MCP form elicitation. Clients without form elicitation cannot send."
+                        : "Confirmation is disabled. Any trusted MCP client can submit a message immediately when it calls messages_send."
+                )
+                .font(.caption)
+                .foregroundStyle(
+                    messagesSendConfirmationRequired ? Color.secondary : Color.red
+                )
+            }
+
             Section {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
@@ -137,6 +166,16 @@ struct GeneralSettingsView: View {
         } message: {
             Text(
                 "This will remove all trusted clients. They will need to be approved again when connecting."
+            )
+        }
+        .alert("Disable Message Confirmation?", isPresented: $showingDisableConfirmationAlert) {
+            Button("Keep Enabled", role: .cancel) {}
+            Button("Disable Confirmation", role: .destructive) {
+                messagesSendConfirmationRequired = false
+            }
+        } message: {
+            Text(
+                "Any trusted MCP client will be able to submit an iMessage immediately without a separate confirmation prompt."
             )
         }
     }

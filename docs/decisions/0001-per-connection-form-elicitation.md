@@ -84,4 +84,3 @@ remaining a small extension of the existing Tool and Service models.
 
 - MCP 2025-11-25 elicitation specification
 - MCP Swift SDK 0.12.0 `CreateElicitation` and `Server.requestElicitation`
-

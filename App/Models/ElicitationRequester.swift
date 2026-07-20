@@ -64,21 +64,78 @@ struct MCPFormElicitationRequester: ElicitationRequester {
             throw ElicitationRequestError.formUnsupported
         }
 
-        return try await withThrowingTaskGroup(of: CreateElicitation.Result.self) { group in
-            group.addTask {
-                try await request(message, schema)
+        let race = ElicitationResultRace()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                race.install(continuation)
+                Task {
+                    do {
+                        race.resolve(.success(try await request(message, schema)))
+                    } catch {
+                        race.resolve(.failure(error))
+                    }
+                }
+                let timeoutTask = Task {
+                    do {
+                        try await Task.sleep(for: timeout)
+                        race.resolve(.failure(ElicitationRequestError.timedOut))
+                    } catch {
+                        // The request completed first and cancelled this timer.
+                    }
+                }
+                race.installTimeoutTask(timeoutTask)
             }
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                throw ElicitationRequestError.timedOut
-            }
-
-            defer { group.cancelAll() }
-            guard let result = try await group.next() else {
-                throw MCPError.internalError("Elicitation request ended without a result")
-            }
-            return result
+        } onCancel: {
+            race.resolve(.failure(CancellationError()))
         }
+    }
+}
+
+private final class ElicitationResultRace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<CreateElicitation.Result, Error>?
+    private var completedResult: Result<CreateElicitation.Result, Error>?
+    private var timeoutTask: Task<Void, Never>?
+
+    func install(_ continuation: CheckedContinuation<CreateElicitation.Result, Error>) {
+        let result: Result<CreateElicitation.Result, Error>? = lock.withLock {
+            if let completedResult {
+                return completedResult
+            }
+            self.continuation = continuation
+            return nil
+        }
+        if let result {
+            continuation.resume(with: result)
+        }
+    }
+
+    func installTimeoutTask(_ task: Task<Void, Never>) {
+        let shouldCancel = lock.withLock {
+            if completedResult != nil {
+                return true
+            }
+            timeoutTask = task
+            return false
+        }
+        if shouldCancel { task.cancel() }
+    }
+
+    func resolve(_ result: Result<CreateElicitation.Result, Error>) {
+        let state:
+            (
+                CheckedContinuation<CreateElicitation.Result, Error>?,
+                Task<Void, Never>?
+            )? = lock.withLock {
+                guard completedResult == nil else { return nil }
+                completedResult = result
+                let state = (continuation, timeoutTask)
+                continuation = nil
+                timeoutTask = nil
+                return state
+            }
+        state?.1?.cancel()
+        state?.0?.resume(with: result)
     }
 }
 

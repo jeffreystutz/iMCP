@@ -3,10 +3,10 @@
 ## Status
 
 This document records the approved architecture and delivery sequence for safe
-Apple Messages write support. PR 1 is implemented on the working branch;
-Track B is scaffolded but remains blocked on a valid Apple Development signing
-identity. Verified repository facts are separated from platform behavior that
-still requires a signed experiment.
+Apple Messages write support. Generic form elicitation and the narrow direct
+send implementation are combined on the working branch. Track B succeeded
+locally. Verified repository facts remain separate from unresolved upstream
+distribution questions.
 
 ## Verified baseline
 
@@ -104,14 +104,20 @@ upstream release, but it does not gate local implementation. No external
 notarization is attempted without explicit authorization and appropriate
 credentials.
 
-The ignored probe now compiles as a sandboxed app bundle with stable local
+The ignored probe compiles as a sandboxed app bundle with stable local
 bundle identifier `com.loopwork.imcp.messages-automation-probe`. Its fixed
 script only obtains the Messages application name, and its arguments are inert
-probe strings passed as Apple Event descriptors. On 2026-07-20,
-`security find-identity -v -p codesigning` reported no valid identities.
-Consequently Apple Development signing, effective-entitlement inspection,
-TCC preflight, and harmless automation have not yet been run. PR 2 remains
-gated until a local identity is installed and those checks pass.
+probe strings passed as Apple Event descriptors. On 2026-07-20, an Apple
+Development-signed probe and clean app copy both passed strict signature
+verification with Hardened Runtime enabled. The effective app entitlements
+contained App Sandbox, Apple Events automation, and an exception limited to
+`com.apple.MobileSMS`. The nested CLI contained only App Sandbox inheritance
+in the experiment and no automation entitlement or Messages exception.
+
+No-prompt TCC preflight returned consent-required. After the user approved the
+macOS Automation prompt, prompted preflight returned success and the harmless
+fixed handler obtained only the Messages application name. No message was sent
+and no account, chat, participant, contact, or history enumeration occurred.
 
 ## First send behavior
 
@@ -122,10 +128,13 @@ iMessage only.
 The tool:
 
 - may elicit missing input, then validates the effective values;
-- always performs a separate form-elicitation confirmation;
+- performs a separate form-elicitation confirmation by default;
+- permits an explicit, persistent app-local opt-out with a destructive warning
+  for clients that do not support form elicitation;
 - fails closed for unsupported, declined, cancelled, malformed, or timed-out
   elicitation;
-- requests TCC only after confirmation;
+- requests TCC only after confirmation, or after validation when confirmation
+  has been explicitly disabled;
 - passes recipient and body as Apple Event descriptors to a fixed in-process
   handler;
 - dispatches at most one send event and never retries after dispatch or an
@@ -158,23 +167,23 @@ a third-party notice and identify the adapted source.
 
 ## Pull request sequence
 
-1. **Per-connection form elicitation.** Add the call context, form requester,
-   capability checks, unit tests, a production-proxy round-trip test, the
-   Proposed elicitation ADR, and CI test execution. Depends only on the verified
-   baseline.
-2. **Direct confirmed iMessage send.** Add the local typed errors, fixed
-   AppleScript adapter, entitlements and usage description, mandatory
-   confirmation, minimal JSON text result, redacted logging, tests, and the
-   Proposed Messages automation ADR. Depends on PR 1 and a successful local
-   Track B experiment.
-3. **Generic structured tool outputs.** Forward optional output schemas and
-   structured content while retaining JSON text compatibility. Depends on PR 2.
-4. **URL elicitation and broader compatibility.** Extend the requester to URL
+1. **Combined form elicitation and direct iMessage send.** Add the
+   per-connection call context and requester, proxy round-trip coverage, local
+   typed send errors, fixed AppleScript adapter, entitlements and usage
+   description, default-on confirmation with an explicit local opt-out,
+   minimal JSON text result, redacted
+   logging, tests, and both Proposed ADRs. The direct-send portion depends on a
+   successful local Track B experiment. Do not open the PR until requested.
+2. **Generic structured tool outputs.** Forward optional output schemas and
+   structured content while retaining JSON text compatibility. Depends on the
+   combined first PR.
+3. **URL elicitation and broader compatibility.** Extend the requester to URL
    mode, add completion correlation, extract pure proxy framing, and expand the
-   client compatibility matrix. Depends on PR 1 but follows PR 3 in delivery.
-5. **Native contact resolution.** Use Contacts APIs and form elicitation for
+   client compatibility matrix. Depends on the combined first PR but follows
+   structured-output support in delivery.
+4. **Native contact resolution.** Use Contacts APIs and form elicitation for
    ambiguity; do not query private AddressBook databases.
-6. **Explicit groups and additional services.** Add only after separate
+5. **Explicit groups and additional services.** Add only after separate
    experiments; never silently fall back or issue more than one send event.
 
 ## Unresolved upstream questions
@@ -183,3 +192,10 @@ a third-party notice and identify the adapted source.
   Messages temporary Apple Events exception.
 - The exact form-mode capabilities advertised by each supported MCP client.
 - Messages participant lookup behavior across supported macOS versions.
+
+The earlier `CSSMERR_TP_NOT_TRUSTED` result was caused by running `codesign`
+inside a restricted execution context that could not consult the login
+keychain. The Apple Development leaf, WWDR G3 intermediate, and Apple root all
+validated, including revocation checks. Repeating the original strict
+verification with normal keychain access passed; no trust settings were added
+or weakened.

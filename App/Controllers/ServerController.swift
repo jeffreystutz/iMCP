@@ -468,12 +468,14 @@ actor MCPConnectionManager {
                     await self.parentManager.removeConnection(self.connectionID)
                     throw MCPError.connectionClosed
                 }
+
+                // Client capabilities are only available while handling initialize.
+                // Register this connection's handlers before initialization completes so
+                // the client's first tools/list request can be served.
+                await self.registerHandlers()
             }
 
             log.notice("MCP Server started successfully for connection: \(self.connectionID)")
-
-            // Register handlers after successful approval.
-            await registerHandlers()
 
             // Monitor connection health for early disconnects.
             await startHealthMonitoring()
