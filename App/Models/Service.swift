@@ -15,9 +15,13 @@ extension Service {
 
     func activate() async throws {}
 
-    func call(tool name: String, with arguments: [String: Value]) async throws -> Value? {
+    func call(
+        tool name: String,
+        with arguments: [String: Value],
+        context: ToolCallContext
+    ) async throws -> Value? {
         for tool in tools where tool.name == name {
-            return try await tool.callAsFunction(arguments)
+            return try await tool.callAsFunction(arguments, context: context)
         }
 
         return nil

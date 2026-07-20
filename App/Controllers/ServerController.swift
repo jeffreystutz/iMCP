@@ -423,6 +423,7 @@ actor MCPConnectionManager {
     private let server: MCP.Server
     private var transport: NetworkTransport
     private let parentManager: ServerNetworkManager
+    private var clientCapabilities: MCP.Client.Capabilities?
 
     init(connectionID: UUID, connection: NWConnection, parentManager: ServerNetworkManager) {
         self.connectionID = connectionID
@@ -453,6 +454,8 @@ actor MCPConnectionManager {
             try await server.start(transport: transport) { [weak self] clientInfo, capabilities in
                 guard let self = self else { throw MCPError.connectionClosed }
 
+                await self.setClientCapabilities(capabilities)
+
                 log.info("Received initialize request from client: \(clientInfo.name)")
 
                 // Request user approval for the connection.
@@ -481,7 +484,26 @@ actor MCPConnectionManager {
     }
 
     private func registerHandlers() async {
-        await parentManager.registerHandlers(for: server, connectionID: connectionID)
+        guard let clientCapabilities else {
+            log.error("Cannot register handlers before client capabilities are available")
+            return
+        }
+
+        let context = ToolCallContext(
+            elicitation: MCPFormElicitationRequester(
+                server: server,
+                clientCapabilities: clientCapabilities
+            )
+        )
+        await parentManager.registerHandlers(
+            for: server,
+            connectionID: connectionID,
+            context: context
+        )
+    }
+
+    private func setClientCapabilities(_ capabilities: MCP.Client.Capabilities) {
+        clientCapabilities = capabilities
     }
 
     private func startHealthMonitoring() async {
@@ -852,7 +874,11 @@ actor ServerNetworkManager {
         }
     }
 
-    func registerHandlers(for server: MCP.Server, connectionID: UUID) async {
+    func registerHandlers(
+        for server: MCP.Server,
+        connectionID: UUID,
+        context: ToolCallContext
+    ) async {
         await server.withMethodHandler(ListPrompts.self) { _ in
             log.debug("Handling ListPrompts request for \(connectionID)")
             return ListPrompts.Result(prompts: [])
@@ -933,7 +959,8 @@ actor ServerNetworkManager {
                         guard
                             let value = try await service.call(
                                 tool: params.name,
-                                with: params.arguments ?? [:]
+                                with: params.arguments ?? [:],
+                                context: context
                             )
                         else {
                             continue

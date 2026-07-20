@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10400000000000000000001 /* FormElicitationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10200000000000000000001 /* FormElicitationTests.swift */; };
 		76F80A6E3EDBFB02048A6ED8 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0E66768348853754D32208C /* Cocoa.framework */; };
 		826C0834A5B647F8A918E54D /* ServiceLifecycle in Frameworks */ = {isa = PBXBuildFile; productRef = DCE061F8A68D0CD546D919E2 /* ServiceLifecycle */; };
 		8DFCE9E4CBCBEB93A32E8560 /* ServiceLifecycleTestKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1CD6B9E157EEC273F178543D /* ServiceLifecycleTestKit */; };
@@ -27,6 +28,16 @@
 		F8F1D2F82D6F9E0C00F6323D /* MCP in Frameworks */ = {isa = PBXBuildFile; productRef = F8F44E9C2D5903F70075D79C /* MCP */; };
 		F9E9902DC72D90F6C423EFE2 /* Logging in Frameworks */ = {isa = PBXBuildFile; productRef = 48ABEE9E6903427DD79096A1 /* Logging */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A10000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F8F44E652D59038D0075D79C /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F8F44E6C2D59038D0075D79C;
+			remoteInfo = iMCP;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
 		F84900952D63C74F0044AA81 /* Copy Executables */ = {
@@ -52,6 +63,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A10200000000000000000001 /* FormElicitationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormElicitationTests.swift; sourceTree = "<group>"; };
 		6A5CFBBEC66BC8CDA9D65496 /* imcp-serverTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "imcp-serverTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		75E148EAC5AC8B3263C5AA13 /* ServiceGroupConfigurationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ServiceGroupConfigurationTests.swift; sourceTree = "<group>"; };
 		E0E66768348853754D32208C /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
@@ -143,6 +155,14 @@
 			path = CLITests;
 			sourceTree = "<group>";
 		};
+		A10600000000000000000001 /* AppTests */ = {
+			isa = PBXGroup;
+			children = (
+				A10200000000000000000001 /* FormElicitationTests.swift */,
+			);
+			path = AppTests;
+			sourceTree = "<group>";
+		};
 		F53ADAE0D917F06C8D01D825 /* OS X */ = {
 			isa = PBXGroup;
 			children = (
@@ -159,6 +179,7 @@
 				F8F44E6E2D59038D0075D79C /* Products */,
 				13058B0C8A894B6DB0A7D2A8 /* Frameworks */,
 				9784E568F0621136136A0EAC /* CLITests */,
+				A10600000000000000000001 /* AppTests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -186,6 +207,7 @@
 			buildRules = (
 			);
 			dependencies = (
+				A10100000000000000000001 /* PBXTargetDependency */,
 			);
 			name = "imcp-serverTests";
 			packageProductDependencies = (
@@ -326,6 +348,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				930214FCD680D7D74158F215 /* ServiceGroupConfigurationTests.swift in Sources */,
+				A10400000000000000000001 /* FormElicitationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -345,36 +368,48 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		A10100000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F8F44E6C2D59038D0075D79C /* iMCP */;
+			targetProxy = A10000000000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
 		730CCB1C20FB35151860DD40 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
 				ENABLE_TESTING_SEARCH_PATHS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundlePackageType = BNDL;
-				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "me.mattt.iMCP.imcp-serverTests";
 				PRODUCT_MODULE_NAME = imcp_serverTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/iMCP.app/Contents/MacOS/iMCP";
 			};
 			name = Release;
 		};
 		8E4FC3A465C4E80757FEFE6B /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
 				ENABLE_TESTING_SEARCH_PATHS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundlePackageType = BNDL;
-				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "me.mattt.iMCP.imcp-serverTests";
 				PRODUCT_MODULE_NAME = imcp_serverTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/iMCP.app/Contents/MacOS/iMCP";
 			};
 			name = Debug;
 		};

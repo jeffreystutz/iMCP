@@ -6,6 +6,7 @@ import SystemPackage
 
 import struct Foundation.Data
 import class Foundation.RunLoop
+import class Foundation.ProcessInfo
 
 var log = Logger(label: "me.mattt.iMCP.server") { StreamLogHandler.standardError(label: $0) }
 #if DEBUG
@@ -479,98 +480,112 @@ actor MCPService: Service {
             do {
                 await log.info("Starting Bonjour service discovery...")
 
-                let browser = NWBrowser(
-                    for: .bonjour(type: serviceType, domain: nil),
-                    using: parameters
-                )
-                self.browser = browser
+                #if DEBUG
+                    let testPort = ProcessInfo.processInfo.environment["IMCP_TEST_PORT"]
+                        .flatMap(UInt16.init)
+                        .flatMap(NWEndpoint.Port.init(rawValue:))
+                #else
+                    let testPort: NWEndpoint.Port? = nil
+                #endif
 
-                // Find and connect to iMCP app with improved reliability
-                let endpoint: NWEndpoint = try await withCheckedThrowingContinuation {
-                    continuation in
-                    let connectionState = ConnectionState()
+                let endpoint: NWEndpoint
+                if let testPort {
+                    endpoint = .hostPort(host: "127.0.0.1", port: testPort)
+                    await log.debug("Using loopback endpoint override")
+                } else {
+                    let browser = NWBrowser(
+                        for: .bonjour(type: serviceType, domain: nil),
+                        using: parameters
+                    )
+                    self.browser = browser
 
-                    // Set up a timeout task to ensure we don't wait forever
-                    let timeoutTask = Task {
-                        // Allow 30 seconds to find the service
-                        try await Task.sleep(for: .seconds(30))
+                    // Find and connect to iMCP app with improved reliability
+                    endpoint = try await withCheckedThrowingContinuation {
+                        continuation in
+                        let connectionState = ConnectionState()
 
-                        // If we haven't found a service by now, resume with an error
-                        if await connectionState.checkAndSetResumed() {
-                            await log.error("Bonjour service discovery timed out after 30 seconds")
-                            continuation.resume(
-                                throwing: MCPError.internalError("Service discovery timeout")
-                            )
+                        // Set up a timeout task to ensure we don't wait forever
+                        let timeoutTask = Task {
+                            // Allow 30 seconds to find the service
+                            try await Task.sleep(for: .seconds(30))
+
+                            // If we haven't found a service by now, resume with an error
+                            if await connectionState.checkAndSetResumed() {
+                                await log.error("Bonjour service discovery timed out after 30 seconds")
+                                continuation.resume(
+                                    throwing: MCPError.internalError("Service discovery timeout")
+                                )
+                            }
                         }
-                    }
 
-                    // Convert async handlers to sync handlers
-                    browser.stateUpdateHandler = { state in
+                        // Convert async handlers to sync handlers
+                        browser.stateUpdateHandler = { state in
+                            Task {
+                                switch state {
+                                case .failed(let error):
+                                    await log.error("Browser failed: \(error)")
+                                    if await connectionState.checkAndSetResumed() {
+                                        timeoutTask.cancel()
+                                        browser.cancel()
+                                        continuation.resume(throwing: error)
+                                    }
+                                case .ready:
+                                    await log.info("Browser is ready and searching for services")
+                                case .waiting(let error):
+                                    await log.warning("Browser is waiting: \(error)")
+                                default:
+                                    await log.debug("Browser state changed: \(state)")
+                                }
+                            }
+                        }
+
+                        browser.browseResultsChangedHandler = { results, changes in
+                            Task {
+                                await log.debug("Found \(results.count) Bonjour services")
+
+                                // Log all discovered services for debugging
+                                for (index, result) in results.enumerated() {
+                                    await log.debug("Service \(index + 1): \(result.endpoint)")
+                                }
+
+                                // If we have results, select the most appropriate one
+                                if !results.isEmpty {
+                                    // First, try to find a service with "iMCP" in the endpoint description
+                                    let imcpServices = results.filter {
+                                        String(describing: $0.endpoint).contains("iMCP")
+                                    }
+
+                                    let selectedService: NWBrowser.Result
+
+                                    if !imcpServices.isEmpty {
+                                        // Prefer services with iMCP in the description
+                                        selectedService = imcpServices.first!
+                                        await log.info(
+                                            "Selected iMCP service: \(selectedService.endpoint)"
+                                        )
+                                    } else {
+                                        // Fall back to the first available service
+                                        selectedService = results.first!
+                                        await log.info(
+                                            "No specific iMCP service found, using: \(selectedService.endpoint)"
+                                        )
+                                    }
+
+                                    if await connectionState.checkAndSetResumed() {
+                                        timeoutTask.cancel()
+                                        browser.cancel()
+                                        await log.info("Selected endpoint: \(selectedService.endpoint)")
+                                        continuation.resume(returning: selectedService.endpoint)
+                                    }
+                                }
+                            }
+                        }
+
                         Task {
-                            switch state {
-                            case .failed(let error):
-                                await log.error("Browser failed: \(error)")
-                                if await connectionState.checkAndSetResumed() {
-                                    timeoutTask.cancel()
-                                    browser.cancel()
-                                    continuation.resume(throwing: error)
-                                }
-                            case .ready:
-                                await log.info("Browser is ready and searching for services")
-                            case .waiting(let error):
-                                await log.warning("Browser is waiting: \(error)")
-                            default:
-                                await log.debug("Browser state changed: \(state)")
-                            }
+                            await log.info("Starting Bonjour browser to discover MCP services...")
                         }
+                        browser.start(queue: .main)
                     }
-
-                    browser.browseResultsChangedHandler = { results, changes in
-                        Task {
-                            await log.debug("Found \(results.count) Bonjour services")
-
-                            // Log all discovered services for debugging
-                            for (index, result) in results.enumerated() {
-                                await log.debug("Service \(index + 1): \(result.endpoint)")
-                            }
-
-                            // If we have results, select the most appropriate one
-                            if !results.isEmpty {
-                                // First, try to find a service with "iMCP" in the endpoint description
-                                let imcpServices = results.filter {
-                                    String(describing: $0.endpoint).contains("iMCP")
-                                }
-
-                                let selectedService: NWBrowser.Result
-
-                                if !imcpServices.isEmpty {
-                                    // Prefer services with iMCP in the description
-                                    selectedService = imcpServices.first!
-                                    await log.info(
-                                        "Selected iMCP service: \(selectedService.endpoint)"
-                                    )
-                                } else {
-                                    // Fall back to the first available service
-                                    selectedService = results.first!
-                                    await log.info(
-                                        "No specific iMCP service found, using: \(selectedService.endpoint)"
-                                    )
-                                }
-
-                                if await connectionState.checkAndSetResumed() {
-                                    timeoutTask.cancel()
-                                    browser.cancel()
-                                    await log.info("Selected endpoint: \(selectedService.endpoint)")
-                                    continuation.resume(returning: selectedService.endpoint)
-                                }
-                            }
-                        }
-                    }
-
-                    Task {
-                        await log.info("Starting Bonjour browser to discover MCP services...")
-                    }
-                    browser.start(queue: .main)
                 }
 
                 await log.info("Creating connection to endpoint...")

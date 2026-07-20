@@ -41,4 +41,10 @@ jobs:
               run: swift format lint --strict --recursive .
 
             - name: Build
-              run: xcodebuild -quiet -scheme iMCP -configuration Debug -destination "platform=macOS" build
+              run: xcodebuild -quiet -scheme iMCP -configuration Debug -destination "platform=macOS" -derivedDataPath .build/DerivedData build
+
+            - name: Test
+              run: xcodebuild -quiet -scheme imcp-serverTests -configuration Debug -destination "platform=macOS" -derivedDataPath .build/DerivedData test
+
+            - name: Test elicitation proxy round trip
+              run: python3 CLITests/test_elicitation_proxy.py .build/DerivedData/Build/Products/Debug/iMCP.app/Contents/MacOS/imcp-server
