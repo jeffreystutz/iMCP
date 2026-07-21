@@ -149,6 +149,84 @@ is preserved.
 Tool annotations are `readOnlyHint: false`, `destructiveHint: false`,
 `idempotentHint: false`, and `openWorldHint: true`.
 
+## Read-only conversation listing
+
+The conversation listing has been expanded into a schema-resilient summary and
+full index. See [Messages conversation index](messages-conversation-index.md)
+and Proposed ADR 0005 for the current schema, field, aggregate, performance,
+availability, privacy, and identifier semantics.
+
+The selected tool name is `messages_list_chats`, following the existing
+`messages_fetch` and `messages_send` service prefix. It performs only a
+read-only SQLite query and does not invoke Apple Events, launch Messages, or
+change any send behavior.
+
+Input schema:
+
+- `limit`: optional integer, default `30`, minimum `1`, maximum `100`;
+- `kind`: optional string enum, `direct` or `group`;
+- `detail`: optional string enum, `summary` (default) or `full`; and
+- no additional properties.
+
+Output contains `detail`, a field-level `metadataAvailability` map, and a
+`chats` array. Summary records preserve the opaque `id`, display name, kind,
+participant count, service, and latest activity fields, and compatibly add
+`chatId`, database chat identity metadata, archive/filter/read state, and
+deterministically sorted remote membership records. Full detail adds bounded
+message-state, count, attachment, reply, reaction-event, edit, retraction,
+effect, and plugin aggregates without selecting message bodies or private file
+metadata. The exact field and zero/null/unavailable semantics are maintained in
+the dedicated conversation-index documentation rather than duplicated here.
+
+The query returns most recently active chats first, places chats without
+activity last, and counts duplicate participant joins once. A participant
+count greater than one is classified as group; zero or one is classified as
+direct. The count and returned membership exclude the current user. That
+classification reflects the observed Messages schema and remains a documented
+limitation for unusual database states.
+
+Chat listing uses a separate, read-only security-scoped bookmark for the
+user-selected Messages directory. This scope is required because a live SQLite
+read may need `chat.db-wal` and `chat.db-shm` beside `chat.db`; the older
+single-file bookmark remains unchanged for `messages_fetch`. The repository
+opens the database read-only, enables SQLite `query_only`, and does not use
+`immutable=1`, which could omit recent WAL-backed activity. Failures record
+only a fixed operation stage and numeric SQLite result code, never paths, SQL,
+or returned metadata. See Proposed ADR 0004.
+
+The identifier is `imcp-chat-v1_` followed by an unpadded base64url HMAC-SHA256
+of the unique Messages `chat.guid`, keyed by a random app-local value persisted
+in iMCP defaults. It is opaque API data and does not reveal a GUID that may
+embed a participant handle; it is not an authorization token. It avoids
+exposing a SQLite `ROWID`, is deterministic across calls, MCP reconnects, and
+iMCP restarts while both the key and underlying GUID are unchanged, and
+resolves direct and group chats by deriving identifiers for current GUIDs and
+requiring exactly one match. Invalid versions/encoding and stale identifiers
+fail closed.
+
+Deterministic construction with the same persisted key verifies reconnect and
+iMCP-restart behavior without a mutable identifier registry. Clearing iMCP
+defaults or reinstalling the app rotates the key and invalidates prior IDs.
+Persistence across Messages.app restarts, macOS reboots, and Messages database
+migrations has not been experimentally verified and is not guaranteed. A
+future chat-targeted send feature must validate and resolve the opaque
+identifier against the current database immediately before its separately
+confirmed dispatch; it must not treat the identifier as executable input or
+reuse it without a current existence check. See Proposed ADR 0003.
+
+Known limitations: no fuzzy search, contact resolution, message previews,
+pagination cursor, chat creation, or routing behavior is included. Mention and
+screened-state aggregates remain explicitly unavailable because the inspected
+columns do not establish the requested semantics. Unnamed groups may omit
+`displayName`. Existing installations must
+grant the directory-scoped permission once; granting only the legacy `chat.db`
+permission is insufficient for the live database family. When Messages is
+already enabled, a versioned startup migration explains that conversation
+listing needs the additional folder scope and offers the folder picker once.
+Fresh Messages activation presents the same explanation. Choosing “Not Now”
+preserves existing fetch and send configuration; chat listing remains
+unavailable and requests the permission when invoked.
+
 ## Reference implementation
 
 The direct-send automation was informed by Carter LaSalle's MIT-licensed

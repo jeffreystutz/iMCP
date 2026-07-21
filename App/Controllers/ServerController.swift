@@ -297,6 +297,10 @@ final class ServerController: ObservableObject {
                     }
                 }
             }
+
+            if self.messagesEnabled {
+                await MessageService.shared.performDirectoryAccessUpgradeIfNeeded()
+            }
         }
     }
 
