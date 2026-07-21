@@ -146,6 +146,34 @@ The first version has no contact lookup, normalization, groups, attachments,
 SMS, RCS, fallback, or delivery tracking. Existing `messages_fetch` behavior
 is preserved.
 
+The existing-chat extension adds optional `chat_id` input while preserving the
+recipient path. After missing-input elicitation, exactly one of `recipient` or
+`chat_id` must be present. A chat ID must be the opaque value returned by
+`messages_list_chats`; raw GUIDs, group IDs, chat identifiers, service names,
+and scripting expressions are not accepted from callers.
+
+Chat sends resolve the opaque ID to current display/room, direct/group,
+participant, service, and database GUID metadata before confirmation. Unlike
+recipient sends, their confirmation cannot be disabled and shows the selected
+conversation plus the exact body. The same opaque ID is resolved again after
+acceptance, and all confirmed metadata must still match before dispatch.
+
+Messages' public scripting dictionary defines `chat.id` as the chat GUID and
+allows `send` to a chat. A signed, sandboxed, ignored no-send probe compared up
+to ten recent database chats in each known service/kind category. Only
+`chat.guid` mapped to scripting `chat.id`; chat identifiers and group IDs did
+not. Tested recent direct iMessage, SMS, and RCS chats and iMessage groups
+resolved uniquely. Some older SMS/RCS group database rows were not present in
+the scripting chat collection, so production fails those targets without
+recipient fallback.
+
+The fixed handler receives GUID and body only as Apple Event descriptors,
+requires exactly one scripting chat before its single `send`, and never
+retries or falls back. Chat success returns only `status: submitted` and
+`service: Messages`; it does not claim delivery or expose routing metadata.
+Actual route preservation and post-dispatch behavior remain manual-verification
+items because the experiment deliberately sent nothing.
+
 Tool annotations are `readOnlyHint: false`, `destructiveHint: false`,
 `idempotentHint: false`, and `openWorldHint: true`.
 

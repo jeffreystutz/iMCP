@@ -80,7 +80,7 @@ struct GeneralSettingsView: View {
         Form {
             Section("Message Sending") {
                 Toggle(
-                    "Require confirmation before sending",
+                    "Require confirmation for direct recipients",
                     isOn: Binding(
                         get: { messagesSendConfirmationRequired },
                         set: { enabled in
@@ -95,8 +95,8 @@ struct GeneralSettingsView: View {
 
                 Text(
                     messagesSendConfirmationRequired
-                        ? "Each message requires confirmation through MCP form elicitation. Clients without form elicitation cannot send."
-                        : "Confirmation is disabled. Any trusted MCP client can submit a message immediately when it calls messages_send."
+                        ? "Every send requires MCP form confirmation."
+                        : "Trusted clients may send immediately to exact recipient handles. Existing-chat sends still require confirmation."
                 )
                 .font(.caption)
                 .foregroundStyle(
@@ -168,14 +168,14 @@ struct GeneralSettingsView: View {
                 "This will remove all trusted clients. They will need to be approved again when connecting."
             )
         }
-        .alert("Disable Message Confirmation?", isPresented: $showingDisableConfirmationAlert) {
+        .alert("Disable Direct Recipient Confirmation?", isPresented: $showingDisableConfirmationAlert) {
             Button("Keep Enabled", role: .cancel) {}
             Button("Disable Confirmation", role: .destructive) {
                 messagesSendConfirmationRequired = false
             }
         } message: {
             Text(
-                "Any trusted MCP client will be able to submit an iMessage immediately without a separate confirmation prompt."
+                "Any trusted MCP client may submit an iMessage to an exact recipient handle without a separate confirmation prompt. Existing-chat sends still require confirmation."
             )
         }
     }

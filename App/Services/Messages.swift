@@ -316,18 +316,23 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         Tool(
             name: "messages_send",
             description:
-                "Submit one plain-text iMessage to one exact phone number or email address. Confirmation behavior is controlled by iMCP settings.",
+                "Submit one plain-text message to either one exact recipient handle or one existing Messages conversation identified by messages_list_chats. Existing-chat sends always require confirmation.",
             inputSchema: .object(
                 properties: [
                     "recipient": .string(
                         description: "One exact E.164 phone number or email address"
+                    ),
+                    "chat_id": .string(
+                        description:
+                            "Opaque chat ID returned by messages_list_chats; do not supply a database or scripting identifier",
+                        minLength: 1
                     ),
                     "body": .string(
                         description: "Plain-text message body",
                         minLength: 1
                     ),
                 ],
-                required: ["recipient", "body"],
+                required: ["body"],
                 additionalProperties: false
             ),
             annotations: .init(
@@ -338,28 +343,45 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 openWorldHint: true
             )
         ) { arguments, context in
-            let (recipient, body) = try await self.resolveSendInput(
+            let input = try await self.resolveSendInput(
                 arguments,
                 context: context
             )
-            guard recipient.isExactMessageHandle else {
-                throw MessageSendError.invalidRecipient
-            }
-            guard !body.isEmpty else {
+            guard !input.body.isEmpty else {
                 throw MessageSendError.emptyBody
             }
 
-            if self.requiresSendConfirmation() {
+            let initialChat: MessagesResolvedChatDestination?
+            switch input.destination {
+            case .recipient:
+                initialChat = nil
+            case .chat(let chatID):
+                initialChat = try await self.resolveSendChat(chatID)
+            }
+
+            if initialChat != nil || self.requiresSendConfirmation() {
+                let confirmationMessage: String
+                let confirmationTitle: String
+                if let initialChat {
+                    confirmationMessage = self.chatConfirmationMessage(
+                        initialChat,
+                        body: input.body
+                    )
+                    confirmationTitle = "Confirm existing-chat submission"
+                } else {
+                    confirmationMessage =
+                        "Submit this iMessage to Messages? Recipient and message text are intentionally omitted."
+                    confirmationTitle = "Confirm iMessage submission"
+                }
                 let confirmation = try await context.elicitation.requestForm(
-                    message:
-                        "Submit this iMessage to Messages? Recipient and message text are intentionally omitted.",
+                    message: confirmationMessage,
                     schema: .init(
-                        title: "Confirm iMessage submission",
+                        title: confirmationTitle,
                         properties: [
                             "confirmed": .object([
                                 "type": .string("boolean"),
                                 "description": .string(
-                                    "Confirm that Messages should submit this iMessage"
+                                    "Confirm that Messages should submit this message"
                                 ),
                             ])
                         ],
@@ -382,9 +404,27 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             }
 
             try Task.checkCancellation()
-            try await self.sender.submit(recipient: recipient, body: body)
-            log.notice("Messages accepted one iMessage submission")
-            return MessageSubmissionResult(status: "submitted", service: "iMessage")
+            switch input.destination {
+            case .recipient(let recipient):
+                try await self.sender.submit(recipient: recipient, body: input.body)
+                log.notice("Messages accepted one submission destination=recipient")
+                return MessageSubmissionResult(status: "submitted", service: "iMessage")
+            case .chat(let chatID):
+                guard let initialChat else { throw MessageSendError.staleChatIdentifier }
+                let revalidatedChat = try await self.resolveSendChat(chatID)
+                guard revalidatedChat == initialChat else {
+                    throw MessageSendError.staleChatIdentifier
+                }
+                try Task.checkCancellation()
+                try await self.sender.submit(
+                    chatGUID: revalidatedChat.chatGuid,
+                    body: input.body
+                )
+                log.notice(
+                    "Messages accepted one submission destination=chat kind=\(revalidatedChat.kind.rawValue, privacy: .public)"
+                )
+                return MessageSubmissionResult(status: "submitted", service: "Messages")
+            }
         }
     }
 
@@ -429,19 +469,30 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         }
     }
 
+    private enum SendDestination {
+        case recipient(String)
+        case chat(String)
+    }
+
+    private struct ResolvedSendInput {
+        let destination: SendDestination
+        let body: String
+    }
+
     private func resolveSendInput(
         _ arguments: [String: Value],
         context: ToolCallContext
-    ) async throws -> (recipient: String, body: String) {
+    ) async throws -> ResolvedSendInput {
         var recipient = arguments["recipient"]?.stringValue
+        let chatID = arguments["chat_id"]?.stringValue
         var body = arguments["body"]?.stringValue
-        guard recipient == nil || body == nil else {
-            return (recipient!, body!)
+        guard recipient == nil || chatID == nil else {
+            throw MessageSendError.invalidDestination
         }
 
         var properties: [String: MCP.Value] = [:]
         var required: [String] = []
-        if recipient == nil {
+        if recipient == nil, chatID == nil {
             properties["recipient"] = .object([
                 "type": .string("string"),
                 "description": .string("One exact E.164 phone number or email address"),
@@ -457,28 +508,93 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             required.append("body")
         }
 
-        let response = try await context.elicitation.requestForm(
-            message: "Provide the missing information required to prepare an iMessage.",
-            schema: .init(
-                title: "Complete iMessage",
-                properties: properties,
-                required: required
+        if !required.isEmpty {
+            let response = try await context.elicitation.requestForm(
+                message: "Provide the missing information required to prepare an iMessage.",
+                schema: .init(
+                    title: "Complete iMessage",
+                    properties: properties,
+                    required: required
+                )
             )
-        )
-        switch response.action {
-        case .decline:
-            throw MessageSendError.inputDeclined
-        case .cancel:
-            throw MessageSendError.inputCancelled
-        case .accept:
-            recipient = recipient ?? response.content?["recipient"]?.stringValue
-            body = body ?? response.content?["body"]?.stringValue
+            switch response.action {
+            case .decline:
+                throw MessageSendError.inputDeclined
+            case .cancel:
+                throw MessageSendError.inputCancelled
+            case .accept:
+                recipient = recipient ?? response.content?["recipient"]?.stringValue
+                body = body ?? response.content?["body"]?.stringValue
+            }
         }
 
-        guard let recipient, let body else {
+        guard let body else {
             throw MessageSendError.inputMalformed
         }
-        return (recipient, body)
+        if let recipient {
+            guard recipient.isExactMessageHandle else {
+                throw MessageSendError.invalidRecipient
+            }
+            return ResolvedSendInput(destination: .recipient(recipient), body: body)
+        }
+        guard let chatID else { throw MessageSendError.invalidDestination }
+        guard !chatID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw MessageSendError.invalidChatIdentifier
+        }
+        return ResolvedSendInput(destination: .chat(chatID), body: body)
+    }
+
+    private func resolveSendChat(_ chatID: String) async throws -> MessagesResolvedChatDestination {
+        do {
+            if let chatDatabasePathOverride {
+                return try chatRepository.resolveChatDestination(
+                    chatID,
+                    databasePath: chatDatabasePathOverride
+                )
+            }
+            let directoryURL = try resolveChatDatabaseDirectoryBookmarkURL()
+            return try withSecurityScopedAccess(directoryURL) { directoryURL in
+                try chatRepository.resolveChatDestination(
+                    chatID,
+                    databasePath: directoryURL.appendingPathComponent("chat.db").path
+                )
+            }
+        } catch let error as MessagesChatRepositoryError {
+            switch error {
+            case .invalidIdentifier:
+                throw MessageSendError.invalidChatIdentifier
+            case .staleIdentifier:
+                throw MessageSendError.staleChatIdentifier
+            case .queryFailed(let stage, _) where stage == "resolve-duplicate":
+                throw MessageSendError.ambiguousChatResolution
+            default:
+                throw MessageSendError.staleChatIdentifier
+            }
+        }
+    }
+
+    private func chatConfirmationMessage(
+        _ chat: MessagesResolvedChatDestination,
+        body: String
+    ) -> String {
+        let fallback = chat.participantHandles.first ?? "Unnamed conversation"
+        let name = chat.displayName ?? (chat.kind == .direct ? fallback : "Unnamed group")
+        var lines = [
+            "Submit this message to the existing Messages conversation?",
+            "Conversation: \(name)",
+        ]
+        if let roomName = chat.roomName, roomName != name {
+            lines.append("Room: \(roomName)")
+        }
+        lines.append("Type: \(chat.kind.rawValue)")
+        lines.append("Participant count: \(chat.participantCount)")
+        if !chat.participantHandles.isEmpty {
+            lines.append("Participants: \(chat.participantHandles.joined(separator: ", "))")
+        }
+        if let service = chat.service { lines.append("Service: \(service)") }
+        lines.append("Message:")
+        lines.append(body)
+        return lines.joined(separator: "\n")
     }
 
     private var canAccessDatabaseAtDefaultPath: Bool {

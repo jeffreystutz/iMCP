@@ -57,9 +57,19 @@ input validation when the user has explicitly disabled confirmation. Pass
 untrusted values through descriptors, dispatch no more than one `send` event,
 and never retry after dispatch or an ambiguous result.
 
-The initial tool sends plain text by iMessage to one exact canonical phone or
-email handle. It does not resolve contacts, address groups, use SMS/RCS, or
-fallback between services.
+The recipient path sends plain text by iMessage to one exact canonical phone
+or email handle and retains its explicit local confirmation opt-out. It does
+not resolve contacts, create groups, use caller-selected SMS/RCS, or fall back
+between services.
+
+The tool also accepts one opaque chat ID produced by the conversation index.
+Chat sends always require form confirmation, including when recipient
+confirmation is disabled. Resolve current safe display metadata before
+confirmation, resolve the opaque ID again afterward, require the confirmed
+metadata to remain unchanged, and pass only the resulting chat GUID and body
+as descriptors to a fixed handler. The handler requires exactly one scripting
+chat whose public `id` equals that GUID before issuing its single send event.
+Never fall back to a recipient send.
 
 Keep automation authority on the app target. The CLI remains a transport proxy
 without Messages entitlements.
@@ -87,7 +97,8 @@ Descriptor arguments avoid interpolating user-controlled content into source.
   inherently ambiguous.
 - Submission cannot establish delivery.
 - Disabling confirmation delegates authorization to the trusted MCP client;
-  each valid `messages_send` call can immediately cause an external side effect.
+  each valid recipient-based `messages_send` call can immediately cause an
+  external side effect. It does not disable existing-chat confirmation.
 
 ### Risks and mitigations
 
@@ -116,6 +127,16 @@ enumeration. No message was sent.
 Automated tests use a fake dispatcher and cover every no-send confirmation
 path, missing-input elicitation, confirmation-disabled behavior, redacted
 results, fixed script source, and the at-most-one dispatch invariant.
+
+On 2026-07-21, a second ignored signed sandboxed probe performed no-send lookup
+only. Messages' scripting definition identifies `chat.id` as the chat GUID and
+permits `send` to a chat. The probe verified unique GUID lookup for recent
+direct iMessage/SMS/RCS conversations and iMessage groups; caller-visible chat
+identifiers and group IDs did not match scripting chat IDs. Some older SMS/RCS
+group database rows were not exposed through scripting and therefore remain
+unsupported rather than receiving a fallback. No route-preservation or
+post-dispatch claim is made until deliberately authorized manual sends are
+observed.
 
 The app previously carried an Apple Events exception for Terminal, but no
 production source automates Terminal. Shortcuts invokes its command-line tool

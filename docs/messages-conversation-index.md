@@ -148,9 +148,11 @@ macOS reboots, and database migrations remains unverified and is not promised.
 Raw row IDs are internal batching keys and are never returned.
 
 Chat IDs identify conversations. `messageGuid` identifies a message record;
-neither is authorization for a side effect. Future reply, reaction, edit, or
-retraction tools must validate the relevant ID against the current database
-immediately before their separately authorized operation.
+neither is authorization for a side effect. `messages_send` validates and
+resolves a chat ID before confirmation and again immediately before its
+separately authorized existing-chat submission. Future reply, reaction, edit,
+or retraction tools must apply the same fresh-validation rule to the relevant
+identifier.
 
 The result intentionally returns handles and conversation identifiers. Logs
 contain only detail level, count, elapsed time, and stable diagnostic stages or

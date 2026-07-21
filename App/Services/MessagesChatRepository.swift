@@ -2,6 +2,8 @@ import CryptoKit
 import Foundation
 import SQLite3
 
+private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 enum MessagesChatKind: String, Codable, Sendable {
     case direct
     case group
@@ -234,6 +236,16 @@ struct MessagesConversationIndex: Encodable, Equatable, Sendable {
     var chats: [MessagesChat]
 }
 
+struct MessagesResolvedChatDestination: Equatable, Sendable {
+    let chatGuid: String
+    let displayName: String?
+    let roomName: String?
+    let kind: MessagesChatKind
+    let participantCount: Int
+    let participantHandles: [String]
+    let service: String?
+}
+
 struct MessagesSchemaCapabilities: Equatable, Sendable {
     let columnsByTable: [String: Set<String>]
     let indexesByTable: [String: Set<String>]
@@ -366,6 +378,10 @@ protocol MessagesChatListing: Sendable {
         detail: MessagesChatDetail
     ) throws -> MessagesConversationIndex
     func resolveChatIdentifier(_ identifier: String, databasePath: String) throws -> String
+    func resolveChatDestination(
+        _ identifier: String,
+        databasePath: String
+    ) throws -> MessagesResolvedChatDestination
 }
 
 struct SQLiteMessagesChatRepository: MessagesChatListing {
@@ -447,6 +463,13 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
     }
 
     func resolveChatIdentifier(_ identifier: String, databasePath: String) throws -> String {
+        try resolveChatDestination(identifier, databasePath: databasePath).chatGuid
+    }
+
+    func resolveChatDestination(
+        _ identifier: String,
+        databasePath: String
+    ) throws -> MessagesResolvedChatDestination {
         try identifierCodec.validate(identifier)
         let database = try openReadOnly(databasePath)
         defer { sqlite3_close(database) }
@@ -454,31 +477,120 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
         guard capabilities.hasColumn("guid", in: "chat") else {
             throw MessagesChatRepositoryError.minimumSchemaUnavailable
         }
-        let statement = try prepare("SELECT guid FROM chat", stage: "resolve", database: database)
-        defer { sqlite3_finalize(statement) }
-        var resolvedGUID: String?
-        while true {
-            switch sqlite3_step(statement) {
-            case SQLITE_ROW:
-                guard let guid = sqliteText(statement, column: 0) else {
-                    throw queryError(stage: "resolve-map", database: database)
-                }
-                if try identifierCodec.create(for: guid) == identifier {
-                    guard resolvedGUID == nil else {
-                        throw queryError(stage: "resolve-duplicate", database: database)
+        try execute("BEGIN DEFERRED TRANSACTION", stage: "resolve-snapshot", database: database)
+        do {
+            let statement = try prepare(
+                "SELECT ROWID, guid FROM chat",
+                stage: "resolve",
+                database: database
+            )
+            defer { sqlite3_finalize(statement) }
+            var resolved: (rowId: Int64, guid: String)?
+            while true {
+                switch sqlite3_step(statement) {
+                case SQLITE_ROW:
+                    guard let guid = sqliteText(statement, column: 1) else {
+                        throw queryError(stage: "resolve-map", database: database)
                     }
-                    resolvedGUID = guid
+                    if try identifierCodec.create(for: guid) == identifier {
+                        guard resolved == nil else {
+                            throw queryError(stage: "resolve-duplicate", database: database)
+                        }
+                        resolved = (sqlite3_column_int64(statement, 0), guid)
+                    }
+                case SQLITE_DONE:
+                    guard let resolved else {
+                        throw MessagesChatRepositoryError.staleIdentifier
+                    }
+                    let destination = try resolvedDestination(
+                        rowId: resolved.rowId,
+                        guid: resolved.guid,
+                        database: database,
+                        capabilities: capabilities
+                    )
+                    try execute("COMMIT", stage: "resolve-snapshot", database: database)
+                    return destination
+                default: throw queryError(stage: "resolve-step", database: database)
                 }
-            case SQLITE_DONE:
-                guard let resolvedGUID else { throw MessagesChatRepositoryError.staleIdentifier }
-                return resolvedGUID
-            default: throw queryError(stage: "resolve-step", database: database)
             }
+        } catch {
+            sqlite3_exec(database, "ROLLBACK", nil, nil, nil)
+            throw error
         }
     }
 }
 
 private extension SQLiteMessagesChatRepository {
+    func resolvedDestination(
+        rowId: Int64,
+        guid: String,
+        database: OpaquePointer,
+        capabilities: MessagesSchemaCapabilities
+    ) throws -> MessagesResolvedChatDestination {
+        func projection(_ column: String) -> String {
+            capabilities.hasColumn(column, in: "chat") ? column : "NULL"
+        }
+        let statement = try prepare(
+            """
+            SELECT \(projection("display_name")), \(projection("room_name")),
+                   \(projection("service_name")), \(projection("chat_identifier"))
+            FROM chat WHERE ROWID = ? AND guid = ?
+            """,
+            stage: "resolve-metadata",
+            database: database
+        )
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_bind_int64(statement, 1, rowId) == SQLITE_OK,
+            sqlite3_bind_text(statement, 2, guid, -1, sqliteTransient) == SQLITE_OK,
+            sqlite3_step(statement) == SQLITE_ROW
+        else { throw MessagesChatRepositoryError.staleIdentifier }
+        let displayName = trimmedText(statement, column: 0)
+        let roomName = trimmedText(statement, column: 1)
+        let service = trimmedText(statement, column: 2)
+        let chatIdentifier = trimmedText(statement, column: 3)
+
+        guard capabilities.hasColumn("chat_id", in: "chat_handle_join"),
+            capabilities.hasColumn("handle_id", in: "chat_handle_join"),
+            capabilities.hasColumn("id", in: "handle")
+        else { throw MessagesChatRepositoryError.minimumSchemaUnavailable }
+        let participantsStatement = try prepare(
+            """
+            SELECT DISTINCT h.id
+            FROM chat_handle_join chj JOIN handle h ON h.ROWID = chj.handle_id
+            WHERE chj.chat_id = ? AND h.id IS NOT NULL
+            ORDER BY h.id
+            """,
+            stage: "resolve-participants",
+            database: database
+        )
+        defer { sqlite3_finalize(participantsStatement) }
+        guard sqlite3_bind_int64(participantsStatement, 1, rowId) == SQLITE_OK else {
+            throw queryError(stage: "resolve-participants-bind", database: database)
+        }
+        var participants: [String] = []
+        try stepRows(
+            participantsStatement,
+            stage: "resolve-participants-step",
+            database: database
+        ) { statement in
+            if let handle = trimmedText(statement, column: 0) { participants.append(handle) }
+        }
+        if participants.isEmpty, let chatIdentifier,
+            isE164(chatIdentifier) || isEmail(chatIdentifier)
+        {
+            participants = [chatIdentifier]
+        }
+        return MessagesResolvedChatDestination(
+            chatGuid: guid,
+            displayName: displayName,
+            roomName: roomName,
+            kind: participants.count > 1 ? .group : .direct,
+            participantCount: participants.count,
+            participantHandles: participants,
+            service: service
+        )
+    }
+
     struct ChatRecord {
         let rowId: Int64
         var chat: MessagesChat

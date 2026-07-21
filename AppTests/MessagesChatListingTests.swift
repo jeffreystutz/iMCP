@@ -325,12 +325,38 @@ final class MessagesChatListingTests: XCTestCase {
             try repository().resolveChatIdentifier(identifier, databasePath: fixture.path),
             "group-guid.example"
         )
+        let destination = try repository().resolveChatDestination(
+            identifier,
+            databasePath: fixture.path
+        )
+        XCTAssertEqual(destination.chatGuid, "group-guid.example")
+        XCTAssertEqual(destination.displayName, "Synthetic Group")
+        XCTAssertEqual(destination.roomName, "Synthetic Room")
+        XCTAssertEqual(destination.kind, .group)
+        XCTAssertEqual(destination.participantCount, 3)
+        XCTAssertEqual(
+            destination.participantHandles,
+            ["+15550100001", "local-number", "person@example.invalid"]
+        )
+        XCTAssertEqual(destination.service, "iMessage")
         XCTAssertThrowsError(
             try repository().resolveChatIdentifier("invalid", databasePath: fixture.path)
         ) { XCTAssertEqual($0 as? MessagesChatRepositoryError, .invalidIdentifier) }
         let stale = try codec.create(for: "stale-guid.example")
         XCTAssertThrowsError(try repository().resolveChatIdentifier(stale, databasePath: fixture.path)) {
             XCTAssertEqual($0 as? MessagesChatRepositoryError, .staleIdentifier)
+        }
+
+        try fixture.execute(
+            "INSERT INTO chat (guid, display_name) VALUES ('group-guid.example', 'Duplicate');"
+        )
+        XCTAssertThrowsError(
+            try repository().resolveChatDestination(identifier, databasePath: fixture.path)
+        ) { error in
+            guard case .queryFailed(let stage, _) = error as? MessagesChatRepositoryError else {
+                return XCTFail("Expected ambiguous identifier resolution")
+            }
+            XCTAssertEqual(stage, "resolve-duplicate")
         }
     }
 
@@ -384,7 +410,11 @@ final class MessagesChatListingTests: XCTestCase {
             Set((fetchSchema["properties"] as? [String: Any] ?? [:]).keys),
             Set(["participants", "start", "end", "query", "limit"])
         )
-        XCTAssertEqual(Set((sendSchema["properties"] as? [String: Any] ?? [:]).keys), Set(["recipient", "body"]))
+        XCTAssertEqual(
+            Set((sendSchema["properties"] as? [String: Any] ?? [:]).keys),
+            Set(["recipient", "chat_id", "body"])
+        )
+        XCTAssertEqual(sendSchema["required"] as? [String], ["body"])
     }
 
     private func repository(
@@ -433,6 +463,22 @@ private final class RecordingChatRepository: MessagesChatListing, @unchecked Sen
     func resolveChatIdentifier(_ identifier: String, databasePath: String) throws -> String {
         try MessagesChatIdentifierCodec(keyData: chatIdentifierTestKey).validate(identifier)
         return "synthetic-guid.example"
+    }
+
+    func resolveChatDestination(
+        _ identifier: String,
+        databasePath: String
+    ) throws -> MessagesResolvedChatDestination {
+        try MessagesChatIdentifierCodec(keyData: chatIdentifierTestKey).validate(identifier)
+        return MessagesResolvedChatDestination(
+            chatGuid: "synthetic-guid.example",
+            displayName: "Synthetic conversation",
+            roomName: nil,
+            kind: .direct,
+            participantCount: 1,
+            participantHandles: ["recipient@example.invalid"],
+            service: "iMessage"
+        )
     }
 }
 

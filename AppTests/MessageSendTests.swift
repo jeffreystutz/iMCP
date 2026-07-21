@@ -257,13 +257,256 @@ final class MessageSendTests: XCTestCase {
 
     func testAppleScriptIsFixedAndUsesDescriptorParameters() {
         XCTAssertTrue(AppleScriptMessagesSender.scriptSource.contains("recipientHandle"))
+        XCTAssertTrue(AppleScriptMessagesSender.scriptSource.contains("chatGUID"))
         XCTAssertTrue(AppleScriptMessagesSender.scriptSource.contains("messageBody"))
         XCTAssertFalse(AppleScriptMessagesSender.scriptSource.contains("recipient@example.invalid"))
         XCTAssertFalse(AppleScriptMessagesSender.scriptSource.contains("test-body"))
+        XCTAssertFalse(AppleScriptMessagesSender.scriptSource.contains("synthetic-guid.example"))
 
         var error: NSDictionary?
         let script = NSAppleScript(source: AppleScriptMessagesSender.scriptSource)
         XCTAssertTrue(script?.compileAndReturnError(&error) == true, String(describing: error))
+    }
+
+    func testChatInputRequiresExactlyOneNonemptyRecognizedDestination() async {
+        let sender = RecordingMessagesSender()
+        let repository = RecordingSendChatRepository(results: [.success(directChat)])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        await assertSendError(.invalidDestination) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                [
+                    "recipient": .string("recipient@example.invalid"),
+                    "chat_id": .string("imcp-chat-v1_synthetic"),
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        await assertSendError(.invalidChatIdentifier) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("  "), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        let malformed = RecordingSendChatRepository(results: [
+            .failure(MessagesChatRepositoryError.invalidIdentifier)
+        ])
+        await assertSendError(.invalidChatIdentifier) {
+            _ = try await self.sendTool(sender: sender, chatRepository: malformed)(
+                ["chat_id": .string("not-an-imcp-id"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        let recipientSubmissions = await sender.submissionCount
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(recipientSubmissions, 0)
+        XCTAssertEqual(chatSubmissions, 0)
+    }
+
+    func testAcceptedDirectChatConfirmsMetadataRevalidatesAndDispatchesOnce() async throws {
+        let sender = RecordingMessagesSender()
+        let repository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(directChat),
+        ])
+        let requester = StubElicitationRequester(result: confirmedResult)
+        let result = try await sendTool(sender: sender, chatRepository: repository)(
+            ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+            context: ToolCallContext(elicitation: requester)
+        )
+
+        XCTAssertEqual(repository.resolveCount, 2)
+        let chatSubmissions = await sender.chatSubmissionCount
+        let recipientSubmissions = await sender.submissionCount
+        let lastChatGUID = await sender.lastChatGUID
+        XCTAssertEqual(chatSubmissions, 1)
+        XCTAssertEqual(recipientSubmissions, 0)
+        XCTAssertTrue(lastChatGUID == "synthetic-guid.example")
+        XCTAssertTrue(requester.lastMessage.contains("Synthetic Direct"))
+        XCTAssertTrue(requester.lastMessage.contains("Type: direct"))
+        XCTAssertTrue(requester.lastMessage.contains("Participant count: 1"))
+        XCTAssertTrue(requester.lastMessage.contains("recipient@example.invalid"))
+        XCTAssertTrue(requester.lastMessage.contains("test-body"))
+        XCTAssertEqual(result.objectValue?["status"]?.stringValue, "submitted")
+        XCTAssertEqual(result.objectValue?["service"]?.stringValue, "Messages")
+        let encoded = String(data: try JSONEncoder().encode(result), encoding: .utf8)!
+        XCTAssertFalse(encoded.contains("synthetic"))
+        XCTAssertFalse(encoded.contains("recipient@example.invalid"))
+        XCTAssertFalse(encoded.contains("test-body"))
+    }
+
+    func testGroupChatConfirmationIsMandatoryEvenWhenRecipientConfirmationIsDisabled() async {
+        let sender = RecordingMessagesSender()
+        let repository = RecordingSendChatRepository(results: [.success(groupChat)])
+        let requester = StubElicitationRequester(result: .init(action: .decline))
+
+        await assertSendError(.confirmationDeclined) {
+            _ = try await self.sendTool(
+                sender: sender,
+                requiresSendConfirmation: false,
+                chatRepository: repository
+            )(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        XCTAssertEqual(requester.requestCount, 1)
+        XCTAssertTrue(requester.lastMessage.contains("Synthetic Group"))
+        XCTAssertTrue(requester.lastMessage.contains("Synthetic Room"))
+        XCTAssertTrue(requester.lastMessage.contains("Type: group"))
+        XCTAssertTrue(requester.lastMessage.contains("Participant count: 2"))
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(chatSubmissions, 0)
+    }
+
+    func testChatDeclineCancelMalformedUnsupportedAndTimeoutDispatchZero() async {
+        let outcomes: [StubElicitationRequester] = [
+            .init(result: .init(action: .decline)),
+            .init(result: .init(action: .cancel)),
+            .init(result: .init(action: .accept, content: ["confirmed": .bool(false)])),
+            .init(error: ElicitationRequestError.formUnsupported),
+        ]
+        for requester in outcomes {
+            let sender = RecordingMessagesSender()
+            let repository = RecordingSendChatRepository(results: [.success(directChat)])
+            do {
+                _ = try await sendTool(sender: sender, chatRepository: repository)(
+                    ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                    context: ToolCallContext(elicitation: requester)
+                )
+                XCTFail("Expected chat confirmation to fail")
+            } catch {}
+            let chatSubmissions = await sender.chatSubmissionCount
+            XCTAssertEqual(chatSubmissions, 0)
+        }
+
+        let timeoutSender = RecordingMessagesSender()
+        let timeoutRepository = RecordingSendChatRepository(results: [.success(directChat)])
+        let task = Task {
+            try await self.sendTool(sender: timeoutSender, chatRepository: timeoutRepository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: SlowElicitationRequester())
+            )
+        }
+        try? await Task.sleep(for: .milliseconds(10))
+        task.cancel()
+        _ = try? await task.value
+        let timeoutSubmissions = await timeoutSender.chatSubmissionCount
+        XCTAssertEqual(timeoutSubmissions, 0)
+    }
+
+    func testChatResolutionErrorsAndChangedMetadataDispatchZero() async {
+        for error in [
+            MessagesChatRepositoryError.staleIdentifier,
+            MessagesChatRepositoryError.queryFailed(stage: "resolve-duplicate", code: 1),
+        ] {
+            let sender = RecordingMessagesSender()
+            let repository = RecordingSendChatRepository(results: [.failure(error)])
+            do {
+                _ = try await sendTool(sender: sender, chatRepository: repository)(
+                    ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                    context: ToolCallContext(
+                        elicitation: StubElicitationRequester(result: confirmedResult)
+                    )
+                )
+                XCTFail("Expected chat resolution to fail")
+            } catch {}
+            let chatSubmissions = await sender.chatSubmissionCount
+            XCTAssertEqual(chatSubmissions, 0)
+        }
+
+        let changed = MessagesResolvedChatDestination(
+            chatGuid: directChat.chatGuid,
+            displayName: directChat.displayName,
+            roomName: directChat.roomName,
+            kind: directChat.kind,
+            participantCount: 2,
+            participantHandles: directChat.participantHandles + ["second@example.invalid"],
+            service: directChat.service
+        )
+        let sender = RecordingMessagesSender()
+        let repository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(changed),
+        ])
+        await assertSendError(.staleChatIdentifier) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+        let changedChatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(changedChatSubmissions, 0)
+    }
+
+    func testChatAutomationAmbiguityIsNotRetriedOrFallenBack() async {
+        let sender = RecordingMessagesSender(error: MessageSendError.ambiguousSubmission)
+        let repository = RecordingSendChatRepository(results: [
+            .success(groupChat), .success(groupChat),
+        ])
+        await assertSendError(.ambiguousSubmission) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+        let chatSubmissions = await sender.chatSubmissionCount
+        let recipientSubmissions = await sender.submissionCount
+        XCTAssertEqual(chatSubmissions, 1)
+        XCTAssertEqual(recipientSubmissions, 0)
+    }
+
+    func testChatServicesResolveWithoutCallerSelectedTransport() async throws {
+        for service in ["iMessage", "SMS", "RCS"] {
+            let chat = MessagesResolvedChatDestination(
+                chatGuid: "synthetic-guid.example",
+                displayName: "Synthetic Direct",
+                roomName: nil,
+                kind: .direct,
+                participantCount: 1,
+                participantHandles: ["recipient@example.invalid"],
+                service: service
+            )
+            let sender = RecordingMessagesSender()
+            let repository = RecordingSendChatRepository(results: [
+                .success(chat), .success(chat),
+            ])
+            _ = try await sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: confirmedResult)
+                )
+            )
+            let chatSubmissions = await sender.chatSubmissionCount
+            XCTAssertEqual(chatSubmissions, 1)
+        }
+    }
+
+    private var directChat: MessagesResolvedChatDestination {
+        MessagesResolvedChatDestination(
+            chatGuid: "synthetic-guid.example",
+            displayName: "Synthetic Direct",
+            roomName: nil,
+            kind: .direct,
+            participantCount: 1,
+            participantHandles: ["recipient@example.invalid"],
+            service: "iMessage"
+        )
+    }
+
+    private var groupChat: MessagesResolvedChatDestination {
+        MessagesResolvedChatDestination(
+            chatGuid: "synthetic-group-guid.example",
+            displayName: "Synthetic Group",
+            roomName: "Synthetic Room",
+            kind: .group,
+            participantCount: 2,
+            participantHandles: ["first@example.invalid", "second@example.invalid"],
+            service: "RCS"
+        )
     }
 
     private var confirmedResult: CreateElicitation.Result {
@@ -272,12 +515,15 @@ final class MessageSendTests: XCTestCase {
 
     private func sendTool(
         sender: RecordingMessagesSender,
-        requiresSendConfirmation: Bool = true
+        requiresSendConfirmation: Bool = true,
+        chatRepository: (any MessagesChatListing)? = nil
     ) throws -> iMCP.Tool {
         try XCTUnwrap(
             MessageService(
                 sender: sender,
-                requiresSendConfirmation: { requiresSendConfirmation }
+                requiresSendConfirmation: { requiresSendConfirmation },
+                chatRepository: chatRepository ?? SQLiteMessagesChatRepository(),
+                chatDatabasePathOverride: chatRepository == nil ? nil : "/synthetic/chat.db"
             ).tools.first { $0.name == "messages_send" }
         )
     }
@@ -299,7 +545,9 @@ final class MessageSendTests: XCTestCase {
 
 private actor RecordingMessagesSender: MessagesSending {
     private(set) var submissionCount = 0
+    private(set) var chatSubmissionCount = 0
     private(set) var lastRecipient: String?
+    private(set) var lastChatGUID: String?
     private let error: Error?
 
     init(error: Error? = nil) {
@@ -310,6 +558,46 @@ private actor RecordingMessagesSender: MessagesSending {
         submissionCount += 1
         lastRecipient = recipient
         if let error { throw error }
+    }
+
+    func submit(chatGUID: String, body: String) throws {
+        chatSubmissionCount += 1
+        lastChatGUID = chatGUID
+        if let error { throw error }
+    }
+}
+
+private final class RecordingSendChatRepository: MessagesChatListing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [Result<MessagesResolvedChatDestination, Error>]
+    private var storedResolveCount = 0
+    var resolveCount: Int { lock.withLock { storedResolveCount } }
+
+    init(results: [Result<MessagesResolvedChatDestination, Error>]) { self.results = results }
+
+    func listChats(
+        databasePath: String,
+        limit: Int,
+        kind: MessagesChatKind?,
+        detail: MessagesChatDetail
+    ) throws -> MessagesConversationIndex {
+        MessagesConversationIndex(detail: detail, metadataAvailability: [:], chats: [])
+    }
+
+    func resolveChatIdentifier(_ identifier: String, databasePath: String) throws -> String {
+        try resolveChatDestination(identifier, databasePath: databasePath).chatGuid
+    }
+
+    func resolveChatDestination(
+        _ identifier: String,
+        databasePath: String
+    ) throws -> MessagesResolvedChatDestination {
+        let result: Result<MessagesResolvedChatDestination, Error>? = lock.withLock {
+            storedResolveCount += 1
+            return results.isEmpty ? nil : results.removeFirst()
+        }
+        guard let result else { throw MessagesChatRepositoryError.staleIdentifier }
+        return try result.get()
     }
 }
 
