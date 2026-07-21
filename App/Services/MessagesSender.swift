@@ -1,3 +1,8 @@
+// Direct Messages automation is adapted in part from mac_messages_mcp:
+// https://github.com/carterlasalle/mac_messages_mcp
+// Copyright (c) 2023 Carter Lasalle. Used under the MIT License.
+// See THIRD_PARTY_NOTICES.md for the complete notice.
+
 import AppKit
 import Carbon
 import Foundation

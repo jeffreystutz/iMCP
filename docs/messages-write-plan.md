@@ -151,6 +151,11 @@ Tool annotations are `readOnlyHint: false`, `destructiveHint: false`,
 
 ## Reference implementation
 
+The direct-send automation was informed by Carter LaSalle's MIT-licensed
+[`mac_messages_mcp`](https://github.com/carterlasalle/mac_messages_mcp).
+Source-level attribution and the complete license notice are retained in
+`App/Services/MessagesSender.swift` and `THIRD_PARTY_NOTICES.md`.
+
 `../mac_messages_mcp` was inspected as read-only reference material at commit
 `3f750fc0cf93871bcae4435a0492f07914604e31`. It is MIT licensed, copyright
 2023 Carter Lasalle.
@@ -161,9 +166,11 @@ subprocess model, temporary-file message bridge, private AddressBook SQL,
 global selection state, recipient logging, US-centric normalization, broad
 fallback, and stringly errors should not be copied.
 
-The Swift implementation is an independent native design. If substantial
-source or tests are directly adapted later, retain the upstream MIT notice in
-a third-party notice and identify the adapted source.
+The Swift implementation is a native redesign rather than a verbatim port.
+The adapted automation concepts are identified at source level, and the
+upstream MIT notice is retained in `THIRD_PARTY_NOTICES.md`. Apply the same
+source-level identification if additional substantial source or tests are
+adapted later.
 
 ## Pull request sequence
 
