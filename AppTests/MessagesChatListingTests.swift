@@ -143,6 +143,106 @@ final class MessagesChatListingTests: XCTestCase {
         XCTAssertEqual(Set(group.participants?.map(\.handle) ?? []).count, 3)
     }
 
+    func testConversationMatchingUsesExactNormalizedMembershipSets() throws {
+        let fixture = try ChatDatabaseFixture.reduced()
+        defer { fixture.remove() }
+        try fixture.execute(
+            """
+            INSERT INTO chat VALUES
+              (2, 'direct-match.example', 'Direct Match', 'iMessage'),
+              (3, 'group-match.example', 'Group Match', 'RCS'),
+              (4, 'larger-group.example', 'Larger Group', 'iMessage');
+            INSERT INTO handle VALUES
+              (1, 'direct@example.invalid'),
+              (2, 'FIRST@example.invalid'),
+              (3, '+15550100002'),
+              (4, 'third@example.invalid');
+            INSERT INTO chat_handle_join VALUES
+              (2, 1), (3, 2), (3, 2), (3, 3), (4, 2), (4, 3), (4, 4);
+            """
+        )
+        let repository = repository()
+
+        let direct = try repository.matchConversation(
+            normalizedParticipants: ["direct@example.invalid"],
+            kind: .direct,
+            databasePath: fixture.path
+        )
+        guard case .unique(_, let directDestination) = direct else {
+            return XCTFail("Expected one synthetic direct match")
+        }
+        XCTAssertEqual(directDestination.kind, .direct)
+
+        let exact = try repository.matchConversation(
+            normalizedParticipants: ["first@example.invalid", "+15550100002"],
+            kind: .group,
+            databasePath: fixture.path
+        )
+        guard case .unique(_, let groupDestination) = exact else {
+            return XCTFail("Expected one synthetic group match")
+        }
+        XCTAssertEqual(groupDestination.participantCount, 2)
+        XCTAssertEqual(
+            groupDestination.participantHandles,
+            ["+15550100002", "first@example.invalid"]
+        )
+
+        XCTAssertEqual(
+            try repository.matchConversation(
+                normalizedParticipants: ["first@example.invalid", "third@example.invalid"],
+                kind: .group,
+                databasePath: fixture.path
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            try repository.matchConversation(
+                normalizedParticipants: [
+                    "first@example.invalid", "+15550100002", "third@example.invalid",
+                    "fourth@example.invalid",
+                ],
+                kind: .group,
+                databasePath: fixture.path
+            ),
+            .none
+        )
+
+        try fixture.execute(
+            """
+            INSERT INTO chat VALUES (5, 'group-match.example', 'Group Match', 'RCS');
+            INSERT INTO chat_handle_join VALUES (5, 2), (5, 3);
+            """
+        )
+        guard
+            case .unique = try repository.matchConversation(
+                normalizedParticipants: ["first@example.invalid", "+15550100002"],
+                kind: .group,
+                databasePath: fixture.path
+            )
+        else { return XCTFail("Equivalent rows for one public chat should deduplicate") }
+
+        try fixture.execute(
+            """
+            INSERT INTO chat VALUES (6, 'duplicate-group.example', 'Duplicate Group', 'SMS');
+            INSERT INTO chat_handle_join VALUES (6, 2), (6, 3);
+            """
+        )
+        XCTAssertEqual(
+            try repository.matchConversation(
+                normalizedParticipants: ["first@example.invalid", "+15550100002"],
+                kind: .group,
+                databasePath: fixture.path
+            ),
+            .ambiguous
+        )
+
+        XCTAssertNil(MessagesHandleNormalization.normalize("5550100002"))
+        XCTAssertEqual(
+            MessagesHandleNormalization.normalize("Mixed@Example.Invalid"),
+            "mixed@example.invalid"
+        )
+    }
+
     func testReducedSchemaDegradesOptionalFieldsAndKeepsCoreListing() throws {
         let fixture = try ChatDatabaseFixture.reduced()
         defer { fixture.remove() }
@@ -412,7 +512,7 @@ final class MessagesChatListingTests: XCTestCase {
         )
         XCTAssertEqual(
             Set((sendSchema["properties"] as? [String: Any] ?? [:]).keys),
-            Set(["recipient", "chat_id", "body"])
+            Set(["recipient", "recipients", "chat_id", "body"])
         )
         XCTAssertEqual(sendSchema["required"] as? [String], ["body"])
     }

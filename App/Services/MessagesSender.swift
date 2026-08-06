@@ -25,6 +25,12 @@ enum MessageSendError: LocalizedError, Sendable {
     case inputMalformed
     case invalidRecipient
     case invalidDestination
+    case insufficientGroupParticipants
+    case groupConversationNotFound
+    case ambiguousDirectConversation
+    case ambiguousGroupConversation
+    case incompleteGroupMembership
+    case staleMatchedConversation
     case invalidChatIdentifier
     case staleChatIdentifier
     case ambiguousChatResolution
@@ -51,7 +57,19 @@ enum MessageSendError: LocalizedError, Sendable {
         case .invalidRecipient:
             return "The recipient must be one exact E.164 phone number or email address."
         case .invalidDestination:
-            return "Exactly one message destination is required."
+            return "Exactly one message destination is required: recipient, recipients, or chat_id."
+        case .insufficientGroupParticipants:
+            return "A group destination requires at least two distinct valid participants."
+        case .groupConversationNotFound:
+            return "No existing group exactly matches the supplied participants. Nothing was sent."
+        case .ambiguousDirectConversation:
+            return "Multiple existing direct conversations match. Use chat_id to select one."
+        case .ambiguousGroupConversation:
+            return "Multiple existing groups match those participants. Use chat_id to select one."
+        case .incompleteGroupMembership:
+            return "Existing group membership cannot be resolved safely. Use chat_id to select a conversation."
+        case .staleMatchedConversation:
+            return "The matched conversation changed before submission. Nothing was sent."
         case .invalidChatIdentifier:
             return "The chat identifier is invalid."
         case .staleChatIdentifier:

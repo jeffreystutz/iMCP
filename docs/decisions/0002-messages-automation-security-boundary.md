@@ -57,10 +57,19 @@ input validation when the user has explicitly disabled confirmation. Pass
 untrusted values through descriptors, dispatch no more than one `send` event,
 and never retry after dispatch or an ambiguous result.
 
-The recipient path sends plain text by iMessage to one exact canonical phone
-or email handle and retains its explicit local confirmation opt-out. It does
-not resolve contacts, create groups, use caller-selected SMS/RCS, or fall back
-between services.
+The recipient path first compares one validated handle with direct-chat
+membership. One unique match uses the existing-chat path; no match preserves
+the original plain-text iMessage recipient path and its explicit local
+confirmation opt-out. Multiple matches fail and require a chat ID. This does
+not resolve contacts or match a participant's group chats.
+
+A complete set of two or more validated remote handles may select only one
+existing group whose normalized membership is exactly equal. Ordering and
+duplicate relationship rows do not matter. Subsets, supersets, unavailable or
+incomplete membership, no match, and ambiguity dispatch nothing. This path
+never creates a group; ambiguous callers must provide a chat ID. Email matching
+lowercases the trimmed address, while phone matching accepts only already-valid
+E.164 and never infers a country code or equates a phone with an email.
 
 The tool also accepts one opaque chat ID produced by the conversation index.
 Chat sends always require form confirmation, including when recipient
@@ -70,6 +79,11 @@ metadata to remain unchanged, and pass only the resulting chat GUID and body
 as descriptors to a fixed handler. The handler requires exactly one scripting
 chat whose public `id` equals that GUID before issuing its single send event.
 Never fall back to a recipient send.
+
+Unique recipient and group-set matches are repeated immediately before
+dispatch. The public ID, classification, normalized participants, and safe
+confirmation metadata must remain unchanged. Revalidation failure never
+selects another conversation or changes dispatch paths.
 
 Keep automation authority on the app target. The CLI remains a transport proxy
 without Messages entitlements.

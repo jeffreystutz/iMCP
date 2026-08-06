@@ -146,17 +146,37 @@ The first version has no contact lookup, normalization, groups, attachments,
 SMS, RCS, fallback, or delivery tracking. Existing `messages_fetch` behavior
 is preserved.
 
-The existing-chat extension adds optional `chat_id` input while preserving the
-recipient path. After missing-input elicitation, exactly one of `recipient` or
-`chat_id` must be present. A chat ID must be the opaque value returned by
+The existing-conversation resolver accepts exactly one effective destination:
+`recipient`, `recipients`, or `chat_id`. A chat ID must be the opaque value returned by
 `messages_list_chats`; raw GUIDs, group IDs, chat identifiers, service names,
 and scripting expressions are not accepted from callers.
+
+An exact `recipient` is normalized only for matching: verified E.164 numbers
+remain byte-for-byte unchanged, and syntactically valid email addresses are
+trimmed and lowercased. No country code is inferred, and phone and email
+identities are never merged. One unique direct membership match uses the
+existing-chat path. No match preserves the original raw-recipient path;
+multiple direct matches fail and require `chat_id`. Group chats are never
+considered for this single-recipient lookup.
+
+`recipients` is the complete set of remote participants in an existing group.
+Input order and exact duplicate membership rows do not matter, but there must
+be at least two distinct normalized handles. Only exact set equality matches:
+subsets and supersets never match. iMCP cannot create a new group. No match,
+unavailable membership, or incomplete membership fails without dispatch;
+multiple matching groups require `chat_id`, which is preferred whenever the
+caller already knows the intended group. Contacts and message-history senders
+are not consulted.
 
 Chat sends resolve the opaque ID to current display/room, direct/group,
 participant, service, and database GUID metadata before confirmation. Unlike
 recipient sends, their confirmation cannot be disabled and shows the selected
 conversation plus the exact body. The same opaque ID is resolved again after
 acceptance, and all confirmed metadata must still match before dispatch.
+Recipient- and participant-matched conversations follow the same mandatory
+confirmation path and repeat the exact membership match before dispatch. A
+changed or stale match fails rather than selecting another chat or switching
+to raw-recipient dispatch.
 
 Messages' public scripting dictionary defines `chat.id` as the chat GUID and
 allows `send` to a chat. A signed, sandboxed, ignored no-send probe compared up

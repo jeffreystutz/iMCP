@@ -246,6 +246,24 @@ struct MessagesResolvedChatDestination: Equatable, Sendable {
     let service: String?
 }
 
+enum MessagesConversationMatch: Equatable, Sendable {
+    case none
+    case unique(publicChatID: String, destination: MessagesResolvedChatDestination)
+    case ambiguous
+    case incomplete
+}
+
+enum MessagesHandleNormalization {
+    static func normalize(_ handle: String) -> String? {
+        let trimmed = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.wholeMatch(of: /^\+[1-9][0-9]{1,14}$/) != nil { return trimmed }
+        if trimmed.wholeMatch(of: /^[^\s@]+@[^\s@]+\.[^\s@]+$/) != nil {
+            return trimmed.lowercased()
+        }
+        return nil
+    }
+}
+
 struct MessagesSchemaCapabilities: Equatable, Sendable {
     let columnsByTable: [String: Set<String>]
     let indexesByTable: [String: Set<String>]
@@ -382,6 +400,21 @@ protocol MessagesChatListing: Sendable {
         _ identifier: String,
         databasePath: String
     ) throws -> MessagesResolvedChatDestination
+    func matchConversation(
+        normalizedParticipants: Set<String>,
+        kind: MessagesChatKind,
+        databasePath: String
+    ) throws -> MessagesConversationMatch
+}
+
+extension MessagesChatListing {
+    func matchConversation(
+        normalizedParticipants: Set<String>,
+        kind: MessagesChatKind,
+        databasePath: String
+    ) throws -> MessagesConversationMatch {
+        .none
+    }
 }
 
 struct SQLiteMessagesChatRepository: MessagesChatListing {
@@ -517,6 +550,116 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
             sqlite3_exec(database, "ROLLBACK", nil, nil, nil)
             throw error
         }
+    }
+
+    func matchConversation(
+        normalizedParticipants: Set<String>,
+        kind: MessagesChatKind,
+        databasePath: String
+    ) throws -> MessagesConversationMatch {
+        let database = try openReadOnly(databasePath)
+        defer { sqlite3_close(database) }
+        let guardState = QueryGuard(timeout: timeout)
+        let context = Unmanaged.passUnretained(guardState).toOpaque()
+        sqlite3_progress_handler(
+            database,
+            1_000,
+            { context in
+                guard let context else { return 0 }
+                return Unmanaged<QueryGuard>.fromOpaque(context).takeUnretainedValue().shouldStop
+                    ? 1 : 0
+            },
+            context
+        )
+        defer { sqlite3_progress_handler(database, 0, nil, nil) }
+        let capabilities = try MessagesSchemaCapabilities.discover(in: database)
+        guard capabilities.hasColumn("guid", in: "chat") else {
+            throw MessagesChatRepositoryError.minimumSchemaUnavailable
+        }
+        guard capabilities.hasColumn("chat_id", in: "chat_handle_join"),
+            capabilities.hasColumn("handle_id", in: "chat_handle_join"),
+            capabilities.hasColumn("id", in: "handle")
+        else { return .incomplete }
+
+        func projection(_ column: String) -> String {
+            capabilities.hasColumn(column, in: "chat") ? "c.\(column)" : "NULL"
+        }
+        let statement = try prepare(
+            """
+            SELECT c.ROWID, c.guid, \(projection("display_name")),
+                   \(projection("room_name")), \(projection("service_name")),
+                   \(projection("chat_identifier")), h.id
+            FROM chat c
+            LEFT JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
+            LEFT JOIN handle h ON h.ROWID = chj.handle_id
+            ORDER BY c.ROWID, h.ROWID
+            """,
+            stage: "match",
+            database: database
+        )
+        defer { sqlite3_finalize(statement) }
+
+        struct Candidate {
+            var guid: String
+            var displayName: String?
+            var roomName: String?
+            var service: String?
+            var chatIdentifier: String?
+            var participants: Set<String> = []
+            var incomplete = false
+        }
+        var candidates: [String: Candidate] = [:]
+        try stepRows(statement, stage: "match-step", database: database) { row in
+            guard let guid = sqliteText(row, column: 1) else { return }
+            var candidate =
+                candidates[guid]
+                ?? Candidate(
+                    guid: guid,
+                    displayName: trimmedText(row, column: 2),
+                    roomName: trimmedText(row, column: 3),
+                    service: trimmedText(row, column: 4),
+                    chatIdentifier: trimmedText(row, column: 5)
+                )
+            if let storedHandle = trimmedText(row, column: 6) {
+                if let normalized = MessagesHandleNormalization.normalize(storedHandle) {
+                    candidate.participants.insert(normalized)
+                } else {
+                    candidate.incomplete = true
+                }
+            }
+            candidates[guid] = candidate
+        }
+
+        var matches: [String: MessagesResolvedChatDestination] = [:]
+        for candidate in candidates.values {
+            var participants = candidate.participants
+            if participants.isEmpty, let fallback = candidate.chatIdentifier,
+                let normalized = MessagesHandleNormalization.normalize(fallback)
+            {
+                participants.insert(normalized)
+            }
+            guard !candidate.incomplete else { continue }
+            let candidateKind: MessagesChatKind = participants.count > 1 ? .group : .direct
+            guard candidateKind == kind else { continue }
+            guard participants == normalizedParticipants else { continue }
+            let publicID = try identifierCodec.create(for: candidate.guid)
+            let destination = MessagesResolvedChatDestination(
+                chatGuid: candidate.guid,
+                displayName: candidate.displayName,
+                roomName: candidate.roomName,
+                kind: candidateKind,
+                participantCount: participants.count,
+                participantHandles: participants.sorted(),
+                service: candidate.service
+            )
+            if let prior = matches[publicID], prior != destination { return .ambiguous }
+            matches[publicID] = destination
+        }
+        if matches.count > 1 { return .ambiguous }
+        if let match = matches.first {
+            return .unique(publicChatID: match.key, destination: match.value)
+        }
+        return .none
     }
 }
 

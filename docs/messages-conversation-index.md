@@ -150,7 +150,12 @@ Raw row IDs are internal batching keys and are never returned.
 Chat IDs identify conversations. `messageGuid` identifies a message record;
 neither is authorization for a side effect. `messages_send` validates and
 resolves a chat ID before confirmation and again immediately before its
-separately authorized existing-chat submission. Future reply, reaction, edit,
+separately authorized existing-chat submission. It may also resolve one raw
+handle to an exact direct membership or an unordered complete handle set to an
+exact group membership. These comparisons use verified E.164 values unchanged
+and lowercase syntactically valid emails; they never infer country codes,
+merge phone and email identities, scan message senders, or accept subset or
+superset group matches. Incomplete membership is non-matchable. Future reply, reaction, edit,
 or retraction tools must apply the same fresh-validation rule to the relevant
 identifier.
 

@@ -316,15 +316,24 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         Tool(
             name: "messages_send",
             description:
-                "Submit one plain-text message to either one exact recipient handle or one existing Messages conversation identified by messages_list_chats. Existing-chat sends always require confirmation.",
+                "Submit one plain-text message using exactly one destination. A recipient first uses one uniquely matching existing direct conversation, or retains raw-recipient behavior when none exists. Recipients can address only an existing group conversation: iMCP cannot create a new group from a list, and the complete participant set must exactly match one existing group or the call fails without sending. When multiple groups have the same participant set, use chat_id; chat_id is preferred when the intended group is already known. Existing-chat sends always require confirmation.",
             inputSchema: .object(
                 properties: [
                     "recipient": .string(
-                        description: "One exact E.164 phone number or email address"
+                        description:
+                            "One exact E.164 phone number or email address. A unique existing direct conversation is used when available; otherwise the established raw-recipient path is used."
+                    ),
+                    "recipients": .array(
+                        description:
+                            "The complete set of remote participants in an existing group conversation. This does not create a new group. The set must exactly match one existing group, or the call fails without sending.",
+                        items: .string(
+                            description: "One exact E.164 phone number or email address"
+                        ),
+                        minItems: 2
                     ),
                     "chat_id": .string(
                         description:
-                            "Opaque chat ID returned by messages_list_chats; do not supply a database or scripting identifier",
+                            "Opaque chat ID returned by messages_list_chats that explicitly selects an existing direct or group conversation; preferred when the intended group is already known. Do not supply a database or scripting identifier.",
                         minLength: 1
                     ),
                     "body": .string(
@@ -351,21 +360,53 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 throw MessageSendError.emptyBody
             }
 
-            let initialChat: MessagesResolvedChatDestination?
+            let preparedDestination: PreparedSendDestination
             switch input.destination {
-            case .recipient:
-                initialChat = nil
+            case .recipient(let recipient):
+                let participants = Set([MessagesHandleNormalization.normalize(recipient)!])
+                switch try await self.matchSendConversation(participants, kind: .direct) {
+                case .none, .incomplete:
+                    preparedDestination = .rawRecipient(recipient)
+                case .ambiguous:
+                    throw MessageSendError.ambiguousDirectConversation
+                case .unique(let publicChatID, let destination):
+                    preparedDestination = .matched(
+                        publicChatID: publicChatID,
+                        expectedParticipants: participants,
+                        initial: destination
+                    )
+                }
+            case .recipients(let participants):
+                switch try await self.matchSendConversation(participants, kind: .group) {
+                case .none:
+                    throw MessageSendError.groupConversationNotFound
+                case .incomplete:
+                    throw MessageSendError.incompleteGroupMembership
+                case .ambiguous:
+                    throw MessageSendError.ambiguousGroupConversation
+                case .unique(let publicChatID, let destination):
+                    preparedDestination = .matched(
+                        publicChatID: publicChatID,
+                        expectedParticipants: participants,
+                        initial: destination
+                    )
+                }
             case .chat(let chatID):
-                initialChat = try await self.resolveSendChat(chatID)
+                preparedDestination = .explicitChat(
+                    publicChatID: chatID,
+                    initial: try await self.resolveSendChat(chatID)
+                )
             }
 
+            let initialChat = preparedDestination.chat
             if initialChat != nil || self.requiresSendConfirmation() {
                 let confirmationMessage: String
                 let confirmationTitle: String
                 if let initialChat {
                     confirmationMessage = self.chatConfirmationMessage(
                         initialChat,
-                        body: input.body
+                        body: input.body,
+                        matchedFromParticipants: preparedDestination.isMatchedGroup
                     )
                     confirmationTitle = "Confirm existing-chat submission"
                 } else {
@@ -404,14 +445,13 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             }
 
             try Task.checkCancellation()
-            switch input.destination {
-            case .recipient(let recipient):
+            switch preparedDestination {
+            case .rawRecipient(let recipient):
                 try await self.sender.submit(recipient: recipient, body: input.body)
-                log.notice("Messages accepted one submission destination=recipient")
+                log.notice("Messages accepted one submission destination=recipient path=raw-recipient")
                 return MessageSubmissionResult(status: "submitted", service: "iMessage")
-            case .chat(let chatID):
-                guard let initialChat else { throw MessageSendError.staleChatIdentifier }
-                let revalidatedChat = try await self.resolveSendChat(chatID)
+            case .explicitChat(let publicChatID, let initialChat):
+                let revalidatedChat = try await self.resolveSendChat(publicChatID)
                 guard revalidatedChat == initialChat else {
                     throw MessageSendError.staleChatIdentifier
                 }
@@ -422,6 +462,21 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 )
                 log.notice(
                     "Messages accepted one submission destination=chat kind=\(revalidatedChat.kind.rawValue, privacy: .public)"
+                )
+                return MessageSubmissionResult(status: "submitted", service: "Messages")
+            case .matched(let publicChatID, let expectedParticipants, let initial):
+                let match = try await self.matchSendConversation(
+                    expectedParticipants,
+                    kind: initial.kind
+                )
+                guard case .unique(let revalidatedID, let revalidatedChat) = match,
+                    revalidatedID == publicChatID,
+                    revalidatedChat == initial
+                else { throw MessageSendError.staleMatchedConversation }
+                try Task.checkCancellation()
+                try await self.sender.submit(chatGUID: revalidatedChat.chatGuid, body: input.body)
+                log.notice(
+                    "Messages accepted one submission destination=\(initial.kind == .group ? "recipients" : "recipient", privacy: .public) resolution=unique path=existing-chat kind=\(initial.kind.rawValue, privacy: .public)"
                 )
                 return MessageSubmissionResult(status: "submitted", service: "Messages")
             }
@@ -471,7 +526,30 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
 
     private enum SendDestination {
         case recipient(String)
+        case recipients(Set<String>)
         case chat(String)
+    }
+
+    private enum PreparedSendDestination {
+        case rawRecipient(String)
+        case explicitChat(publicChatID: String, initial: MessagesResolvedChatDestination)
+        case matched(
+            publicChatID: String,
+            expectedParticipants: Set<String>,
+            initial: MessagesResolvedChatDestination
+        )
+
+        var chat: MessagesResolvedChatDestination? {
+            switch self {
+            case .rawRecipient: nil
+            case .explicitChat(_, let initial), .matched(_, _, let initial): initial
+            }
+        }
+
+        var isMatchedGroup: Bool {
+            if case .matched(_, _, let initial) = self { return initial.kind == .group }
+            return false
+        }
     }
 
     private struct ResolvedSendInput {
@@ -483,22 +561,18 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         _ arguments: [String: Value],
         context: ToolCallContext
     ) async throws -> ResolvedSendInput {
-        var recipient = arguments["recipient"]?.stringValue
+        let recipient = arguments["recipient"]?.stringValue
+        let recipientsValue = arguments["recipients"]
         let chatID = arguments["chat_id"]?.stringValue
         var body = arguments["body"]?.stringValue
-        guard recipient == nil || chatID == nil else {
+        let suppliedDestinationCount = [recipient != nil, recipientsValue != nil, chatID != nil]
+            .filter { $0 }.count
+        guard suppliedDestinationCount == 1 else {
             throw MessageSendError.invalidDestination
         }
 
         var properties: [String: MCP.Value] = [:]
         var required: [String] = []
-        if recipient == nil, chatID == nil {
-            properties["recipient"] = .object([
-                "type": .string("string"),
-                "description": .string("One exact E.164 phone number or email address"),
-            ])
-            required.append("recipient")
-        }
         if body == nil {
             properties["body"] = .object([
                 "type": .string("string"),
@@ -523,7 +597,6 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             case .cancel:
                 throw MessageSendError.inputCancelled
             case .accept:
-                recipient = recipient ?? response.content?["recipient"]?.stringValue
                 body = body ?? response.content?["body"]?.stringValue
             }
         }
@@ -536,6 +609,22 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 throw MessageSendError.invalidRecipient
             }
             return ResolvedSendInput(destination: .recipient(recipient), body: body)
+        }
+        if let recipientsValue {
+            guard case .array(let values) = recipientsValue else {
+                throw MessageSendError.insufficientGroupParticipants
+            }
+            let handles = values.compactMap(\.stringValue)
+            guard handles.count == values.count else {
+                throw MessageSendError.invalidRecipient
+            }
+            let normalized = handles.compactMap(MessagesHandleNormalization.normalize)
+            guard normalized.count == handles.count else { throw MessageSendError.invalidRecipient }
+            let distinct = Set(normalized)
+            guard distinct.count >= 2 else {
+                throw MessageSendError.insufficientGroupParticipants
+            }
+            return ResolvedSendInput(destination: .recipients(distinct), body: body)
         }
         guard let chatID else { throw MessageSendError.invalidDestination }
         guard !chatID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -573,9 +662,31 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         }
     }
 
+    private func matchSendConversation(
+        _ normalizedParticipants: Set<String>,
+        kind: MessagesChatKind
+    ) async throws -> MessagesConversationMatch {
+        if let chatDatabasePathOverride {
+            return try chatRepository.matchConversation(
+                normalizedParticipants: normalizedParticipants,
+                kind: kind,
+                databasePath: chatDatabasePathOverride
+            )
+        }
+        let directoryURL = try resolveChatDatabaseDirectoryBookmarkURL()
+        return try withSecurityScopedAccess(directoryURL) { directoryURL in
+            try chatRepository.matchConversation(
+                normalizedParticipants: normalizedParticipants,
+                kind: kind,
+                databasePath: directoryURL.appendingPathComponent("chat.db").path
+            )
+        }
+    }
+
     private func chatConfirmationMessage(
         _ chat: MessagesResolvedChatDestination,
-        body: String
+        body: String,
+        matchedFromParticipants: Bool = false
     ) -> String {
         let fallback = chat.participantHandles.first ?? "Unnamed conversation"
         let name = chat.displayName ?? (chat.kind == .direct ? fallback : "Unnamed group")
@@ -592,6 +703,12 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             lines.append("Participants: \(chat.participantHandles.joined(separator: ", "))")
         }
         if let service = chat.service { lines.append("Service: \(service)") }
+        if matchedFromParticipants {
+            lines.append("This existing group exactly matches the supplied participants.")
+            lines.append("No new group will be created.")
+        } else {
+            lines.append("An existing conversation will be used.")
+        }
         lines.append("Message:")
         lines.append(body)
         return lines.joined(separator: "\n")
