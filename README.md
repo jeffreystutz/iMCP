@@ -363,6 +363,13 @@ Here's how to connect it to iMCP:
 
 <br clear="all">
 
+## Contributing
+
+Working instructions for this fork live in [AGENTS.md](AGENTS.md).
+Branch, verification, review, and acceptance sequencing is documented in
+[docs/development-workflow.md](docs/development-workflow.md).
+Architecture decisions are recorded in [docs/decisions/](docs/decisions/README.md).
+
 ## Acknowledgments
 
 - [Justin Spahr-Summers](https://jspahrsummers.com/)
