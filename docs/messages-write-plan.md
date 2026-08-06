@@ -128,13 +128,15 @@ iMessage only.
 The tool:
 
 - may elicit missing input, then validates the effective values;
-- performs a separate form-elicitation confirmation by default;
-- permits an explicit, persistent app-local opt-out with a destructive warning
-  for clients that do not support form elicitation;
+- always performs a separate form-elicitation confirmation, for every
+  destination form, with no opt-out of any kind;
+- shows the exact destination and exact body in that confirmation, because it is
+  the surface on which the user authorizes an externally visible side effect;
+- treats missing-input elicitation as input gathering only, never as
+  authorization;
 - fails closed for unsupported, declined, cancelled, malformed, or timed-out
   elicitation;
-- requests TCC only after confirmation, or after validation when confirmation
-  has been explicitly disabled;
+- requests TCC only after a successful confirmation;
 - passes recipient and body as Apple Event descriptors to a fixed in-process
   handler;
 - dispatches at most one send event and never retries after dispatch or an
@@ -169,9 +171,9 @@ caller already knows the intended group. Contacts and message-history senders
 are not consulted.
 
 Chat sends resolve the opaque ID to current display/room, direct/group,
-participant, service, and database GUID metadata before confirmation. Unlike
-recipient sends, their confirmation cannot be disabled and shows the selected
-conversation plus the exact body. The same opaque ID is resolved again after
+participant, service, and database GUID metadata before confirmation. Their
+confirmation shows the selected conversation plus the exact body. The same
+opaque ID is resolved again after
 acceptance, and all confirmed metadata must still match before dispatch.
 Recipient- and participant-matched conversations follow the same mandatory
 confirmation path and repeat the exact membership match before dispatch. A
@@ -298,26 +300,40 @@ upstream MIT notice is retained in `THIRD_PARTY_NOTICES.md`. Apply the same
 source-level identification if additional substantial source or tests are
 adapted later.
 
-## Pull request sequence
+## Delivery strategy
 
-1. **Combined form elicitation and direct iMessage send.** Add the
-   per-connection call context and requester, proxy round-trip coverage, local
-   typed send errors, fixed AppleScript adapter, entitlements and usage
-   description, default-on confirmation with an explicit local opt-out,
-   minimal JSON text result, redacted
-   logging, tests, and both Proposed ADRs. The direct-send portion depends on a
-   successful local Track B experiment. Do not open the PR until requested.
-2. **Generic structured tool outputs.** Forward optional output schemas and
-   structured content while retaining JSON text compatibility. Depends on the
-   combined first PR.
-3. **URL elicitation and broader compatibility.** Extend the requester to URL
-   mode, add completion correlation, extract pure proxy framing, and expand the
-   client compatibility matrix. Depends on the combined first PR but follows
-   structured-output support in delivery.
-4. **Native contact resolution.** Use Contacts APIs and form elicitation for
-   ambiguity; do not query private AddressBook databases.
-5. **Explicit groups and additional services.** Add only after separate
-   experiments; never silently fall back or issue more than one send event.
+Development is feature-complete-first. The safe public-API scope is finished and
+hardened on the active review branch before any of it is decomposed into
+upstream pull requests, so the maintainer receives a coherent, polished
+contribution rather than a partially designed feature.
+
+No maintainer-facing pull request is opened during feature completion. See
+[`development-workflow.md`](development-workflow.md) for branch, review, and
+acceptance sequencing.
+
+### Upstream decomposition, after feature completion
+
+Once the public scope is complete and hardened, map the accumulated
+implementation into independently reviewable pull requests whose intermediate
+states each build and test. Likely boundaries, kept in dependency order:
+
+1. **Generic form elicitation.** The per-connection call context and requester,
+   capability handling, cancellation and timeout behavior, and proxy round-trip
+   coverage. Carries no Messages-specific behavior.
+2. **Safe direct send and automation.** Typed send errors, the fixed AppleScript
+   adapter, entitlements and usage description, mandatory confirmation showing
+   the exact destination and body, minimal JSON text result, redacted logging,
+   and the relevant Proposed ADRs.
+3. **Conversation index.** Schema-resilient read-only listing, participant
+   identity, and metadata availability reporting.
+4. **Chat-target sending and existing-conversation matching.** Opaque chat IDs,
+   revalidation before dispatch, and exact participant-set matching.
+5. **New-recipient routing.** Only after its own experiments.
+6. **Contacts resolution**, then **attachments**, then **compatibility and
+   release documentation.**
+
+These boundaries are a plan, not a commitment; confirm them against the actual
+accumulated diff when decomposition begins.
 
 ## Unresolved upstream questions
 

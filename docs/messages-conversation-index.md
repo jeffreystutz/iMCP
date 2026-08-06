@@ -47,13 +47,13 @@ unit from a value's magnitude.
   AppleScript, or authorization.
 - `chatIdentifier`, `groupId`, `originalGroupId`, `roomName`, `displayName`:
   nullable database metadata when the corresponding column exists.
-- `kind`: `group` when there are more than one distinct remote membership
-  records, otherwise `direct`; unavailable if membership joins are unavailable.
-- `participants`: deterministically sorted, exactly deduplicated remote
-  membership records. It is `[]` for a supported empty relationship and `null`
-  when the membership relationship is unavailable.
+- `kind`: `group` when more than one distinct remote *identity* is present,
+  otherwise `direct`; unavailable if membership joins are unavailable.
+- `participants`: deterministically sorted remote participants, one per remote
+  identity. It is `[]` for a supported empty relationship and `null` when the
+  membership relationship is unavailable.
 - `participantCount`: the number of returned remote participants; it excludes
-  the current user. Phone and email handles remain separate.
+  the current user. Phone and email handles remain separate identities.
 - `service`: nullable service recorded on the chat.
 - `isArchived`, `isFiltered`: nullable booleans when supported. Screened state
   is reported unavailable because the inspected schema's pending-review and
@@ -61,14 +61,46 @@ unit from a value's magnitude.
 - `lastReadTimestamp`: nullable Apple-reference timestamp when supported.
 - `latestActivity`: newest chat/message-join activity timestamp when supported.
 
-Each participant contains `handle`, nullable `originalHandle`, `canonicalE164`,
-`email`, `service`, and `country`. `canonicalE164` is populated only when the
-stored handle itself strictly matches `+` followed by 2–15 digits with a
-nonzero country-code digit. No normalization or country-based guessing occurs.
-`email` is populated only for an unmistakable email-shaped stored handle. A
-direct chat whose supported membership is empty may use `chatIdentifier` only
-when it independently passes one of those validators. Message senders are
+### Participant identity
+
+One definition of remote-handle identity governs participant counts,
+direct/group classification, the participant list, and chat resolution, so
+these can never disagree:
+
+1. The stored handle is trimmed of surrounding whitespace.
+2. A valid E.164 number is its own identity, exactly as stored.
+3. A syntactically valid email is lowercased.
+4. Any other nonempty handle is its own identity, exactly as trimmed. No
+   country code is inferred and no value is reinterpreted.
+5. A missing or empty value creates no participant.
+
+Several `handle` rows can therefore describe one identity — duplicate
+relationship rows, an email stored with different letter case, or the same
+handle observed on more than one service. They collapse into a single
+participant, so they cannot inflate `participantCount` or turn a direct
+conversation into a group.
+
+Each participant contains `handle` (the identity), nullable `originalHandle`,
+`canonicalE164`, `email`, `service`, and `country`. `canonicalE164` is populated
+only when the identity strictly matches `+` followed by 2–15 digits with a
+nonzero country-code digit; `email` only for an unmistakable email-shaped
+identity.
+
+When one identity was observed with differing metadata, `originalHandle`,
+`service`, and `country` carry the lexicographically first observed value so
+output is deterministic, and the optional `originalHandles`, `services`, and
+`countries` arrays list every distinct observed value sorted. Those arrays are
+omitted when only one value was observed.
+
+A direct chat whose supported membership is empty may use `chatIdentifier` only
+when it independently passes the E.164 or email validator. Message senders are
 never scanned for ordinary membership.
+
+`kind` filtering is applied in SQL as a bounded prefilter and then reapplied
+authoritatively in Swift, because SQLite text folding cannot exactly reproduce
+the identity rules above. A returned `kind` therefore always agrees with the
+`kind` filter that selected it, though a filtered page may contain fewer than
+`limit` conversations when prefiltered rows are reclassified.
 
 ## Full metadata
 
@@ -152,14 +184,30 @@ neither is authorization for a side effect. `messages_send` validates and
 resolves a chat ID before confirmation and again immediately before its
 separately authorized existing-chat submission. It may also resolve one raw
 handle to an exact direct membership or an unordered complete handle set to an
-exact group membership. These comparisons use verified E.164 values unchanged
-and lowercase syntactically valid emails; they never infer country codes,
-merge phone and email identities, scan message senders, or accept subset or
-superset group matches. Incomplete membership is non-matchable. Future reply, reaction, edit,
+exact group membership. These comparisons use a stricter rule than listing identity: only a
+verified E.164 value or a syntactically valid lowercased email may be matched,
+because a destination must be comparable exactly. They never infer country
+codes, merge phone and email identities, scan message senders, or accept subset
+or superset group matches.
+
+A stored participant that fails that stricter rule makes matching *incomplete*
+rather than being ignored, whenever it could still denote a requested
+participant — a phone number kept in a local or formatted style, for example.
+An incomplete result dispatches nothing and reports a dedicated error asking for
+an explicit `chat_id`; for a single recipient it must never be reinterpreted as
+a verified no-match, which would abandon an existing SMS or RCS conversation and
+start a new one on a different route. A stored handle that could not denote any
+requested participant, such as a short code, stays a plain no-match. Future reply, reaction, edit,
 or retraction tools must apply the same fresh-validation rule to the relevant
 identifier.
 
-The result intentionally returns handles and conversation identifiers. Logs
-contain only detail level, count, elapsed time, and stable diagnostic stages or
-numeric SQLite codes. They never contain result objects, handles, names, GUIDs,
+The result intentionally returns handles and conversation identifiers: they are
+what the caller asked for, and the permission alert shown before access says so
+explicitly. That intent does not extend to incidental exposure. Logs contain
+only detail level, count, elapsed time, and stable diagnostic stages or numeric
+SQLite codes. They never contain result objects, handles, names, GUIDs,
 attachment metadata, SQL, or database rows.
+
+The opaque chat ID provides versioning, validation, and concealment of the
+underlying GUID representation. It is not an access control and does not make
+the other intentionally returned conversation metadata confidential.

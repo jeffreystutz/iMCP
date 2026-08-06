@@ -63,13 +63,37 @@ The binding rules:
 
 - No real message may be sent without separate explicit authorization of the
   exact destination and the exact body for that manual test.
-- Private Messages contents and identifiers — recipient handles, participant
-  sets, chat identifiers, message bodies, attachment paths, and raw database
-  rows — must not appear in logs, errors, results, fixtures, documentation, test
-  failures, or commits.
+- Every message submission requires its own accepted form confirmation. There is
+  no setting, build flag, debug path, environment variable, or injected
+  dependency that may bypass it.
 - Product work must preserve the fixed-script, descriptor-input, one-dispatch,
   no-retry, fail-closed architecture. AppleScript source stays fixed; untrusted
   identifiers and message content enter only as Apple Event descriptors.
+
+### What may contain private values
+
+These surfaces exist to serve the user and are allowed to carry the values the
+user asked for:
+
+- Documented `messages_list_chats` output may contain the conversation metadata
+  its API defines, including participant handles and conversation identifiers.
+- The final confirmation elicitation may — and must — contain the exact
+  destination and the exact message body, because it is the authorization
+  surface. A prompt that hides what is being sent cannot authorize it.
+- Tests and documentation may contain unmistakably synthetic, non-real values.
+
+### What must never contain real private values
+
+Real Messages data must never appear in production logs, operational errors,
+redacted send results, analytics, test fixtures, assertions, documentation
+examples, prompt logs, or commits.
+
+Recipient handles, participant sets, chat identifiers, message bodies,
+attachment paths, and raw database rows must stay redacted from ordinary send
+results and from every diagnostic.
+
+Use synthetic values such as `example.invalid` handles. Never relax the rule
+against logging or committing real private data.
 - Apple Events authority belongs to the signed app, never the nested CLI.
 - Prefer mocks, fixtures, dry-run behavior, or a designated test recipient.
 - Do not modify the sibling `../mac_messages_mcp` repository. Treat it as

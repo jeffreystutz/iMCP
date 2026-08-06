@@ -19,8 +19,8 @@ ambiguous result.
 
 ## Decision drivers
 
-- Require explicit user confirmation by default, with a deliberate local
-  opt-out for clients that do not support form elicitation.
+- Require explicit user confirmation for every submission, with no opt-out.
+- Show the exact destination and exact body in that confirmation.
 - Keep Apple Events authority in the signed app rather than the CLI proxy.
 - Prevent script injection and duplicate sends.
 - Preserve the read-only Messages flow.
@@ -46,22 +46,37 @@ not be appropriate upstream.
 
 ## Decision
 
-Use an actor-serialized, in-process fixed AppleScript handler. Require
-form-elicitation confirmation by default. Expose a persistent app setting that
-can disable only the final confirmation step after presenting a destructive
-warning; when disabled, any trusted client can submit immediately with a valid,
-complete tool call. Missing inputs continue to require generic elicitation.
+Use an actor-serialized, in-process fixed AppleScript handler. Require an
+accepted form-elicitation confirmation carrying an explicit affirmative Boolean
+before every submission, on every destination form. There is no setting, build
+flag, debug path, environment variable, or injectable dependency that can
+bypass it. Missing-input elicitation gathers values only and is never treated
+as authorization; a separate final confirmation always follows.
 
-Request TCC only after confirmation when confirmation is enabled, or after
-input validation when the user has explicitly disabled confirmation. Pass
-untrusted values through descriptors, dispatch no more than one `send` event,
-and never retry after dispatch or an ambiguous result.
+The confirmation displays the exact destination and the exact body. It is the
+surface on which a person authorizes an externally visible side effect, so
+hiding those values there would make authorization meaningless. They remain
+excluded from logs, diagnostics, errors, and tool results.
+
+Request TCC only after a successful confirmation. Pass untrusted values through
+descriptors, dispatch no more than one `send` event, and never retry after
+dispatch or an ambiguous result.
 
 The recipient path first compares one validated handle with direct-chat
-membership. One unique match uses the existing-chat path; no match preserves
-the original plain-text iMessage recipient path and its explicit local
-confirmation opt-out. Multiple matches fail and require a chat ID. This does
-not resolve contacts or match a participant's group chats.
+membership. Only a verified no-match may use the plain-text iMessage recipient
+path, and its confirmation states that a new direct conversation will be
+started. A unique match uses the existing-chat path. Multiple matches fail and
+require a chat ID.
+
+Unresolvable membership is distinct from a verified no-match. When a stored
+participant cannot be compared exactly — a phone number kept in a local or
+formatted style, for instance — and it could still denote the requested
+recipient, matching reports incomplete and the call fails with a dedicated
+direct-membership error. Treating unresolvable evidence as absence could
+abandon an existing SMS or RCS conversation and start a new one on a different
+route. A stored handle that could not denote any requested participant, such as
+a short code, remains a plain no-match. This does not resolve contacts or match
+a participant's group chats.
 
 A complete set of two or more validated remote handles may select only one
 existing group whose normalized membership is exactly equal. Ordering and
@@ -72,8 +87,7 @@ lowercases the trimmed address, while phone matching accepts only already-valid
 E.164 and never infers a country code or equates a phone with an email.
 
 The tool also accepts one opaque chat ID produced by the conversation index.
-Chat sends always require form confirmation, including when recipient
-confirmation is disabled. Resolve current safe display metadata before
+Resolve current safe display metadata before
 confirmation, resolve the opaque ID again afterward, require the confirmed
 metadata to remain unchanged, and pass only the resulting chat GUID and body
 as descriptors to a fixed handler. The handler requires exactly one scripting
@@ -98,9 +112,9 @@ Descriptor arguments avoid interpolating user-controlled content into source.
 
 ### Positive
 
-- Permission and confirmation boundaries are explicit.
-- Clients without elicitation can send only after the user explicitly disables
-  the default confirmation requirement in iMCP settings.
+- Permission and confirmation boundaries are explicit and unconditional.
+- A client that cannot present a form cannot send at all, which is the intended
+  fail-closed outcome rather than a gap to work around.
 - Tests can replace the automation adapter without touching Messages.
 - No private database or framework writes are required.
 
@@ -110,16 +124,19 @@ Descriptor arguments avoid interpolating user-controlled content into source.
 - Script execution is synchronous and cancellation after dispatch is
   inherently ambiguous.
 - Submission cannot establish delivery.
-- Disabling confirmation delegates authorization to the trusted MCP client;
-  each valid recipient-based `messages_send` call can immediately cause an
-  external side effect. It does not disable existing-chat confirmation.
+- Clients that do not support form elicitation cannot send at all.
+- A recipient whose existing conversation cannot be resolved exactly fails
+  rather than sending, so some legitimate sends require an explicit `chat_id`.
+- Timeout or cancellation cancels the wrapper's underlying request task but
+  cannot retract a prompt the client already displayed; the pinned MCP Swift SDK
+  never exposes the elicitation request ID that `Server.cancelRequest` would
+  need. A late response is discarded and can never dispatch.
 
 ### Risks and mitigations
 
 - Duplicate sends: issue one event and prohibit automatic retry.
-- Confirmation bypass: default to confirmation enabled, require a destructive
-  warning before disabling it, and limit the bypass to the final confirmation
-  rather than missing-input collection or validation.
+- Confirmation bypass: no bypass exists. A regression test asserts the removed
+  preference key, settings UI, and injectable predicate have not returned.
 - Privacy leakage: exclude recipient and body from logs, errors, and results.
 - Distribution rejection: document Developer ID/notarization uncertainty with
   the maintainer; local development viability is a separate gate.
@@ -139,8 +156,10 @@ command and performed no account, chat, participant, contact, or history
 enumeration. No message was sent.
 
 Automated tests use a fake dispatcher and cover every no-send confirmation
-path, missing-input elicitation, confirmation-disabled behavior, redacted
-results, fixed script source, and the at-most-one dispatch invariant.
+path, missing-input elicitation being distinct from final confirmation,
+exact-value authorization content, unresolvable direct membership failing
+closed, redacted results, fixed script source, and the at-most-one dispatch
+invariant.
 
 On 2026-07-21, a second ignored signed sandboxed probe performed no-send lookup
 only. Messages' scripting definition identifies `chat.id` as the chat GUID and

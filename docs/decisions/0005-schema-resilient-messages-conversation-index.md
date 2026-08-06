@@ -38,6 +38,29 @@ five-second query deadline. Schema discovery adds small per-call overhead and
 is intentionally not cached globally, avoiding stale capabilities and private
 content caches.
 
+Participant identity has exactly one definition, `MessagesHandleIdentity`,
+shared by participant counts, direct/group classification, the participant list,
+and chat resolution. A trimmed handle is its own identity; a valid E.164 number
+keeps its exact form; a syntactically valid email is lowercased; no country code
+is inferred and no value is reinterpreted. Several `handle` rows describing one
+identity therefore collapse into one participant, so duplicate relationship
+rows, letter-case differences, and differing service or country metadata can
+neither inflate `participantCount` nor turn a direct conversation into a group.
+Multiple metadata observations merge deterministically, exposing the
+lexicographically first value plus plural fields when observations differ.
+
+SQL-side `kind` filtering counts distinct normalized handle text, but SQLite
+text folding cannot be made identical to the Swift definition for every stored
+handle. The filter is therefore only a bounded prefilter: results are classified
+authoritatively in Swift and rows that disagree with the requested kind are
+dropped before the caller's limit is applied, so a returned `kind` can never
+contradict the filter that selected it.
+
+Send matching keeps a stricter rule that accepts only valid E.164 or a
+syntactically valid email, because a destination must be comparable exactly. A
+stored participant that fails it makes matching incomplete when it could still
+denote the request, rather than being silently ignored.
+
 The result now intentionally contains participant handles and raw Messages
 GUID metadata. Logging therefore remains strictly operational and future
 side-effecting tools must treat every returned identifier as data requiring

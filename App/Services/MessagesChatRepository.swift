@@ -14,6 +14,14 @@ enum MessagesChatDetail: String, Codable, Sendable {
     case full
 }
 
+/// One remote participant, keyed by its normalized identity.
+///
+/// Several `handle` rows can describe the same remote identity — duplicate relationship
+/// rows, differing letter case in an email, or the same handle observed on more than one
+/// service. Those collapse into a single participant. `handle` is the normalized identity;
+/// `originalHandle`, `service`, and `country` expose the lexicographically first observed
+/// value so output is deterministic, and the plural fields appear only when more than one
+/// distinct value was observed for that identity.
 struct MessagesParticipant: Encodable, Equatable, Hashable, Sendable {
     let handle: String
     let originalHandle: String?
@@ -21,6 +29,9 @@ struct MessagesParticipant: Encodable, Equatable, Hashable, Sendable {
     let email: String?
     let service: String?
     let country: String?
+    var originalHandles: [String]?
+    var services: [String]?
+    var countries: [String]?
 }
 
 struct MessagesActivityRecord: Encodable, Equatable, Sendable {
@@ -253,6 +264,29 @@ enum MessagesConversationMatch: Equatable, Sendable {
     case incomplete
 }
 
+/// The single definition of remote-handle identity used for counting participants and for
+/// classifying a conversation as direct or group.
+///
+/// Every stored handle that carries a value yields exactly one identity, so a handle that
+/// is neither E.164 nor an email is still a participant rather than being silently dropped.
+/// No country code is inferred and no value is reinterpreted as another identity.
+enum MessagesHandleIdentity {
+    static func identity(_ handle: String) -> String? {
+        let trimmed = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.wholeMatch(of: /^\+[1-9][0-9]{1,14}$/) != nil { return trimmed }
+        if trimmed.wholeMatch(of: /^[^\s@]+@[^\s@]+\.[^\s@]+$/) != nil {
+            return trimmed.lowercased()
+        }
+        return trimmed
+    }
+}
+
+/// The stricter identity rule used only for send matching.
+///
+/// Matching a destination must not act on a handle it cannot exactly compare, so anything
+/// that is not valid E.164 or a syntactically valid email yields `nil`. Callers treat that
+/// as incomplete membership rather than ignoring the participant.
 enum MessagesHandleNormalization {
     static func normalize(_ handle: String) -> String? {
         let trimmed = handle.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -261,6 +295,47 @@ enum MessagesHandleNormalization {
             return trimmed.lowercased()
         }
         return nil
+    }
+}
+
+func messagesHandleIsE164(_ value: String) -> Bool {
+    value.range(of: #"^\+[1-9][0-9]{1,14}$"#, options: .regularExpression) != nil
+}
+
+func messagesHandleIsEmail(_ value: String) -> Bool {
+    value.range(of: #"^[^\s@]+@[^\s@]+\.[^\s@]+$"#, options: .regularExpression) != nil
+}
+
+/// Accumulates every stored observation of one remote identity within a conversation and
+/// folds them into a single deterministic participant.
+struct ParticipantObservations {
+    let identity: String
+    private var originals: Set<String> = []
+    private var services: Set<String> = []
+    private var countries: Set<String> = []
+
+    init(identity: String) {
+        self.identity = identity
+    }
+
+    mutating func observe(original: String?, service: String?, country: String?) {
+        if let original, !original.isEmpty { originals.insert(original) }
+        if let service, !service.isEmpty { services.insert(service) }
+        if let country, !country.isEmpty { countries.insert(country) }
+    }
+
+    func participant() -> MessagesParticipant {
+        MessagesParticipant(
+            handle: identity,
+            originalHandle: originals.min(),
+            canonicalE164: messagesHandleIsE164(identity) ? identity : nil,
+            email: messagesHandleIsEmail(identity) ? identity : nil,
+            service: services.min(),
+            country: countries.min(),
+            originalHandles: originals.count > 1 ? originals.sorted() : nil,
+            services: services.count > 1 ? services.sorted() : nil,
+            countries: countries.count > 1 ? countries.sorted() : nil
+        )
     }
 }
 
@@ -432,6 +507,10 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
         self.queryObserver = queryObserver
     }
 
+    /// Upper bound on rows pulled before authoritative Swift classification narrows them
+    /// back down to the caller's limit.
+    static let maximumPrefilterLimit = 500
+
     func listChats(
         databasePath: String,
         limit: Int,
@@ -462,10 +541,14 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
         try execute("BEGIN DEFERRED TRANSACTION", stage: "snapshot", database: database)
         do {
             var availability = availability(for: capabilities)
+            // The SQL kind filter is only a prefilter: SQLite's text folding cannot be made
+            // identical to `MessagesHandleIdentity` for every stored handle. Over-fetch, let
+            // the Swift identity model classify authoritatively, then drop rows that do not
+            // match the requested kind so a returned `kind` can never contradict the filter.
             var records = try fetchChats(
                 database: database,
                 capabilities: capabilities,
-                limit: limit,
+                limit: kind == nil ? limit : min(limit * 2 + 8, Self.maximumPrefilterLimit),
                 kind: kind
             )
             try checkBoundary(guardState)
@@ -475,6 +558,13 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
                 capabilities: capabilities,
                 availability: &availability
             )
+            if let kind {
+                records.removeAll { record in
+                    guard let resolvedKind = record.chat.kind else { return false }
+                    return resolvedKind != kind
+                }
+            }
+            if records.count > limit { records.removeLast(records.count - limit) }
             if detail == .full {
                 try fetchFullMetadata(
                     into: &records,
@@ -552,6 +642,31 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
         }
     }
 
+    /// Whether a stored handle that failed strict send normalization could still denote one
+    /// of the requested participants.
+    ///
+    /// This deliberately answers "could not possibly" rather than "is". It never infers a
+    /// country code or rewrites a handle into a destination — its only use is deciding
+    /// whether a conversation must be reported as unresolvable instead of no-match.
+    static func unresolvableHandle(
+        _ stored: String,
+        couldDenoteAnyOf requested: Set<String>
+    ) -> Bool {
+        if stored.contains("@") {
+            let lowered = stored.lowercased()
+            return requested.contains { $0.contains("@") && $0 == lowered }
+        }
+        // Phone numbers are frequently stored in a local or formatted style that is not
+        // valid E.164. Compare significant digits only.
+        let digits = String(stored.filter(\.isNumber))
+        guard digits.count >= 7 else { return false }
+        return requested.contains { candidate in
+            guard candidate.hasPrefix("+") else { return false }
+            let candidateDigits = candidate.dropFirst()
+            return candidateDigits.hasSuffix(digits) || digits.hasSuffix(candidateDigits)
+        }
+    }
+
     func matchConversation(
         normalizedParticipants: Set<String>,
         kind: MessagesChatKind,
@@ -606,7 +721,8 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
             var service: String?
             var chatIdentifier: String?
             var participants: Set<String> = []
-            var incomplete = false
+            var unresolvable: Set<String> = []
+            var incomplete: Bool { !unresolvable.isEmpty }
         }
         var candidates: [String: Candidate] = [:]
         try stepRows(statement, stage: "match-step", database: database) { row in
@@ -623,14 +739,15 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
             if let storedHandle = trimmedText(row, column: 6) {
                 if let normalized = MessagesHandleNormalization.normalize(storedHandle) {
                     candidate.participants.insert(normalized)
-                } else {
-                    candidate.incomplete = true
+                } else if let identity = MessagesHandleIdentity.identity(storedHandle) {
+                    candidate.unresolvable.insert(identity)
                 }
             }
             candidates[guid] = candidate
         }
 
         var matches: [String: MessagesResolvedChatDestination] = [:]
+        var hasUnresolvableRelevantCandidate = false
         for candidate in candidates.values {
             var participants = candidate.participants
             if participants.isEmpty, let fallback = candidate.chatIdentifier,
@@ -638,7 +755,33 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
             {
                 participants.insert(normalized)
             }
-            guard !candidate.incomplete else { continue }
+            if candidate.incomplete {
+                // A stored participant that cannot be compared exactly — a phone number kept
+                // in a non-E.164 form, for instance — might be one of the requested
+                // participants, and no country code may be inferred to find out. Silently
+                // skipping such a candidate could abandon the real existing conversation and
+                // start a new one on a different route.
+                //
+                // Flag it only when it could still be this request: its resolvable
+                // participants already equal the requested set (so it looks like an exact
+                // match while holding extra members), or they are a subset that its
+                // unresolvable members could exactly complete.
+                //
+                // A handle that could not denote any requested participant at all — a short
+                // code, for instance — is simply a different conversation and is skipped.
+                let couldDenoteRequest = candidate.unresolvable.contains {
+                    Self.unresolvableHandle($0, couldDenoteAnyOf: normalizedParticipants)
+                }
+                let looksExact = participants == normalizedParticipants
+                let couldComplete =
+                    participants.isSubset(of: normalizedParticipants)
+                    && participants.count + candidate.unresolvable.count
+                        == normalizedParticipants.count
+                if couldDenoteRequest, looksExact || couldComplete {
+                    hasUnresolvableRelevantCandidate = true
+                }
+                continue
+            }
             let candidateKind: MessagesChatKind = participants.count > 1 ? .group : .direct
             guard candidateKind == kind else { continue }
             guard participants == normalizedParticipants else { continue }
@@ -656,6 +799,7 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
             matches[publicID] = destination
         }
         if matches.count > 1 { return .ambiguous }
+        if hasUnresolvableRelevantCandidate { return .incomplete }
         if let match = matches.first {
             return .unique(publicChatID: match.key, destination: match.value)
         }
@@ -698,7 +842,7 @@ private extension SQLiteMessagesChatRepository {
         else { throw MessagesChatRepositoryError.minimumSchemaUnavailable }
         let participantsStatement = try prepare(
             """
-            SELECT DISTINCT h.id
+            SELECT h.id
             FROM chat_handle_join chj JOIN handle h ON h.ROWID = chj.handle_id
             WHERE chj.chat_id = ? AND h.id IS NOT NULL
             ORDER BY h.id
@@ -710,19 +854,27 @@ private extension SQLiteMessagesChatRepository {
         guard sqlite3_bind_int64(participantsStatement, 1, rowId) == SQLITE_OK else {
             throw queryError(stage: "resolve-participants-bind", database: database)
         }
-        var participants: [String] = []
+        // Deduplicate by the same identity the conversation index uses, so a chat cannot be
+        // resolved as a group here while being listed as direct.
+        var identities: Set<String> = []
         try stepRows(
             participantsStatement,
             stage: "resolve-participants-step",
             database: database
         ) { statement in
-            if let handle = trimmedText(statement, column: 0) { participants.append(handle) }
+            if let handle = trimmedText(statement, column: 0),
+                let identity = MessagesHandleIdentity.identity(handle)
+            {
+                identities.insert(identity)
+            }
         }
-        if participants.isEmpty, let chatIdentifier,
-            isE164(chatIdentifier) || isEmail(chatIdentifier)
+        if identities.isEmpty, let chatIdentifier,
+            isE164(chatIdentifier) || isEmail(chatIdentifier),
+            let identity = MessagesHandleIdentity.identity(chatIdentifier)
         {
-            participants = [chatIdentifier]
+            identities.insert(identity)
         }
+        let participants = identities.sorted()
         return MessagesResolvedChatDestination(
             chatGuid: guid,
             displayName: displayName,
@@ -792,10 +944,22 @@ private extension SQLiteMessagesChatRepository {
         guard kind == nil || membershipSupported else {
             throw MessagesChatRepositoryError.queryFailed(stage: "kind-unavailable", code: SQLITE_OK)
         }
+        // Counting distinct handle rows would make one remote identity stored in several
+        // rows look like several participants, turning a direct chat into a group. Count
+        // distinct normalized handle text instead, matching `MessagesHandleIdentity` as
+        // closely as SQLite can. `fetchParticipants` remains the authority.
+        let identityCountSupported =
+            membershipSupported && capabilities.hasColumn("id", in: "handle")
         let countExpression =
-            membershipSupported
-            ? "(SELECT COUNT(DISTINCT handle_id) FROM chat_handle_join WHERE chat_id = c.ROWID)"
-            : "NULL"
+            identityCountSupported
+            ? """
+            (SELECT COUNT(DISTINCT LOWER(TRIM(h.id)))
+             FROM chat_handle_join chj JOIN handle h ON h.ROWID = chj.handle_id
+             WHERE chj.chat_id = c.ROWID AND TRIM(COALESCE(h.id, '')) <> '')
+            """
+            : membershipSupported
+                ? "(SELECT COUNT(DISTINCT handle_id) FROM chat_handle_join WHERE chat_id = c.ROWID)"
+                : "NULL"
         let latestExpression: String
         if capabilities.hasColumn("message_date", in: "chat_message_join") {
             latestExpression =
@@ -909,31 +1073,41 @@ private extension SQLiteMessagesChatRepository {
         let statement = try prepare(sql, stage: "participants-prepare", database: database)
         defer { sqlite3_finalize(statement) }
         try bind(records.map(\.rowId), to: statement, database: database)
-        var byChat: [Int64: Set<MessagesParticipant>] = [:]
+        // Collapse every observation of one remote identity into a single participant so
+        // duplicate relationship rows, letter-case differences, and differing service or
+        // country metadata cannot inflate the count or change direct/group classification.
+        var byChat: [Int64: [String: ParticipantObservations]] = [:]
         try stepRows(statement, stage: "participants-step", database: database) { statement in
-            guard let handle = trimmedText(statement, column: 1) else { return }
-            let participant = participant(
-                handle: handle,
+            guard let handle = trimmedText(statement, column: 1),
+                let identity = MessagesHandleIdentity.identity(handle)
+            else { return }
+            let chatId = sqlite3_column_int64(statement, 0)
+            var observations =
+                byChat[chatId]?[identity] ?? ParticipantObservations(identity: identity)
+            observations.observe(
                 original: trimmedText(statement, column: 2),
                 service: trimmedText(statement, column: 3),
                 country: trimmedText(statement, column: 4)
             )
-            byChat[sqlite3_column_int64(statement, 0), default: []].insert(participant)
+            byChat[chatId, default: [:]][identity] = observations
         }
         for index in records.indices {
-            var participants = Array(byChat[records[index].rowId] ?? []).sorted(by: participantSort)
-            if participants.isEmpty, records[index].chat.kind == .direct,
+            var participants = (byChat[records[index].rowId] ?? [:])
+                .values
+                .map { $0.participant() }
+                .sorted { $0.handle < $1.handle }
+            if participants.isEmpty,
                 let fallback = records[index].chat.chatIdentifier,
+                let identity = MessagesHandleIdentity.identity(fallback),
                 isE164(fallback) || isEmail(fallback)
             {
-                participants = [
-                    participant(
-                        handle: fallback,
-                        original: nil,
-                        service: records[index].chat.service,
-                        country: nil
-                    )
-                ]
+                var observations = ParticipantObservations(identity: identity)
+                observations.observe(
+                    original: nil,
+                    service: records[index].chat.service,
+                    country: nil
+                )
+                participants = [observations.participant()]
             }
             let kind: MessagesChatKind = participants.count > 1 ? .group : .direct
             records[index].chat = replacing(
@@ -1299,36 +1473,9 @@ private extension SQLiteMessagesChatRepository {
         }
     }
 
-    func participant(
-        handle: String,
-        original: String?,
-        service: String?,
-        country: String?
-    ) -> MessagesParticipant {
-        MessagesParticipant(
-            handle: handle,
-            originalHandle: original,
-            canonicalE164: isE164(handle) ? handle : nil,
-            email: isEmail(handle) ? handle : nil,
-            service: service,
-            country: country
-        )
-    }
+    func isE164(_ value: String) -> Bool { messagesHandleIsE164(value) }
 
-    func participantSort(_ lhs: MessagesParticipant, _ rhs: MessagesParticipant) -> Bool {
-        [lhs.handle, lhs.service ?? "", lhs.originalHandle ?? "", lhs.country ?? ""]
-            .lexicographicallyPrecedes(
-                [rhs.handle, rhs.service ?? "", rhs.originalHandle ?? "", rhs.country ?? ""]
-            )
-    }
-
-    func isE164(_ value: String) -> Bool {
-        value.range(of: #"^\+[1-9][0-9]{1,14}$"#, options: .regularExpression) != nil
-    }
-
-    func isEmail(_ value: String) -> Bool {
-        value.range(of: #"^[^\s@]+@[^\s@]+\.[^\s@]+$"#, options: .regularExpression) != nil
-    }
+    func isEmail(_ value: String) -> Bool { messagesHandleIsEmail(value) }
 
     func mediaCategory(for mimeType: String?) -> String {
         guard let mimeType = mimeType?.lowercased() else { return "other" }

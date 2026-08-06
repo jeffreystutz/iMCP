@@ -92,6 +92,13 @@ across MCP connections and iMCP process restarts without a mutable registry.
 - A stale or migrated GUID fails closed through the exact existence check.
 - An identifier from an installation with another key does not resolve;
   identifiers remain locators, not authorization credentials.
+- Opacity provides versioning, validation, and concealment of the underlying
+  GUID representation. It is not a confidentiality mechanism for the
+  conversation itself: `messages_list_chats` intentionally returns participant
+  handles, `chatGuid`, room and group identifiers, and other conversation
+  metadata alongside the opaque ID. Do not treat an opaque ID as evidence that
+  the rest of that metadata is protected, and do not rely on it as an access
+  control.
 - Future side-effecting tools must resolve again immediately before dispatch
   and must not pass the opaque identifier or resolved GUID to AppleScript without a
   separately reviewed routing design.

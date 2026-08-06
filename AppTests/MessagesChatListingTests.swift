@@ -51,6 +51,208 @@ final class MessagesChatListingTests: XCTestCase {
         XCTAssertEqual(index.metadataAvailability["screened"], false)
     }
 
+    func testDuplicateHandleRowsCollapseToOneParticipantAndStayDirect() throws {
+        let fixture = try ChatDatabaseFixture.participantIdentity()
+        defer { fixture.remove() }
+        let index = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: nil,
+            detail: .summary
+        )
+        let byName = Dictionary(
+            uniqueKeysWithValues: index.chats.map { ($0.displayName ?? "", $0) }
+        )
+
+        // Same email in two rows differing only by letter case.
+        let caseDuplicate = try XCTUnwrap(byName["Case Duplicate"])
+        XCTAssertEqual(caseDuplicate.participantCount, 1)
+        XCTAssertEqual(caseDuplicate.kind, .direct)
+        XCTAssertEqual(caseDuplicate.participants?.map(\.handle), ["person@example.invalid"])
+
+        // Same exact E.164 number in two rows.
+        let e164Duplicate = try XCTUnwrap(byName["E164 Duplicate"])
+        XCTAssertEqual(e164Duplicate.participantCount, 1)
+        XCTAssertEqual(e164Duplicate.kind, .direct)
+        XCTAssertEqual(e164Duplicate.participants?.map(\.handle), ["+15550100001"])
+
+        // One identity observed with differing service, country, and original handle.
+        let metadataDuplicate = try XCTUnwrap(byName["Metadata Duplicate"])
+        XCTAssertEqual(metadataDuplicate.participantCount, 1)
+        XCTAssertEqual(metadataDuplicate.kind, .direct)
+        let merged = try XCTUnwrap(metadataDuplicate.participants?.first)
+        XCTAssertEqual(merged.handle, "meta@example.invalid")
+        XCTAssertEqual(merged.services, ["SMS", "iMessage"])
+        XCTAssertEqual(merged.countries, ["gb", "us"])
+        XCTAssertEqual(merged.originalHandles, ["META@example.invalid", "meta@example.invalid"])
+        // Representative values are the deterministic lexicographic minimum.
+        XCTAssertEqual(merged.service, "SMS")
+        XCTAssertEqual(merged.country, "gb")
+
+        // Duplicate relationship rows for one handle.
+        let relationshipDuplicate = try XCTUnwrap(byName["Relationship Duplicate"])
+        XCTAssertEqual(relationshipDuplicate.participantCount, 1)
+        XCTAssertEqual(relationshipDuplicate.kind, .direct)
+
+        // Two genuinely distinct identities remain a group.
+        let realGroup = try XCTUnwrap(byName["Real Group"])
+        XCTAssertEqual(realGroup.participantCount, 2)
+        XCTAssertEqual(realGroup.kind, .group)
+
+        // A handle that is neither E.164 nor an email is still one participant.
+        let shortCode = try XCTUnwrap(byName["Short Code"])
+        XCTAssertEqual(shortCode.participantCount, 1)
+        XCTAssertEqual(shortCode.kind, .direct)
+        XCTAssertEqual(shortCode.participants?.map(\.handle), ["SHORTCODE"])
+        XCTAssertNil(shortCode.participants?.first?.canonicalE164)
+        XCTAssertNil(shortCode.participants?.first?.email)
+    }
+
+    func testKindFilterCannotDisagreeWithReturnedClassification() throws {
+        let fixture = try ChatDatabaseFixture.participantIdentity()
+        defer { fixture.remove() }
+
+        let directs = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: .direct,
+            detail: .summary
+        )
+        XCTAssertFalse(directs.chats.isEmpty)
+        XCTAssertTrue(directs.chats.allSatisfy { $0.kind == .direct })
+        XCTAssertEqual(
+            Set(directs.chats.compactMap(\.displayName)),
+            [
+                "Case Duplicate", "E164 Duplicate", "Metadata Duplicate",
+                "Relationship Duplicate", "Short Code", "Local Format",
+            ]
+        )
+
+        let groups = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: .group,
+            detail: .summary
+        )
+        XCTAssertTrue(groups.chats.allSatisfy { $0.kind == .group })
+        XCTAssertEqual(groups.chats.compactMap(\.displayName), ["Real Group"])
+    }
+
+    func testListingAndChatResolutionAgreeOnParticipantIdentity() throws {
+        let fixture = try ChatDatabaseFixture.participantIdentity()
+        defer { fixture.remove() }
+        let repo = repository()
+        let index = try repo.listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: nil,
+            detail: .summary
+        )
+
+        for chat in index.chats {
+            let resolved = try repo.resolveChatDestination(chat.id, databasePath: fixture.path)
+            XCTAssertEqual(
+                resolved.participantCount,
+                chat.participantCount,
+                "participant count disagreed for \(chat.displayName ?? chat.id)"
+            )
+            XCTAssertEqual(
+                resolved.kind,
+                chat.kind,
+                "kind disagreed for \(chat.displayName ?? chat.id)"
+            )
+            XCTAssertEqual(
+                resolved.participantHandles.sorted(),
+                (chat.participants ?? []).map(\.handle).sorted(),
+                "participant identities disagreed for \(chat.displayName ?? chat.id)"
+            )
+        }
+    }
+
+    func testSendMatchingUsesTheSameIdentityAsListing() throws {
+        let fixture = try ChatDatabaseFixture.participantIdentity()
+        defer { fixture.remove() }
+        let repo = repository()
+
+        // A duplicated-case email resolves to exactly one existing direct conversation.
+        let caseMatch = try repo.matchConversation(
+            normalizedParticipants: ["person@example.invalid"],
+            kind: .direct,
+            databasePath: fixture.path
+        )
+        guard case .unique(_, let destination) = caseMatch else {
+            return XCTFail("Expected a unique direct match, got \(caseMatch)")
+        }
+        XCTAssertEqual(destination.chatGuid, "case-guid.example")
+        XCTAssertEqual(destination.participantCount, 1)
+        XCTAssertEqual(destination.kind, .direct)
+
+        // The exact remote set of the real group matches regardless of order.
+        let groupMatch = try repo.matchConversation(
+            normalizedParticipants: ["second@example.invalid", "first@example.invalid"],
+            kind: .group,
+            databasePath: fixture.path
+        )
+        guard case .unique(_, let group) = groupMatch else {
+            return XCTFail("Expected a unique group match, got \(groupMatch)")
+        }
+        XCTAssertEqual(group.chatGuid, "group-guid.example")
+        XCTAssertEqual(group.participantCount, 2)
+
+        // A subset of the group never matches.
+        XCTAssertEqual(
+            try repo.matchConversation(
+                normalizedParticipants: ["first@example.invalid"],
+                kind: .direct,
+                databasePath: fixture.path
+            ),
+            .none
+        )
+    }
+
+    func testNonmatchableStoredParticipantMakesMatchingIncomplete() throws {
+        let fixture = try ChatDatabaseFixture.participantIdentity()
+        defer { fixture.remove() }
+        let repo = repository()
+
+        // "(555) 010-0009" is stored in a local format that is not valid E.164, and no
+        // country code may be inferred to decide whether it is this recipient. The request
+        // therefore cannot be ruled out and must report incomplete, never a confident
+        // no-match that would start a new conversation on a different route.
+        XCTAssertEqual(
+            try repo.matchConversation(
+                normalizedParticipants: ["+15550100009"],
+                kind: .direct,
+                databasePath: fixture.path
+            ),
+            .incomplete
+        )
+
+        // A short code cannot denote a phone number or an email, so it stays a plain
+        // no-match and does not block unrelated sends.
+        XCTAssertEqual(
+            try repo.matchConversation(
+                normalizedParticipants: ["+15559999999"],
+                kind: .direct,
+                databasePath: fixture.path
+            ),
+            .none
+        )
+
+        // The unresolvable single member cannot complete a two-participant request, so
+        // exact group matching still resolves normally.
+        guard
+            case .unique(_, let group) = try repo.matchConversation(
+                normalizedParticipants: ["first@example.invalid", "second@example.invalid"],
+                kind: .group,
+                databasePath: fixture.path
+            )
+        else {
+            return XCTFail("Expected the exact group match to remain resolvable")
+        }
+        XCTAssertEqual(group.chatGuid, "group-guid.example")
+    }
+
     func testFullMetadataCountsOnlyUserVisibleBaseMessages() throws {
         let fixture = try ChatDatabaseFixture.full()
         defer { fixture.remove() }
@@ -654,6 +856,55 @@ private struct ChatDatabaseFixture {
             INSERT INTO message VALUES
               (1, 'reduced-message.example', 1000000000, 0, 1, 0, 0, 0, 0, 0);
             INSERT INTO chat_message_join VALUES (1, 1);
+            """
+        )
+        return fixture
+    }
+
+    /// Exercises one remote identity observed through several `handle` rows and
+    /// relationship rows, alongside a genuine group and a nonmatchable stored handle.
+    static func participantIdentity() throws -> ChatDatabaseFixture {
+        let fixture = try withoutSchema()
+        try fixture.execute(fullSchema)
+        try fixture.execute(
+            """
+            INSERT INTO chat VALUES
+              (1, 'case-guid.example', 'person@example.invalid', NULL, NULL, NULL,
+               'Case Duplicate', 'iMessage', 0, 0, NULL),
+              (2, 'e164-guid.example', '+15550100001', NULL, NULL, NULL,
+               'E164 Duplicate', 'SMS', 0, 0, NULL),
+              (3, 'metadata-guid.example', 'meta@example.invalid', NULL, NULL, NULL,
+               'Metadata Duplicate', 'iMessage', 0, 0, NULL),
+              (4, 'group-guid.example', 'chat123', NULL, NULL, 'Group Room',
+               'Real Group', 'iMessage', 0, 0, NULL),
+              (5, 'relationship-guid.example', '+15550100002', NULL, NULL, NULL,
+               'Relationship Duplicate', 'iMessage', 0, 0, NULL),
+              (6, 'shortcode-guid.example', 'SHORTCODE', NULL, NULL, NULL,
+               'Short Code', 'SMS', 0, 0, NULL),
+              (7, 'local-format-guid.example', '(555) 010-0009', NULL, NULL, NULL,
+               'Local Format', 'SMS', 0, 0, NULL);
+
+            INSERT INTO handle VALUES
+              (1, 'Person@Example.invalid', 'Person@Example.invalid', 'iMessage', 'us'),
+              (2, 'person@example.invalid', NULL, 'SMS', 'ca'),
+              (3, '+15550100001', '+15550100001', 'SMS', 'us'),
+              (4, '+15550100001', '(555) 010-0001', 'iMessage', 'us'),
+              (5, 'meta@example.invalid', 'meta@example.invalid', 'iMessage', 'us'),
+              (6, 'meta@example.invalid', 'META@example.invalid', 'SMS', 'gb'),
+              (7, 'first@example.invalid', NULL, 'iMessage', 'us'),
+              (8, 'second@example.invalid', NULL, 'iMessage', 'us'),
+              (9, '+15550100002', NULL, 'iMessage', 'us'),
+              (10, 'SHORTCODE', NULL, 'SMS', 'us'),
+              (11, '(555) 010-0009', NULL, 'SMS', 'us');
+
+            INSERT INTO chat_handle_join VALUES
+              (1, 1), (1, 2),
+              (2, 3), (2, 4),
+              (3, 5), (3, 6),
+              (4, 7), (4, 8),
+              (5, 9), (5, 9), (5, 9),
+              (6, 10),
+              (7, 11);
             """
         )
         return fixture

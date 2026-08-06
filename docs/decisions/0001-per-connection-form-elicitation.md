@@ -75,6 +75,21 @@ remaining a small extension of the existing Tool and Service models.
 
 ## Validation
 
+The requester races four outcomes — response, request error, timeout, and
+parent-task cancellation — and resolves exactly once. Whichever wins cancels and
+releases both losing tasks, including the task running the underlying request,
+so no request task is left retained after the wrapper returns. A response that
+arrives after the race has resolved is discarded and can never dispatch.
+
+Cancelling that task cannot retract an elicitation prompt the client has already
+displayed. The pinned MCP Swift SDK exposes `Server.cancelRequest(_:reason:)`,
+but `Server.requestElicitation` never surfaces the request ID it generates and
+`Server.send` is private, so no supported, spec-compliant `notifications/cancelled`
+can be addressed to that request. Inventing one is out of the question. The
+remaining exposure is a stale prompt in the client UI, never an unauthorized
+send: a late acceptance is discarded, and dispatch requires the confirmation that
+already lost the race.
+
 - Unit tests for accept, decline, cancel, malformed content, timeout, and
   capability combinations.
 - End-to-end round trip from app-side server through the production CLI proxy
