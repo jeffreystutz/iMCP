@@ -20,8 +20,40 @@ final class MessageSendTests: XCTestCase {
         let encoded = String(data: try JSONEncoder().encode(result), encoding: .utf8)!
         XCTAssertFalse(encoded.contains("recipient@example.invalid"))
         XCTAssertFalse(encoded.contains("test-body"))
-        XCTAssertFalse(requester.lastMessage.contains("recipient@example.invalid"))
-        XCTAssertFalse(requester.lastMessage.contains("test-body"))
+        // The confirmation is the authorization surface and must show both values.
+        XCTAssertTrue(requester.lastMessage.contains("recipient@example.invalid"))
+        XCTAssertTrue(requester.lastMessage.contains("test-body"))
+    }
+
+    func testRawRecipientConfirmationShowsExactDestinationBodyAndNewConversation() async throws {
+        let sender = RecordingMessagesSender()
+        let repository = RecordingSendChatRepository(results: [], matches: [.none])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        let result = try await sendTool(sender: sender, chatRepository: repository)(
+            [
+                "recipient": .string("brand-new@example.invalid"),
+                "body": .string("exact-authorized-body"),
+            ],
+            context: ToolCallContext(elicitation: requester)
+        )
+
+        XCTAssertEqual(requester.requestCount, 1)
+        XCTAssertTrue(requester.lastMessage.contains("Recipient: brand-new@example.invalid"))
+        XCTAssertTrue(requester.lastMessage.contains("exact-authorized-body"))
+        XCTAssertTrue(requester.lastMessage.contains("new direct conversation"))
+        XCTAssertFalse(requester.lastMessage.contains("existing Messages conversation"))
+
+        // The sender receives exactly the confirmed values.
+        let lastRecipient = await sender.lastRecipient
+        let lastBody = await sender.lastBody
+        XCTAssertEqual(lastRecipient, "brand-new@example.invalid")
+        XCTAssertEqual(lastBody, "exact-authorized-body")
+
+        // Neither value may appear in the tool result.
+        let encoded = String(data: try JSONEncoder().encode(result), encoding: .utf8)!
+        XCTAssertFalse(encoded.contains("brand-new@example.invalid"))
+        XCTAssertFalse(encoded.contains("exact-authorized-body"))
     }
 
     func testExactE164HandleIsAcceptedWithoutNormalization() async throws {
@@ -156,11 +188,12 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(submissionCount, 0)
     }
 
-    func testDisabledConfirmationDispatchesWithoutElicitation() async throws {
+    func testCompleteRawRecipientCallStillRequestsExactlyOneFinalConfirmation() async throws {
         let sender = RecordingMessagesSender()
-        let requester = StubElicitationRequester(error: ElicitationRequestError.formUnsupported)
+        let repository = RecordingSendChatRepository(results: [], matches: [.none])
+        let requester = StubElicitationRequester(result: confirmedResult)
 
-        _ = try await sendTool(sender: sender, requiresSendConfirmation: false)(
+        _ = try await sendTool(sender: sender, chatRepository: repository)(
             [
                 "recipient": .string("recipient@example.invalid"),
                 "body": .string("test-body"),
@@ -168,30 +201,62 @@ final class MessageSendTests: XCTestCase {
             context: ToolCallContext(elicitation: requester)
         )
 
-        XCTAssertEqual(requester.requestCount, 0)
+        // Nothing supplies every input up front well enough to skip confirmation.
+        XCTAssertEqual(requester.requestCount, 1)
         let submissionCount = await sender.submissionCount
         XCTAssertEqual(submissionCount, 1)
     }
 
-    func testDisabledConfirmationStillElicitsMissingBody() async {
+    func testMissingInputElicitationIsNeverTreatedAsFinalConfirmation() async {
+        // A client that supplies the body but cannot show a form must dispatch zero: the
+        // input round trip is not authorization.
         let sender = RecordingMessagesSender()
-        let requester = StubElicitationRequester(error: ElicitationRequestError.formUnsupported)
+        let repository = RecordingSendChatRepository(results: [], matches: [.none])
+        let requester = StubElicitationRequester(
+            results: [.init(action: .accept, content: ["body": .string("test-body")])]
+        )
 
-        do {
-            _ = try await sendTool(sender: sender, requiresSendConfirmation: false)(
+        await assertSendError(.inputMalformed) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
                 ["recipient": .string("recipient@example.invalid")],
                 context: ToolCallContext(elicitation: requester)
             )
-            XCTFail("Expected missing input elicitation to fail")
-        } catch ElicitationRequestError.formUnsupported {
-            // Expected.
-        } catch {
-            XCTFail("Unexpected error: \(error)")
         }
 
-        XCTAssertEqual(requester.requestCount, 1)
+        // Two requests: one for the missing body, one for the separate final confirmation.
+        XCTAssertEqual(requester.requestCount, 2)
         let submissionCount = await sender.submissionCount
         XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testNoProductionCodePathCanBypassSendConfirmation() throws {
+        // The confirmation-disable preference key, its Settings UI, and the injectable
+        // predicate were removed. Guard against any of them returning.
+        let sources = [
+            "App/Services/Messages.swift",
+            "App/Views/SettingsView.swift",
+            "App/Services/MessagesSender.swift",
+        ]
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        for source in sources {
+            let contents = try String(
+                contentsOf: root.appendingPathComponent(source),
+                encoding: .utf8
+            )
+            for symbol in [
+                "messagesSendConfirmationRequired",
+                "requiresSendConfirmation",
+                "Disable Confirmation",
+                "confirmation is disabled",
+            ] {
+                XCTAssertFalse(
+                    contents.contains(symbol),
+                    "\(source) still references the removed confirmation bypass: \(symbol)"
+                )
+            }
+        }
     }
 
     func testAmbiguousAutomationFailureIsNotRetried() async {
@@ -334,7 +399,7 @@ final class MessageSendTests: XCTestCase {
         XCTAssertFalse(encoded.contains("test-body"))
     }
 
-    func testGroupChatConfirmationIsMandatoryEvenWhenRecipientConfirmationIsDisabled() async {
+    func testGroupChatConfirmationIsMandatory() async {
         let sender = RecordingMessagesSender()
         let repository = RecordingSendChatRepository(results: [.success(groupChat)])
         let requester = StubElicitationRequester(result: .init(action: .decline))
@@ -342,7 +407,6 @@ final class MessageSendTests: XCTestCase {
         await assertSendError(.confirmationDeclined) {
             _ = try await self.sendTool(
                 sender: sender,
-                requiresSendConfirmation: false,
                 chatRepository: repository
             )(
                 ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
@@ -618,6 +682,72 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(ambiguousChatCount, 0)
     }
 
+    func testIncompleteDirectMembershipFailsClosedWithoutConfirmationOrDispatch() async {
+        // Unresolved membership is not proof that no conversation exists, so it must not
+        // silently become a raw-recipient send on a possibly different route.
+        let sender = RecordingMessagesSender()
+        let repository = RecordingSendChatRepository(results: [], matches: [.incomplete])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        await assertSendError(.incompleteDirectMembership) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                ["recipient": .string("unknown@example.invalid"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+
+        XCTAssertEqual(requester.requestCount, 0)
+        let rawCount = await sender.submissionCount
+        let chatCount = await sender.chatSubmissionCount
+        XCTAssertEqual(rawCount, 0)
+        XCTAssertEqual(chatCount, 0)
+    }
+
+    func testIncompleteDirectMembershipUsesItsOwnErrorNotTheGroupWording() {
+        XCTAssertNotEqual(
+            MessageSendError.incompleteDirectMembership.localizedDescription,
+            MessageSendError.incompleteGroupMembership.localizedDescription
+        )
+        XCTAssertTrue(
+            MessageSendError.incompleteDirectMembership.localizedDescription
+                .contains("direct conversation")
+        )
+    }
+
+    func testUniqueDirectMatchThatBecomesUnresolvableBeforeDispatchFailsWithoutFallback() async {
+        // Confirmed against a matched chat, then revalidation degrades. Nothing may be sent,
+        // and the call must not switch to the raw-recipient path it originally rejected.
+        for degraded in [
+            MessagesConversationMatch.incomplete,
+            .none,
+            .ambiguous,
+        ] {
+            let sender = RecordingMessagesSender()
+            let repository = RecordingSendChatRepository(
+                results: [],
+                matches: [
+                    .unique(publicChatID: "imcp-chat-v1_synthetic", destination: directChat),
+                    degraded,
+                ]
+            )
+            await assertSendError(.staleMatchedConversation) {
+                _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                    [
+                        "recipient": .string("recipient@example.invalid"),
+                        "body": .string("test-body"),
+                    ],
+                    context: ToolCallContext(
+                        elicitation: StubElicitationRequester(result: self.confirmedResult)
+                    )
+                )
+            }
+            let rawCount = await sender.submissionCount
+            let chatCount = await sender.chatSubmissionCount
+            XCTAssertEqual(rawCount, 0, "raw-recipient fallback after confirmation")
+            XCTAssertEqual(chatCount, 0)
+        }
+    }
+
     func testExactGroupMatchIgnoresOrderConfirmsAndDispatchesOnce() async throws {
         let sender = RecordingMessagesSender()
         let match = MessagesConversationMatch.unique(
@@ -723,14 +853,12 @@ final class MessageSendTests: XCTestCase {
 
     private func sendTool(
         sender: RecordingMessagesSender,
-        requiresSendConfirmation: Bool = true,
         chatRepository: (any MessagesChatListing)? = nil
     ) throws -> iMCP.Tool {
         let repository = chatRepository ?? RecordingSendChatRepository(results: [])
         return try XCTUnwrap(
             MessageService(
                 sender: sender,
-                requiresSendConfirmation: { requiresSendConfirmation },
                 chatRepository: repository,
                 chatDatabasePathOverride: "/synthetic/chat.db"
             ).tools.first { $0.name == "messages_send" }
@@ -757,6 +885,7 @@ private actor RecordingMessagesSender: MessagesSending {
     private(set) var chatSubmissionCount = 0
     private(set) var lastRecipient: String?
     private(set) var lastChatGUID: String?
+    private(set) var lastBody: String?
     private let error: Error?
 
     init(error: Error? = nil) {
@@ -766,12 +895,14 @@ private actor RecordingMessagesSender: MessagesSending {
     func submit(recipient: String, body: String) throws {
         submissionCount += 1
         lastRecipient = recipient
+        lastBody = body
         if let error { throw error }
     }
 
     func submit(chatGUID: String, body: String) throws {
         chatSubmissionCount += 1
         lastChatGUID = chatGUID
+        lastBody = body
         if let error { throw error }
     }
 }

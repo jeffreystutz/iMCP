@@ -66,10 +66,7 @@ struct SettingsView: View {
 
 struct GeneralSettingsView: View {
     @ObservedObject var serverController: ServerController
-    @AppStorage(messagesSendConfirmationRequiredKey)
-    private var messagesSendConfirmationRequired = true
     @State private var showingResetAlert = false
-    @State private var showingDisableConfirmationAlert = false
     @State private var selectedClients = Set<String>()
 
     private var trustedClients: [String] {
@@ -79,29 +76,11 @@ struct GeneralSettingsView: View {
     var body: some View {
         Form {
             Section("Message Sending") {
-                Toggle(
-                    "Require confirmation for direct recipients",
-                    isOn: Binding(
-                        get: { messagesSendConfirmationRequired },
-                        set: { enabled in
-                            if enabled {
-                                messagesSendConfirmationRequired = true
-                            } else {
-                                showingDisableConfirmationAlert = true
-                            }
-                        }
-                    )
-                )
-
                 Text(
-                    messagesSendConfirmationRequired
-                        ? "Every send requires MCP form confirmation."
-                        : "Trusted clients may send immediately to exact recipient handles. Existing-chat sends still require confirmation."
+                    "Every message submission requires a separate MCP form confirmation showing the exact destination and message text. This cannot be turned off."
                 )
                 .font(.caption)
-                .foregroundStyle(
-                    messagesSendConfirmationRequired ? Color.secondary : Color.red
-                )
+                .foregroundStyle(.secondary)
             }
 
             Section {
@@ -166,16 +145,6 @@ struct GeneralSettingsView: View {
         } message: {
             Text(
                 "This will remove all trusted clients. They will need to be approved again when connecting."
-            )
-        }
-        .alert("Disable Direct Recipient Confirmation?", isPresented: $showingDisableConfirmationAlert) {
-            Button("Keep Enabled", role: .cancel) {}
-            Button("Disable Confirmation", role: .destructive) {
-                messagesSendConfirmationRequired = false
-            }
-        } message: {
-            Text(
-                "Any trusted MCP client may submit an iMessage to an exact recipient handle without a separate confirmation prompt. Existing-chat sends still require confirmation."
             )
         }
     }

@@ -13,7 +13,6 @@ private let messagesDatabaseDirectoryBookmarkKey: String =
 private let messagesDirectoryAccessUpgradeVersionKey: String =
     "me.mattt.iMCP.messagesDirectoryAccessUpgradeVersion"
 private let currentMessagesDirectoryAccessUpgradeVersion = 1
-let messagesSendConfirmationRequiredKey = "messagesSendConfirmationRequired"
 private let defaultLimit = 30
 private let maximumChatLimit = 100
 
@@ -38,17 +37,12 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     static let shared = MessageService()
 
     private let sender: any MessagesSending
-    private let requiresSendConfirmation: @Sendable () -> Bool
     private let chatRepository: any MessagesChatListing
     private let chatDatabasePathOverride: String?
     private let chatListingLog: @Sendable (Int) -> Void
 
     init(
         sender: any MessagesSending = AppleScriptMessagesSender(),
-        requiresSendConfirmation: @escaping @Sendable () -> Bool = {
-            UserDefaults.standard.object(forKey: messagesSendConfirmationRequiredKey) as? Bool
-                ?? true
-        },
         chatRepository: any MessagesChatListing = SQLiteMessagesChatRepository(),
         chatDatabasePathOverride: String? = nil,
         chatListingLog: @escaping @Sendable (Int) -> Void = { count in
@@ -56,7 +50,6 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         }
     ) {
         self.sender = sender
-        self.requiresSendConfirmation = requiresSendConfirmation
         self.chatRepository = chatRepository
         self.chatDatabasePathOverride = chatDatabasePathOverride
         self.chatListingLog = chatListingLog
@@ -121,7 +114,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         Tool(
             name: "messages_list_chats",
             description:
-                "List existing Messages conversations and schema-supported metadata without returning message contents, attachment names, or file paths.",
+                "List existing Messages conversations with schema-supported metadata, including conversation identifiers, names, direct or group kind, participant handles and counts, service, state flags, and activity timestamps. Does not return message contents, attachment names, attachment paths, or account credentials.",
             inputSchema: .object(
                 properties: [
                     "limit": .integer(
@@ -365,8 +358,12 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             case .recipient(let recipient):
                 let participants = Set([MessagesHandleNormalization.normalize(recipient)!])
                 switch try await self.matchSendConversation(participants, kind: .direct) {
-                case .none, .incomplete:
+                case .none:
+                    // Only a verified absence of any matching conversation may fall back to
+                    // the raw-recipient path. Unresolved membership is not evidence of absence.
                     preparedDestination = .rawRecipient(recipient)
+                case .incomplete:
+                    throw MessageSendError.incompleteDirectMembership
                 case .ambiguous:
                     throw MessageSendError.ambiguousDirectConversation
                 case .unique(let publicChatID, let destination):
@@ -398,50 +395,50 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 )
             }
 
-            let initialChat = preparedDestination.chat
-            if initialChat != nil || self.requiresSendConfirmation() {
-                let confirmationMessage: String
-                let confirmationTitle: String
-                if let initialChat {
-                    confirmationMessage = self.chatConfirmationMessage(
-                        initialChat,
-                        body: input.body,
-                        matchedFromParticipants: preparedDestination.isMatchedGroup
-                    )
-                    confirmationTitle = "Confirm existing-chat submission"
-                } else {
-                    confirmationMessage =
-                        "Submit this iMessage to Messages? Recipient and message text are intentionally omitted."
-                    confirmationTitle = "Confirm iMessage submission"
-                }
-                let confirmation = try await context.elicitation.requestForm(
-                    message: confirmationMessage,
-                    schema: .init(
-                        title: confirmationTitle,
-                        properties: [
-                            "confirmed": .object([
-                                "type": .string("boolean"),
-                                "description": .string(
-                                    "Confirm that Messages should submit this message"
-                                ),
-                            ])
-                        ],
-                        required: ["confirmed"]
-                    )
+            // Every destination form requires its own final confirmation. There is no
+            // setting, build configuration, or injected dependency that can bypass this.
+            let confirmationMessage: String
+            let confirmationTitle: String
+            switch preparedDestination {
+            case .rawRecipient(let recipient):
+                confirmationMessage = self.rawRecipientConfirmationMessage(
+                    recipient: recipient,
+                    body: input.body
                 )
+                confirmationTitle = "Confirm new direct message"
+            case .explicitChat(_, let initialChat), .matched(_, _, let initialChat):
+                confirmationMessage = self.chatConfirmationMessage(
+                    initialChat,
+                    body: input.body,
+                    matchedFromParticipants: preparedDestination.isMatchedGroup
+                )
+                confirmationTitle = "Confirm existing-chat submission"
+            }
+            let confirmation = try await context.elicitation.requestForm(
+                message: confirmationMessage,
+                schema: .init(
+                    title: confirmationTitle,
+                    properties: [
+                        "confirmed": .object([
+                            "type": .string("boolean"),
+                            "description": .string(
+                                "Confirm that Messages should submit this message"
+                            ),
+                        ])
+                    ],
+                    required: ["confirmed"]
+                )
+            )
 
-                switch confirmation.action {
-                case .decline:
-                    throw MessageSendError.confirmationDeclined
-                case .cancel:
-                    throw MessageSendError.confirmationCancelled
-                case .accept:
-                    guard confirmation.content?["confirmed"]?.boolValue == true else {
-                        throw MessageSendError.confirmationMalformed
-                    }
+            switch confirmation.action {
+            case .decline:
+                throw MessageSendError.confirmationDeclined
+            case .cancel:
+                throw MessageSendError.confirmationCancelled
+            case .accept:
+                guard confirmation.content?["confirmed"]?.boolValue == true else {
+                    throw MessageSendError.confirmationMalformed
                 }
-            } else {
-                log.warning("Messages confirmation is disabled; proceeding without elicitation")
             }
 
             try Task.checkCancellation()
@@ -538,13 +535,6 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             expectedParticipants: Set<String>,
             initial: MessagesResolvedChatDestination
         )
-
-        var chat: MessagesResolvedChatDestination? {
-            switch self {
-            case .rawRecipient: nil
-            case .explicitChat(_, let initial), .matched(_, _, let initial): initial
-            }
-        }
 
         var isMatchedGroup: Bool {
             if case .matched(_, _, let initial) = self { return initial.kind == .group }
@@ -681,6 +671,21 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 databasePath: directoryURL.appendingPathComponent("chat.db").path
             )
         }
+    }
+
+    /// Builds the final authorization prompt for a recipient with no existing conversation.
+    ///
+    /// This prompt is the user-facing authorization surface, so it deliberately shows the
+    /// exact destination and exact body that will be handed to the sender. Those values
+    /// must never reach logs, diagnostics, errors, or tool results.
+    private func rawRecipientConfirmationMessage(recipient: String, body: String) -> String {
+        [
+            "Submit this message as a new direct conversation?",
+            "No existing conversation matches this recipient, so Messages will start a new direct conversation rather than replying in an existing thread.",
+            "Recipient: \(recipient)",
+            "Message:",
+            body,
+        ].joined(separator: "\n")
     }
 
     private func chatConfirmationMessage(
@@ -845,9 +850,13 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         let alert = NSAlert()
         alert.messageText = "Conversation Listing Needs Additional Access"
         alert.informativeText = """
-            iMCP can list existing direct and group conversations with limited metadata such as display name, conversation type, participant count, service, and latest activity timestamp. This lets MCP clients identify and reply to existing threads, including group chats.
+            iMCP can list your existing direct and group conversations so MCP clients can identify and reply to existing threads.
 
-            This requires read-only access to the Messages folder so SQLite can read `chat.db` together with its companion files. Conversation listing does not use Apple Events, send messages, or return message contents or participant lists.
+            Conversation listing returns privacy-sensitive metadata about each conversation, including conversation identifiers, display and room names, whether it is direct or group, the handles and count of its participants, service metadata, archive, filter, and read state, activity timestamps, and — when requested in full detail — supported message-state, attachment-category, reaction-event, reply, edit, and related aggregate counts.
+
+            It does not return message bodies, attachment filenames, attachment file paths, attachment contents, or account credentials.
+
+            This requires read-only access to the Messages folder so SQLite can read `chat.db` together with its companion files. Conversation listing does not use Apple Events and does not send messages.
 
             Select the Messages folder in the next screen to enable conversation listing. Existing message fetching and sending permissions are unchanged.
             """

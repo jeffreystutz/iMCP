@@ -30,6 +30,7 @@ enum MessageSendError: LocalizedError, Sendable {
     case ambiguousDirectConversation
     case ambiguousGroupConversation
     case incompleteGroupMembership
+    case incompleteDirectMembership
     case staleMatchedConversation
     case invalidChatIdentifier
     case staleChatIdentifier
@@ -68,6 +69,9 @@ enum MessageSendError: LocalizedError, Sendable {
             return "Multiple existing groups match those participants. Use chat_id to select one."
         case .incompleteGroupMembership:
             return "Existing group membership cannot be resolved safely. Use chat_id to select a conversation."
+        case .incompleteDirectMembership:
+            return
+                "Existing direct conversation membership cannot be resolved safely, so it is unknown whether this recipient already has a conversation. Nothing was sent. Use chat_id to select a conversation."
         case .staleMatchedConversation:
             return "The matched conversation changed before submission. Nothing was sent."
         case .invalidChatIdentifier:
