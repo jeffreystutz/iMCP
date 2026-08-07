@@ -108,6 +108,286 @@ final class MessagesChatListingTests: XCTestCase {
         XCTAssertNil(shortCode.participants?.first?.email)
     }
 
+    func testCaseDistinctNonEmailHandlesStayTwoIdentitiesAndAppearInTheGroupFilter() throws {
+        // "BOT" and "bot" fold together in SQL but are two identities in Swift. The old SQL
+        // prefilter excluded this chat from the group query and admitted it to the direct
+        // query, where Swift then removed it, so it appeared in neither filtered view.
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+
+        let unfiltered = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: nil,
+            detail: .summary
+        )
+        let caseGroup = try XCTUnwrap(
+            unfiltered.chats.first { $0.displayName == "Case Group" }
+        )
+        XCTAssertEqual(caseGroup.participantCount, 2)
+        XCTAssertEqual(caseGroup.kind, .group)
+        XCTAssertEqual(caseGroup.participants?.map(\.handle), ["BOT", "bot"])
+
+        let groups = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: .group,
+            detail: .summary
+        )
+        XCTAssertTrue(groups.chats.contains { $0.displayName == "Case Group" })
+
+        let directs = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: .direct,
+            detail: .summary
+        )
+        XCTAssertFalse(directs.chats.contains { $0.displayName == "Case Group" })
+    }
+
+    func testCaseDifferentEmailsRemainOneDirectIdentity() throws {
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+
+        let directs = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: .direct,
+            detail: .summary
+        )
+        let emailCase = try XCTUnwrap(
+            directs.chats.first { $0.displayName == "Email Case Direct" }
+        )
+        XCTAssertEqual(emailCase.participantCount, 1)
+        XCTAssertEqual(emailCase.kind, .direct)
+        XCTAssertEqual(emailCase.participants?.map(\.handle), ["person@example.invalid"])
+
+        let groups = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: .group,
+            detail: .summary
+        )
+        XCTAssertFalse(groups.chats.contains { $0.displayName == "Email Case Direct" })
+    }
+
+    func testWhitespaceAndNewlinePaddingFollowsSwiftTrimming() throws {
+        // SQLite TRIM strips spaces only, so " padded " and "\tpadded\n" would stay two
+        // values in SQL. Swift trims whitespace and newlines, making them one identity.
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+
+        let directs = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: .direct,
+            detail: .summary
+        )
+        let padded = try XCTUnwrap(
+            directs.chats.first { $0.displayName == "Whitespace Direct" }
+        )
+        XCTAssertEqual(padded.participantCount, 1)
+        XCTAssertEqual(padded.kind, .direct)
+        XCTAssertEqual(padded.participants?.map(\.handle), ["padded"])
+
+        let groups = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: .group,
+            detail: .summary
+        )
+        XCTAssertFalse(groups.chats.contains { $0.displayName == "Whitespace Direct" })
+    }
+
+    func testFilteredScanPagesPastNonMatchingChatsAndStopsWhenTheLimitIsFilled() throws {
+        // Ordering is ROWID descending: 8, 7, 6, 5 are direct fillers; 4 and 3 are direct;
+        // 2 is the only group; 1 is direct. With a two-row page the only group appears on
+        // the fourth page, which a single-page fetch would never reach.
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+        let stages = LockedStrings()
+
+        let groups = try repository(filterPageSize: 2, observer: { stages.append($0) })
+            .listChats(
+                databasePath: fixture.path,
+                limit: 1,
+                kind: .group,
+                detail: .summary
+            )
+
+        XCTAssertEqual(groups.chats.compactMap(\.displayName), ["Case Group"])
+        // Pages covering rows 8/7, 6/5, 4/3, then 2/1 where the match is found.
+        XCTAssertEqual(stages.values.filter { $0 == "chats" }.count, 4)
+    }
+
+    func testFilteredScanStopsEarlyOncePageYieldsTheRequestedLimit() throws {
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+        let stages = LockedStrings()
+
+        let directs = try repository(filterPageSize: 2, observer: { stages.append($0) })
+            .listChats(
+                databasePath: fixture.path,
+                limit: 2,
+                kind: .direct,
+                detail: .summary
+            )
+
+        // The first page already holds two direct chats, so scanning stops immediately.
+        XCTAssertEqual(directs.chats.count, 2)
+        XCTAssertEqual(stages.values.filter { $0 == "chats" }.count, 1)
+    }
+
+    func testFilteredResultsPreserveUnfilteredSourceOrdering() throws {
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+
+        let unfiltered = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: nil,
+            detail: .summary
+        )
+        let expected = unfiltered.chats.filter { $0.kind == .direct }.map(\.id)
+
+        let directs = try repository(filterPageSize: 3).listChats(
+            databasePath: fixture.path,
+            limit: 50,
+            kind: .direct,
+            detail: .summary
+        )
+        XCTAssertEqual(directs.chats.map(\.id), expected)
+        XCTAssertFalse(expected.isEmpty)
+    }
+
+    func testFilteredResultIsShortOnlyWhenTheSourceIsExhausted() throws {
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+        let stages = LockedStrings()
+
+        let groups = try repository(filterPageSize: 2, observer: { stages.append($0) })
+            .listChats(
+                databasePath: fixture.path,
+                limit: 10,
+                kind: .group,
+                detail: .summary
+            )
+
+        // Only one group exists, so fewer than `limit` rows come back — but only after the
+        // scan reached an empty page, proving the source was genuinely exhausted.
+        XCTAssertEqual(groups.chats.count, 1)
+        XCTAssertEqual(stages.values.filter { $0 == "chats" }.count, 5)
+    }
+
+    func testFilteredFullDetailFetchesMetadataOnlyForSelectedChats() throws {
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+        let stages = LockedStrings()
+
+        _ = try repository(filterPageSize: 2, observer: { stages.append($0) }).listChats(
+            databasePath: fixture.path,
+            limit: 1,
+            kind: .group,
+            detail: .full
+        )
+
+        // Four header pages were scanned, but the expensive aggregates ran once, after the
+        // final selection — not once per scanned page.
+        XCTAssertEqual(stages.values.filter { $0 == "chats" }.count, 4)
+        XCTAssertEqual(stages.values.filter { $0 == "messages" }.count, 1)
+        XCTAssertEqual(stages.values.filter { $0 == "attachments" }.count, 1)
+    }
+
+    func testTimeoutDuringFilteredScanFailsInsteadOfReturningAPartialPage() throws {
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+        let pageCount = LockedCounter()
+
+        // Deterministically outlive the deadline part-way through the scan: the second page
+        // request blocks past the timeout, so the scan cannot complete.
+        let repo = repository(
+            timeout: 0.2,
+            filterPageSize: 2,
+            observer: { stage in
+                guard stage == "chats", pageCount.increment() == 2 else { return }
+                Thread.sleep(forTimeInterval: 0.4)
+            }
+        )
+
+        do {
+            let index = try repo.listChats(
+                databasePath: fixture.path,
+                limit: 10,
+                kind: .group,
+                detail: .summary
+            )
+            XCTFail("Expected a timeout, got \(index.chats.count) conversations")
+        } catch let error as MessagesChatRepositoryError {
+            guard case .queryFailed = error else {
+                return XCTFail("Expected a query failure, got \(error)")
+            }
+        }
+    }
+
+    func testUnreadableHandlesReportIdentityUnavailableAndRejectKindFilters() throws {
+        let fixture = try ChatDatabaseFixture.unreadableHandles()
+        defer { fixture.remove() }
+
+        let index = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 10,
+            kind: nil,
+            detail: .summary
+        )
+
+        // Chat metadata still comes back, but nothing may be inferred from relationship or
+        // handle row IDs — two handle rows and a duplicate join row create no participants.
+        XCTAssertEqual(index.chats.count, 1)
+        let chat = index.chats[0]
+        XCTAssertEqual(chat.displayName, "Unreadable Handles")
+        XCTAssertNil(chat.kind)
+        XCTAssertNil(chat.participantCount)
+        XCTAssertNil(chat.participants)
+        XCTAssertEqual(index.metadataAvailability["participants"], false)
+        XCTAssertEqual(index.metadataAvailability["participantCount"], false)
+        XCTAssertEqual(index.metadataAvailability["kind"], false)
+
+        for kind in [MessagesChatKind.direct, .group] {
+            do {
+                _ = try repository().listChats(
+                    databasePath: fixture.path,
+                    limit: 10,
+                    kind: kind,
+                    detail: .summary
+                )
+                XCTFail("Expected \(kind.rawValue) filtering to fail without readable handles")
+            } catch let error as MessagesChatRepositoryError {
+                XCTAssertEqual(error.diagnosticStage, "kind-unavailable")
+            }
+        }
+    }
+
+    func testProductionSQLDerivesNoIdentityFromRelationshipRowIDs() throws {
+        // Behavioral tests above are primary; this guards the specific SQL shortcuts that
+        // caused the defect from reappearing. Comments are stripped so explanatory prose
+        // cannot fail the check.
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("App/Services/MessagesChatRepository.swift"),
+            encoding: .utf8
+        )
+        let code =
+            source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+
+        XCTAssertFalse(code.contains("COUNT(DISTINCT handle_id)"))
+        XCTAssertFalse(code.contains("LOWER(TRIM("))
+    }
+
     func testKindFilterCannotDisagreeWithReturnedClassification() throws {
         let fixture = try ChatDatabaseFixture.participantIdentity()
         defer { fixture.remove() }
@@ -721,11 +1001,13 @@ final class MessagesChatListingTests: XCTestCase {
 
     private func repository(
         timeout: TimeInterval = 5,
+        filterPageSize: Int = SQLiteMessagesChatRepository.defaultFilterPageSize,
         observer: @escaping @Sendable (String) -> Void = { _ in }
     ) -> SQLiteMessagesChatRepository {
         SQLiteMessagesChatRepository(
             identifierKey: chatIdentifierTestKey,
             timeout: timeout,
+            filterPageSize: filterPageSize,
             queryObserver: observer
         )
     }
@@ -796,6 +1078,19 @@ private struct UnsupportedElicitation: ElicitationRequester {
         schema: Elicitation.RequestSchema
     ) async throws -> CreateElicitation.Result {
         throw ElicitationRequestError.formUnsupported
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue = 0
+
+    /// Increments and returns the new value.
+    func increment() -> Int {
+        lock.withLock {
+            storedValue += 1
+            return storedValue
+        }
     }
 }
 
@@ -905,6 +1200,85 @@ private struct ChatDatabaseFixture {
               (5, 9), (5, 9), (5, 9),
               (6, 10),
               (7, 11);
+            """
+        )
+        return fixture
+    }
+
+    /// Identities that SQL text folding would classify differently from Swift, plus ordered
+    /// data for exercising internal filtered paging.
+    ///
+    /// With no message-join rows every `latestActivity` is null, so ordering is `ROWID`
+    /// descending: 8, 7, 6, 5, 4, 3, 2, 1.
+    static func identityAndPaging() throws -> ChatDatabaseFixture {
+        let fixture = try withoutSchema()
+        try fixture.execute(fullSchema)
+        try fixture.execute(
+            """
+            INSERT INTO chat VALUES
+              (1, 'tail-direct-guid.example', 'tail', NULL, NULL, NULL,
+               'Tail Direct', 'SMS', 0, 0, NULL),
+              (2, 'case-group-guid.example', 'casegroup', NULL, NULL, NULL,
+               'Case Group', 'SMS', 0, 0, NULL),
+              (3, 'whitespace-direct-guid.example', 'whitespace', NULL, NULL, NULL,
+               'Whitespace Direct', 'SMS', 0, 0, NULL),
+              (4, 'email-case-guid.example', 'emailcase', NULL, NULL, NULL,
+               'Email Case Direct', 'iMessage', 0, 0, NULL),
+              (5, 'filler-direct-a-guid.example', 'fillera', NULL, NULL, NULL,
+               'Filler A', 'SMS', 0, 0, NULL),
+              (6, 'filler-direct-b-guid.example', 'fillerb', NULL, NULL, NULL,
+               'Filler B', 'SMS', 0, 0, NULL),
+              (7, 'filler-direct-c-guid.example', 'fillerc', NULL, NULL, NULL,
+               'Filler C', 'SMS', 0, 0, NULL),
+              (8, 'filler-direct-d-guid.example', 'fillerd', NULL, NULL, NULL,
+               'Filler D', 'SMS', 0, 0, NULL);
+
+            INSERT INTO handle VALUES
+              -- Two case-distinct non-email handles: one identity in SQL, two in Swift.
+              (1, 'BOT', NULL, 'SMS', 'us'),
+              (2, 'bot', NULL, 'SMS', 'us'),
+              -- Tab and newline padding that SQLite TRIM would not strip, spelled with
+              -- char() so reformatting cannot alter the stored bytes.
+              (3, ' padded ', NULL, 'SMS', 'us'),
+              (4, char(9) || 'padded' || char(10), NULL, 'SMS', 'us'),
+              -- Case-different emails: one identity in both.
+              (5, 'Person@example.invalid', NULL, 'iMessage', 'us'),
+              (6, 'person@example.invalid', NULL, 'iMessage', 'us'),
+              (7, 'filler-a@example.invalid', NULL, 'SMS', 'us'),
+              (8, 'filler-b@example.invalid', NULL, 'SMS', 'us'),
+              (9, 'filler-c@example.invalid', NULL, 'SMS', 'us'),
+              (10, 'filler-d@example.invalid', NULL, 'SMS', 'us'),
+              (11, 'tail@example.invalid', NULL, 'SMS', 'us');
+
+            INSERT INTO chat_handle_join VALUES
+              (2, 1), (2, 2),
+              (3, 3), (3, 4),
+              (4, 5), (4, 6),
+              (5, 7), (6, 8), (7, 9), (8, 10),
+              (1, 11);
+            """
+        )
+        return fixture
+    }
+
+    /// Relationship rows exist but `handle.id` does not, so no readable remote handle text
+    /// is available and participant identity cannot be derived at all.
+    static func unreadableHandles() throws -> ChatDatabaseFixture {
+        let fixture = try withoutSchema()
+        try fixture.execute(
+            """
+            CREATE TABLE chat (
+              ROWID INTEGER PRIMARY KEY, guid TEXT NOT NULL, chat_identifier TEXT,
+              display_name TEXT, service_name TEXT
+            );
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, service TEXT);
+            CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+            INSERT INTO chat VALUES
+              (1, 'unreadable-guid.example', 'unreadable', 'Unreadable Handles', 'SMS');
+            INSERT INTO handle VALUES (1, 'SMS'), (2, 'SMS');
+            -- Two handle rows and a duplicate relationship row. None of these may become a
+            -- participant count.
+            INSERT INTO chat_handle_join VALUES (1, 1), (1, 2), (1, 2);
             """
         )
         return fixture

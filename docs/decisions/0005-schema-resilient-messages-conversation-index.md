@@ -49,12 +49,27 @@ neither inflate `participantCount` nor turn a direct conversation into a group.
 Multiple metadata observations merge deterministically, exposing the
 lexicographically first value plus plural fields when observations differ.
 
-SQL-side `kind` filtering counts distinct normalized handle text, but SQLite
-text folding cannot be made identical to the Swift definition for every stored
-handle. The filter is therefore only a bounded prefilter: results are classified
-authoritatively in Swift and rows that disagree with the requested kind are
-dropped before the caller's limit is applied, so a returned `kind` can never
-contradict the filter that selected it.
+No SQL expression derives participant identity, participant count, or `kind`.
+SQLite text folding cannot be made identical to the Swift definition — it folds
+case-distinct non-email handles together and does not strip tabs or newlines —
+and a lossy SQL predicate can exclude a conversation from one filtered view
+while Swift excludes it from the other, so a valid conversation disappears
+entirely. Identity is therefore populated only after readable handle text is
+fetched and normalized.
+
+Filtered requests scan ordered chat headers in bounded internal pages,
+classifying each page authoritatively and keeping only matches, until the
+caller's limit is filled or the source is exhausted. There is no total-row cap;
+the query deadline and cancellation are the global bound, and either one fails
+the request rather than returning a short page that would imply exhaustion.
+Source ordering is preserved and full-detail aggregates run only for the finally
+selected conversations.
+
+Where readable participant handles are unavailable, participant identity,
+participant count, and `kind` are reported unavailable and a filtered request
+fails with the stable `kind-unavailable` stage. Nothing is inferred from
+`handle_id` or any other relationship row ID, which identifies a database row
+rather than a remote person.
 
 Send matching keeps a stricter rule that accepts only valid E.164 or a
 syntactically valid email, because a destination must be comparable exactly. A

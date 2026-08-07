@@ -497,19 +497,26 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
     private let timeout: TimeInterval
     private let queryObserver: @Sendable (String) -> Void
 
+    private let filterPageSize: Int
+
     init(
         identifierKey: Data = MessagesChatIdentifierKeyStore.loadOrCreate(),
         timeout: TimeInterval = 5,
+        filterPageSize: Int = SQLiteMessagesChatRepository.defaultFilterPageSize,
         queryObserver: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.identifierCodec = MessagesChatIdentifierCodec(keyData: identifierKey)
         self.timeout = timeout
+        self.filterPageSize = max(1, filterPageSize)
         self.queryObserver = queryObserver
     }
 
-    /// Upper bound on rows pulled before authoritative Swift classification narrows them
-    /// back down to the caller's limit.
-    static let maximumPrefilterLimit = 500
+    /// Rows per internal page when scanning for a `kind`-filtered result.
+    ///
+    /// This bounds the size of each round trip, not the total scan. A filtered request
+    /// keeps paging until the caller's limit is filled or the source is exhausted; the
+    /// query deadline and cancellation are the only global bound.
+    static let defaultFilterPageSize = 100
 
     func listChats(
         databasePath: String,
@@ -541,30 +548,61 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
         try execute("BEGIN DEFERRED TRANSACTION", stage: "snapshot", database: database)
         do {
             var availability = availability(for: capabilities)
-            // The SQL kind filter is only a prefilter: SQLite's text folding cannot be made
-            // identical to `MessagesHandleIdentity` for every stored handle. Over-fetch, let
-            // the Swift identity model classify authoritatively, then drop rows that do not
-            // match the requested kind so a returned `kind` can never contradict the filter.
-            var records = try fetchChats(
-                database: database,
-                capabilities: capabilities,
-                limit: kind == nil ? limit : min(limit * 2 + 8, Self.maximumPrefilterLimit),
-                kind: kind
-            )
-            try checkBoundary(guardState)
-            try fetchParticipants(
-                into: &records,
-                database: database,
-                capabilities: capabilities,
-                availability: &availability
-            )
-            if let kind {
-                records.removeAll { record in
-                    guard let resolvedKind = record.chat.kind else { return false }
-                    return resolvedKind != kind
-                }
+            // Classification needs readable handle text. Without it no `kind` can be
+            // reported, and guessing from relationship row IDs would count one person
+            // several times, so a filtered request fails instead.
+            guard kind == nil || participantIdentitySupported(capabilities) else {
+                throw MessagesChatRepositoryError.queryFailed(
+                    stage: "kind-unavailable",
+                    code: SQLITE_OK
+                )
             }
-            if records.count > limit { records.removeLast(records.count - limit) }
+
+            var records: [ChatRecord]
+            if let kind {
+                // Scan ordered header pages, classify each page authoritatively, and keep
+                // only matches, until the caller's limit is filled or the source runs out.
+                // No SQL predicate narrows the scan, so a conversation can never be dropped
+                // before `MessagesHandleIdentity` has seen it.
+                records = []
+                var offset = 0
+                while records.count < limit {
+                    try checkBoundary(guardState)
+                    var page = try fetchChats(
+                        database: database,
+                        capabilities: capabilities,
+                        limit: filterPageSize,
+                        offset: offset
+                    )
+                    if page.isEmpty { break }
+                    offset += page.count
+                    try checkBoundary(guardState)
+                    try fetchParticipants(
+                        into: &page,
+                        database: database,
+                        capabilities: capabilities,
+                        availability: &availability
+                    )
+                    for record in page where record.chat.kind == kind {
+                        records.append(record)
+                        if records.count == limit { break }
+                    }
+                }
+            } else {
+                records = try fetchChats(
+                    database: database,
+                    capabilities: capabilities,
+                    limit: limit,
+                    offset: 0
+                )
+                try checkBoundary(guardState)
+                try fetchParticipants(
+                    into: &records,
+                    database: database,
+                    capabilities: capabilities,
+                    availability: &availability
+                )
+            }
             if detail == .full {
                 try fetchFullMetadata(
                     into: &records,
@@ -930,36 +968,20 @@ private extension SQLiteMessagesChatRepository {
         let isSticker: Bool?
     }
 
+    /// Fetches one ordered page of chat headers.
+    ///
+    /// This query never derives participant identity, participant count, or `kind`. No SQL
+    /// expression can reproduce `MessagesHandleIdentity` — SQLite's `LOWER` and `TRIM` do
+    /// not match Swift's case and whitespace semantics — and a lossy SQL predicate would
+    /// silently drop conversations before Swift could classify them. Those fields are
+    /// populated only by `fetchParticipants` from readable handle text.
     func fetchChats(
         database: OpaquePointer,
         capabilities: MessagesSchemaCapabilities,
         limit: Int,
-        kind: MessagesChatKind?
+        offset: Int
     ) throws -> [ChatRecord] {
         queryObserver("chats")
-        let membershipSupported =
-            capabilities.hasTable("chat_handle_join")
-            && capabilities.hasColumn("chat_id", in: "chat_handle_join")
-            && capabilities.hasColumn("handle_id", in: "chat_handle_join")
-        guard kind == nil || membershipSupported else {
-            throw MessagesChatRepositoryError.queryFailed(stage: "kind-unavailable", code: SQLITE_OK)
-        }
-        // Counting distinct handle rows would make one remote identity stored in several
-        // rows look like several participants, turning a direct chat into a group. Count
-        // distinct normalized handle text instead, matching `MessagesHandleIdentity` as
-        // closely as SQLite can. `fetchParticipants` remains the authority.
-        let identityCountSupported =
-            membershipSupported && capabilities.hasColumn("id", in: "handle")
-        let countExpression =
-            identityCountSupported
-            ? """
-            (SELECT COUNT(DISTINCT LOWER(TRIM(h.id)))
-             FROM chat_handle_join chj JOIN handle h ON h.ROWID = chj.handle_id
-             WHERE chj.chat_id = c.ROWID AND TRIM(COALESCE(h.id, '')) <> '')
-            """
-            : membershipSupported
-                ? "(SELECT COUNT(DISTINCT handle_id) FROM chat_handle_join WHERE chat_id = c.ROWID)"
-                : "NULL"
         let latestExpression: String
         if capabilities.hasColumn("message_date", in: "chat_message_join") {
             latestExpression =
@@ -975,12 +997,6 @@ private extension SQLiteMessagesChatRepository {
         } else {
             latestExpression = "NULL"
         }
-        let kindFilter: String
-        switch kind {
-        case .direct: kindFilter = "WHERE \(countExpression) <= 1"
-        case .group: kindFilter = "WHERE \(countExpression) > 1"
-        case nil: kindFilter = ""
-        }
         func projection(_ column: String) -> String {
             capabilities.hasColumn(column, in: "chat") ? "c.\(column)" : "NULL"
         }
@@ -990,15 +1006,16 @@ private extension SQLiteMessagesChatRepository {
                    \(projection("room_name")), \(projection("display_name")),
                    \(projection("service_name")), \(projection("is_archived")),
                    \(projection("is_filtered")), \(projection("last_read_message_timestamp")),
-                   \(countExpression), \(latestExpression)
+                   \(latestExpression)
             FROM chat c
-            \(kindFilter)
-            ORDER BY 13 IS NULL ASC, 13 DESC, c.ROWID DESC
-            LIMIT ?
+            ORDER BY 12 IS NULL ASC, 12 DESC, c.ROWID DESC
+            LIMIT ? OFFSET ?
             """
         let statement = try prepare(sql, stage: "chats-prepare", database: database)
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_bind_int(statement, 1, Int32(limit)) == SQLITE_OK else {
+        guard sqlite3_bind_int(statement, 1, Int32(limit)) == SQLITE_OK,
+            sqlite3_bind_int(statement, 2, Int32(offset)) == SQLITE_OK
+        else {
             throw queryError(stage: "chats-bind", database: database)
         }
         var result: [ChatRecord] = []
@@ -1007,12 +1024,6 @@ private extension SQLiteMessagesChatRepository {
                 throw MessagesChatRepositoryError.minimumSchemaUnavailable
             }
             let publicId = try identifierCodec.create(for: guid)
-            let participantCount = sqliteInt(statement, column: 11)
-            let chatKind = participantCount.map { $0 > 1 ? MessagesChatKind.group : .direct }
-            let storedDisplayName = trimmedText(statement, column: 6)
-            let displayName =
-                storedDisplayName
-                ?? (chatKind == .direct ? "Direct conversation \(publicId.suffix(8))" : nil)
             result.append(
                 ChatRecord(
                     rowId: sqlite3_column_int64(statement, 0),
@@ -1024,21 +1035,29 @@ private extension SQLiteMessagesChatRepository {
                         groupId: trimmedText(statement, column: 3),
                         originalGroupId: trimmedText(statement, column: 4),
                         roomName: trimmedText(statement, column: 5),
-                        displayName: displayName,
-                        kind: chatKind,
-                        participantCount: participantCount,
+                        displayName: trimmedText(statement, column: 6),
+                        kind: nil,
+                        participantCount: nil,
                         participants: nil,
                         service: trimmedText(statement, column: 7),
                         isArchived: sqliteBool(statement, column: 8),
                         isFiltered: sqliteBool(statement, column: 9),
                         lastReadTimestamp: sqliteNanosecondDate(statement, column: 10),
-                        latestActivity: sqliteNanosecondDate(statement, column: 12),
+                        latestActivity: sqliteNanosecondDate(statement, column: 11),
                         full: nil
                     )
                 )
             )
         }
         return result
+    }
+
+    /// Whether readable remote handle text is available, which is the only basis on which
+    /// participant identity, participant count, and `kind` may be reported.
+    func participantIdentitySupported(_ capabilities: MessagesSchemaCapabilities) -> Bool {
+        capabilities.hasColumn("chat_id", in: "chat_handle_join")
+            && capabilities.hasColumn("handle_id", in: "chat_handle_join")
+            && capabilities.hasColumn("id", in: "handle")
     }
 
     func fetchParticipants(
@@ -1048,11 +1067,7 @@ private extension SQLiteMessagesChatRepository {
         availability: inout [String: Bool]
     ) throws {
         guard !records.isEmpty else { return }
-        let supported =
-            capabilities.hasColumn("chat_id", in: "chat_handle_join")
-            && capabilities.hasColumn("handle_id", in: "chat_handle_join")
-            && capabilities.hasColumn("id", in: "handle")
-        guard supported else {
+        guard participantIdentitySupported(capabilities) else {
             availability["participants"] = false
             availability["participantCount"] = false
             availability["kind"] = false
@@ -1110,8 +1125,15 @@ private extension SQLiteMessagesChatRepository {
                 participants = [observations.participant()]
             }
             let kind: MessagesChatKind = participants.count > 1 ? .group : .direct
+            // Synthesized here rather than in the header query, because "is this direct?"
+            // is only knowable once identities have been normalized.
+            let displayName =
+                records[index].chat.displayName
+                ?? (kind == .direct
+                    ? "Direct conversation \(records[index].chat.id.suffix(8))" : nil)
             records[index].chat = replacing(
                 records[index].chat,
+                displayName: displayName,
                 kind: kind,
                 participantCount: participants.count,
                 participants: participants
@@ -1487,6 +1509,7 @@ private extension SQLiteMessagesChatRepository {
 
     func replacing(
         _ chat: MessagesChat,
+        displayName: String?,
         kind: MessagesChatKind,
         participantCount: Int,
         participants: [MessagesParticipant]
@@ -1499,7 +1522,7 @@ private extension SQLiteMessagesChatRepository {
             groupId: chat.groupId,
             originalGroupId: chat.originalGroupId,
             roomName: chat.roomName,
-            displayName: chat.displayName,
+            displayName: displayName,
             kind: kind,
             participantCount: participantCount,
             participants: participants,

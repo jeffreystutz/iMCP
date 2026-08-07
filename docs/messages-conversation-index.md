@@ -96,11 +96,30 @@ A direct chat whose supported membership is empty may use `chatIdentifier` only
 when it independently passes the E.164 or email validator. Message senders are
 never scanned for ordinary membership.
 
-`kind` filtering is applied in SQL as a bounded prefilter and then reapplied
-authoritatively in Swift, because SQLite text folding cannot exactly reproduce
-the identity rules above. A returned `kind` therefore always agrees with the
-`kind` filter that selected it, though a filtered page may contain fewer than
-`limit` conversations when prefiltered rows are reclassified.
+No SQL expression derives participant identity, participant count, or `kind`.
+SQLite's `LOWER` and `TRIM` cannot reproduce the rules above — they fold
+case-distinct non-email handles together and do not strip tabs or newlines — so
+any SQL predicate would silently drop conversations before Swift could classify
+them.
+
+A `kind`-filtered request therefore scans ordered chat headers in bounded
+internal pages. Each page has its participants fetched and normalized, is
+classified authoritatively, and contributes only its matching conversations.
+Scanning continues until the caller's `limit` is filled or the source is
+exhausted; there is no total-row cap. The five-second query deadline and
+cancellation are the only global bound, and hitting either fails the request
+rather than returning a short page that would falsely imply no further matches
+exist. Matching conversations keep their unfiltered source order, and expensive
+full-detail aggregates run only for the finally selected conversations, never
+for scanned-and-rejected pages.
+
+A reduced schema without readable `handle.id` text cannot provide participant
+identity at all: `participants`, `participantCount`, and `kind` are reported
+unavailable, an unfiltered listing still returns the remaining chat metadata,
+and a `kind`-filtered request fails with the stable `kind-unavailable` stage.
+Participant identity is never inferred from `handle_id` or any other
+relationship row ID, because a relationship row identifies a database row, not a
+remote person.
 
 ## Full metadata
 
