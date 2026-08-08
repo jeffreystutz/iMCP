@@ -8,6 +8,11 @@ send implementation are combined on the working branch. Track B succeeded
 locally. Verified repository facts remain separate from unresolved upstream
 distribution questions.
 
+The conversation index supports optional participant discovery with contains-all
+semantics over `MessagesHandleIdentity`: every requested identity must be present,
+additional conversation participants are allowed, and `kind` composes with the
+same complete bounded-page scan.
+
 ## Verified baseline
 
 - The app and CLI target macOS 15.1 and build in Swift 5 language mode.

@@ -20,6 +20,7 @@ enum MessagesChatListingError: LocalizedError, Equatable, Sendable {
     case invalidLimit
     case invalidKind
     case invalidDetail
+    case invalidParticipants
 
     var errorDescription: String? {
         switch self {
@@ -29,6 +30,8 @@ enum MessagesChatListingError: LocalizedError, Equatable, Sendable {
             return "The chat kind must be direct or group."
         case .invalidDetail:
             return "The chat detail must be summary or full."
+        case .invalidParticipants:
+            return "The participant filter must contain at least one usable participant identity."
         }
     }
 }
@@ -138,6 +141,12 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                         description: "Optionally return only direct or group conversations",
                         enum: ["direct", "group"]
                     ),
+                    "participants": .array(
+                        description:
+                            "Optionally return conversations containing every supplied participant identity; additional conversation participants are allowed",
+                        items: .string(),
+                        minItems: 1
+                    ),
                     "detail": .string(
                         description:
                             "Metadata detail: summary avoids history aggregates; full adds supported message, attachment, and event aggregates",
@@ -187,8 +196,30 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 detail = .summary
             }
 
+            let participants: Set<String>?
+            if let value = arguments["participants"] {
+                guard let requested = value.arrayValue, !requested.isEmpty else {
+                    throw MessagesChatListingError.invalidParticipants
+                }
+                var identities: Set<String> = []
+                for value in requested {
+                    guard let handle = value.stringValue,
+                        let identity = MessagesHandleIdentity.identity(handle)
+                    else { throw MessagesChatListingError.invalidParticipants }
+                    identities.insert(identity)
+                }
+                participants = identities
+            } else {
+                participants = nil
+            }
+
             let start = ContinuousClock.now
-            let index = try await self.listChats(limit: limit, kind: kind, detail: detail)
+            let index = try await self.listChats(
+                limit: limit,
+                kind: kind,
+                participants: participants,
+                detail: detail
+            )
             self.chatListingLog(index.chats.count)
             let elapsed = start.duration(to: .now)
             log.notice(
@@ -494,6 +525,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     private func listChats(
         limit: Int,
         kind: MessagesChatKind?,
+        participants: Set<String>?,
         detail: MessagesChatDetail
     ) async throws -> MessagesConversationIndex {
         if let chatDatabasePathOverride {
@@ -501,6 +533,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 databasePath: chatDatabasePathOverride,
                 limit: limit,
                 kind: kind,
+                participants: participants,
                 detail: detail
             )
         }
@@ -521,6 +554,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                     databasePath: databasePath,
                     limit: limit,
                     kind: kind,
+                    participants: participants,
                     detail: detail
                 )
             } catch let error as MessagesChatRepositoryError {

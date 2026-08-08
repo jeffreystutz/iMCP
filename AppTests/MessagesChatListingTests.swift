@@ -298,6 +298,148 @@ final class MessagesChatListingTests: XCTestCase {
         XCTAssertEqual(stages.values.filter { $0 == "attachments" }.count, 1)
     }
 
+    func testParticipantFilterContainsAllAndComposesWithKind() throws {
+        let fixture = try ChatDatabaseFixture.full()
+        defer { fixture.remove() }
+
+        let groupParticipants: Set<String> = ["+15550100001", "person@example.invalid"]
+        let matches = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 10,
+            kind: nil,
+            participants: groupParticipants,
+            detail: .summary
+        )
+        XCTAssertEqual(matches.chats.map(\.displayName), ["Synthetic Group"])
+        XCTAssertEqual(matches.chats.first?.participantCount, 3)
+
+        let groups = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 10,
+            kind: .group,
+            participants: ["+15550100001"],
+            detail: .summary
+        )
+        XCTAssertEqual(groups.chats.map(\.displayName), ["Synthetic Group"])
+
+        let directs = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 10,
+            kind: .direct,
+            participants: ["+15550100001"],
+            detail: .summary
+        )
+        XCTAssertTrue(directs.chats.isEmpty)
+
+        let partial = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 10,
+            kind: nil,
+            participants: ["person@example.invalid", "absent@example.invalid"],
+            detail: .summary
+        )
+        XCTAssertTrue(partial.chats.isEmpty)
+    }
+
+    func testParticipantFilterUsesAuthoritativeEmailPhoneAndOtherIdentitySemantics() throws {
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+
+        let email = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 10,
+            kind: nil,
+            participants: [MessagesHandleIdentity.identity(" PERSON@example.invalid ")!],
+            detail: .summary
+        )
+        XCTAssertEqual(email.chats.map(\.displayName), ["Email Case Direct"])
+
+        let exactOther = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 10,
+            kind: nil,
+            participants: [MessagesHandleIdentity.identity("BOT")!],
+            detail: .summary
+        )
+        XCTAssertEqual(exactOther.chats.map(\.displayName), ["Case Group"])
+
+        let differentCase = try repository().listChats(
+            databasePath: fixture.path,
+            limit: 10,
+            kind: nil,
+            participants: [MessagesHandleIdentity.identity("Bot")!],
+            detail: .summary
+        )
+        XCTAssertTrue(differentCase.chats.isEmpty)
+
+        let phoneFixture = try ChatDatabaseFixture.participantIdentity()
+        defer { phoneFixture.remove() }
+        let phone = try repository().listChats(
+            databasePath: phoneFixture.path,
+            limit: 10,
+            kind: .direct,
+            participants: [MessagesHandleIdentity.identity("+15550100001")!],
+            detail: .summary
+        )
+        XCTAssertEqual(phone.chats.map(\.displayName), ["E164 Duplicate"])
+    }
+
+    func testParticipantFilteredPagingAppliesLimitAfterFilteringAndStopsEarly() throws {
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+
+        let lateStages = LockedStrings()
+        let late = try repository(filterPageSize: 2, observer: { lateStages.append($0) }).listChats(
+            databasePath: fixture.path,
+            limit: 1,
+            kind: nil,
+            participants: ["tail@example.invalid"],
+            detail: .summary
+        )
+        XCTAssertEqual(late.chats.map(\.displayName), ["Tail Direct"])
+        XCTAssertEqual(lateStages.values.filter { $0 == "chats" }.count, 4)
+
+        let earlyStages = LockedStrings()
+        let early = try repository(filterPageSize: 2, observer: { earlyStages.append($0) }).listChats(
+            databasePath: fixture.path,
+            limit: 1,
+            kind: nil,
+            participants: ["filler-d@example.invalid"],
+            detail: .summary
+        )
+        XCTAssertEqual(early.chats.map(\.displayName), ["Filler D"])
+        XCTAssertEqual(earlyStages.values.filter { $0 == "chats" }.count, 1)
+    }
+
+    func testParticipantFilteredOrderingExhaustionAndFullEnrichmentStayBounded() throws {
+        let fixture = try ChatDatabaseFixture.identityAndPaging()
+        defer { fixture.remove() }
+        try fixture.execute("INSERT INTO chat_handle_join VALUES (8, 11), (5, 11);")
+
+        let stages = LockedStrings()
+        let limited = try repository(filterPageSize: 2, observer: { stages.append($0) }).listChats(
+            databasePath: fixture.path,
+            limit: 2,
+            kind: nil,
+            participants: ["tail@example.invalid"],
+            detail: .full
+        )
+        XCTAssertEqual(limited.chats.map(\.displayName), ["Filler D", "Filler A"])
+        XCTAssertEqual(stages.values.filter { $0 == "messages" }.count, 1)
+        XCTAssertEqual(stages.values.filter { $0 == "attachments" }.count, 1)
+
+        let allStages = LockedStrings()
+        let all = try repository(filterPageSize: 2, observer: { allStages.append($0) }).listChats(
+            databasePath: fixture.path,
+            limit: 10,
+            kind: nil,
+            participants: ["tail@example.invalid"],
+            detail: .summary
+        )
+        XCTAssertEqual(all.chats.map(\.displayName), ["Filler D", "Filler A", "Tail Direct"])
+        XCTAssertEqual(allStages.values.filter { $0 == "chats" }.count, 5)
+    }
+
     func testTimeoutDuringFilteredScanFailsInsteadOfReturningAPartialPage() throws {
         let fixture = try ChatDatabaseFixture.identityAndPaging()
         defer { fixture.remove() }
@@ -318,7 +460,8 @@ final class MessagesChatListingTests: XCTestCase {
             let index = try repo.listChats(
                 databasePath: fixture.path,
                 limit: 10,
-                kind: .group,
+                kind: nil,
+                participants: ["tail@example.invalid"],
                 detail: .summary
             )
             XCTFail("Expected a timeout, got \(index.chats.count) conversations")
@@ -364,6 +507,21 @@ final class MessagesChatListingTests: XCTestCase {
             } catch let error as MessagesChatRepositoryError {
                 XCTAssertEqual(error.diagnosticStage, "kind-unavailable")
             }
+        }
+
+        XCTAssertThrowsError(
+            try repository().listChats(
+                databasePath: fixture.path,
+                limit: 10,
+                kind: nil,
+                participants: ["person@example.invalid"],
+                detail: .summary
+            )
+        ) { error in
+            XCTAssertEqual(
+                (error as? MessagesChatRepositoryError)?.diagnosticStage,
+                "participants-unavailable"
+            )
         }
     }
 
@@ -942,22 +1100,38 @@ final class MessagesChatListingTests: XCTestCase {
         }
     }
 
-    func testToolDefaultsToSummaryAndValidatesDetail() async throws {
+    func testToolDefaultsNormalizesParticipantsAndValidatesInputs() async throws {
         let recording = RecordingChatRepository()
         let tool = try chatTool(repository: recording)
         _ = try await tool([:], context: ToolCallContext(elicitation: UnsupportedElicitation()))
         _ = try await tool(
-            ["limit": .int(100), "kind": .string("group"), "detail": .string("full")],
+            [
+                "limit": .int(100),
+                "kind": .string("group"),
+                "participants": .array([
+                    .string(" Person@Example.invalid "), .string("person@example.invalid"),
+                ]),
+                "detail": .string("full"),
+            ],
             context: ToolCallContext(elicitation: UnsupportedElicitation())
         )
         XCTAssertEqual(
             recording.requests,
-            [.init(limit: 30, kind: nil, detail: .summary), .init(limit: 100, kind: .group, detail: .full)]
+            [
+                .init(limit: 30, kind: nil, participants: nil, detail: .summary),
+                .init(
+                    limit: 100,
+                    kind: .group,
+                    participants: ["person@example.invalid"],
+                    detail: .full
+                ),
+            ]
         )
 
         for arguments: [String: Value] in [
             ["limit": .int(0)], ["limit": .int(101)], ["kind": .string("unknown")],
-            ["detail": .string("verbose")],
+            ["detail": .string("verbose")], ["participants": .array([])],
+            ["participants": .array([.string("  ")])],
         ] {
             do {
                 _ = try await tool(arguments, context: ToolCallContext(elicitation: UnsupportedElicitation()))
@@ -987,6 +1161,13 @@ final class MessagesChatListingTests: XCTestCase {
         )
         let sendSchema = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: encoder.encode(send.inputSchema)) as? [String: Any]
+        )
+        let listSchema = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: encoder.encode(list.inputSchema)) as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set((listSchema["properties"] as? [String: Any] ?? [:]).keys),
+            Set(["limit", "kind", "participants", "detail"])
         )
         XCTAssertEqual(
             Set((fetchSchema["properties"] as? [String: Any] ?? [:]).keys),
@@ -1026,6 +1207,7 @@ final class MessagesChatListingTests: XCTestCase {
 private struct RecordedRequest: Equatable {
     let limit: Int
     let kind: MessagesChatKind?
+    let participants: Set<String>?
     let detail: MessagesChatDetail
 }
 
@@ -1038,9 +1220,14 @@ private final class RecordingChatRepository: MessagesChatListing, @unchecked Sen
         databasePath: String,
         limit: Int,
         kind: MessagesChatKind?,
+        participants: Set<String>?,
         detail: MessagesChatDetail
     ) throws -> MessagesConversationIndex {
-        lock.withLock { storedRequests.append(.init(limit: limit, kind: kind, detail: detail)) }
+        lock.withLock {
+            storedRequests.append(
+                .init(limit: limit, kind: kind, participants: participants, detail: detail)
+            )
+        }
         return MessagesConversationIndex(detail: detail, metadataAvailability: [:], chats: [])
     }
 

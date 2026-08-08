@@ -468,6 +468,7 @@ protocol MessagesChatListing: Sendable {
         databasePath: String,
         limit: Int,
         kind: MessagesChatKind?,
+        participants: Set<String>?,
         detail: MessagesChatDetail
     ) throws -> MessagesConversationIndex
     func resolveChatIdentifier(_ identifier: String, databasePath: String) throws -> String
@@ -522,6 +523,7 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
         databasePath: String,
         limit: Int,
         kind: MessagesChatKind?,
+        participants: Set<String>? = nil,
         detail: MessagesChatDetail = .summary
     ) throws -> MessagesConversationIndex {
         let database = try openReadOnly(databasePath)
@@ -548,18 +550,21 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
         try execute("BEGIN DEFERRED TRANSACTION", stage: "snapshot", database: database)
         do {
             var availability = availability(for: capabilities)
-            // Classification needs readable handle text. Without it no `kind` can be
-            // reported, and guessing from relationship row IDs would count one person
-            // several times, so a filtered request fails instead.
-            guard kind == nil || participantIdentitySupported(capabilities) else {
+            // Classification and participant filtering need readable handle text. Guessing
+            // from relationship row IDs would count one person several times, so a filtered
+            // request fails instead.
+            guard
+                (kind == nil && participants == nil)
+                    || participantIdentitySupported(capabilities)
+            else {
                 throw MessagesChatRepositoryError.queryFailed(
-                    stage: "kind-unavailable",
+                    stage: participants == nil ? "kind-unavailable" : "participants-unavailable",
                     code: SQLITE_OK
                 )
             }
 
             var records: [ChatRecord]
-            if let kind {
+            if kind != nil || participants != nil {
                 // Scan ordered header pages, classify each page authoritatively, and keep
                 // only matches, until the caller's limit is filled or the source runs out.
                 // No SQL predicate narrows the scan, so a conversation can never be dropped
@@ -583,7 +588,10 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
                         capabilities: capabilities,
                         availability: &availability
                     )
-                    for record in page where record.chat.kind == kind {
+                    for record in page
+                    where (kind == nil || record.chat.kind == kind)
+                        && participantFilter(participants, matches: record.chat)
+                    {
                         records.append(record)
                         if records.count == limit { break }
                     }
@@ -1058,6 +1066,12 @@ private extension SQLiteMessagesChatRepository {
         capabilities.hasColumn("chat_id", in: "chat_handle_join")
             && capabilities.hasColumn("handle_id", in: "chat_handle_join")
             && capabilities.hasColumn("id", in: "handle")
+    }
+
+    func participantFilter(_ requested: Set<String>?, matches chat: MessagesChat) -> Bool {
+        guard let requested else { return true }
+        let conversation = Set(chat.participants?.map(\.handle) ?? [])
+        return requested.isSubset(of: conversation)
     }
 
     func fetchParticipants(

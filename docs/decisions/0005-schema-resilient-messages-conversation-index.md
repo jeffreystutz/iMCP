@@ -65,6 +65,15 @@ the request rather than returning a short page that would imply exhaustion.
 Source ordering is preserved and full-detail aggregates run only for the finally
 selected conversations.
 
+`messages_list_chats` participant filtering uses the same scan and the same
+`MessagesHandleIdentity` values. Its predicate is contains-all: every distinct
+normalized requested identity must be present, while a conversation may contain
+additional participants. It composes with `kind`, applies the caller limit only
+after both predicates, and never reads message content. Empty or unusable filter
+identities are invalid input. If readable participant identity is unavailable,
+participant-filtered requests fail with a stable unavailable stage rather than
+returning an incomplete empty result.
+
 Where readable participant handles are unavailable, participant identity,
 participant count, and `kind` are reported unavailable and a filtered request
 fails with the stable `kind-unavailable` stage. Nothing is inferred from

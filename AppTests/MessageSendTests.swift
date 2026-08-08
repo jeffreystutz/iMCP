@@ -928,6 +928,7 @@ private final class RecordingSendChatRepository: MessagesChatListing, @unchecked
         databasePath: String,
         limit: Int,
         kind: MessagesChatKind?,
+        participants: Set<String>?,
         detail: MessagesChatDetail
     ) throws -> MessagesConversationIndex {
         MessagesConversationIndex(detail: detail, metadataAvailability: [:], chats: [])
