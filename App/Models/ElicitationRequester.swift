@@ -16,6 +16,8 @@ enum ElicitationRequestError: LocalizedError, Sendable {
 }
 
 public protocol ElicitationRequester: Sendable {
+    var supportsFormElicitation: Bool { get }
+
     func requestForm(
         message: String,
         schema: Elicitation.RequestSchema
@@ -26,6 +28,8 @@ struct MCPFormElicitationRequester: ElicitationRequester {
     private let supportsForm: Bool
     private let timeout: Duration
     private let request: @Sendable (String, Elicitation.RequestSchema) async throws -> CreateElicitation.Result
+
+    var supportsFormElicitation: Bool { supportsForm }
 
     init(
         server: MCP.Server,

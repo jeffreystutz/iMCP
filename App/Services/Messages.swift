@@ -52,12 +52,15 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
 
     private let sender: any MessagesSending
     private let chatRepository: any MessagesChatListing
+    private let sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting
     private let chatDatabasePathOverride: String?
     private let chatListingLog: @Sendable (Int) -> Void
 
     init(
         sender: any MessagesSending = AppleScriptMessagesSender(),
         chatRepository: any MessagesChatListing = SQLiteMessagesChatRepository(),
+        sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting =
+            MessagesFinalSendConfirmationRequester(),
         chatDatabasePathOverride: String? = nil,
         chatListingLog: @escaping @Sendable (Int) -> Void = { count in
             log.notice("Listed \(count) Messages conversations")
@@ -65,6 +68,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     ) {
         self.sender = sender
         self.chatRepository = chatRepository
+        self.sendConfirmationRequester = sendConfirmationRequester
         self.chatDatabasePathOverride = chatDatabasePathOverride
         self.chatListingLog = chatListingLog
         super.init()
@@ -351,7 +355,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         Tool(
             name: "messages_send",
             description:
-                "Submit one plain-text message using exactly one destination. A recipient first uses one uniquely matching existing direct conversation, or retains raw-recipient behavior when none exists. Recipients can address only an existing group conversation: iMCP cannot create a new group from a list, and the complete participant set must exactly match one existing group or the call fails without sending. When multiple groups have the same participant set, use chat_id; chat_id is preferred when the intended group is already known. Existing-chat sends always require confirmation.",
+                "Submit one plain-text message using exactly one destination. A recipient first uses one uniquely matching existing direct conversation, or retains raw-recipient behavior when none exists. Recipients can address only an existing group conversation: iMCP cannot create a new group from a list, and the complete participant set must exactly match one existing group or the call fails without sending. When multiple groups have the same participant set, use chat_id; chat_id is preferred when the intended group is already known. Every send requires final confirmation.",
             inputSchema: .object(
                 properties: [
                     "recipient": .string(
@@ -437,51 +441,32 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 )
             }
 
-            // Every destination form requires its own final confirmation. There is no
-            // setting, build configuration, or injected dependency that can bypass this.
-            let confirmationMessage: String
-            let confirmationTitle: String
+            // Every destination form requires its own final confirmation. The production
+            // router always selects exactly one real presenter; no mode bypasses authorization.
+            let confirmationPresentation: MessagesSendConfirmationPresentation
             switch preparedDestination {
             case .rawRecipient(let recipient):
-                confirmationMessage = self.rawRecipientConfirmationMessage(
-                    recipient: recipient,
-                    body: input.body
+                confirmationPresentation = .init(
+                    title: "Confirm new direct message",
+                    message: self.rawRecipientConfirmationMessage(
+                        recipient: recipient,
+                        body: input.body
+                    )
                 )
-                confirmationTitle = "Confirm new direct message"
             case .explicitChat(_, let initialChat), .matched(_, _, let initialChat):
-                confirmationMessage = self.chatConfirmationMessage(
-                    initialChat,
-                    body: input.body,
-                    matchedFromParticipants: preparedDestination.isMatchedGroup
+                confirmationPresentation = .init(
+                    title: "Confirm existing-chat submission",
+                    message: self.chatConfirmationMessage(
+                        initialChat,
+                        body: input.body,
+                        matchedFromParticipants: preparedDestination.isMatchedGroup
+                    )
                 )
-                confirmationTitle = "Confirm existing-chat submission"
             }
-            let confirmation = try await context.elicitation.requestForm(
-                message: confirmationMessage,
-                schema: .init(
-                    title: confirmationTitle,
-                    properties: [
-                        "confirmed": .object([
-                            "type": .string("boolean"),
-                            "description": .string(
-                                "Confirm that Messages should submit this message"
-                            ),
-                        ])
-                    ],
-                    required: ["confirmed"]
-                )
+            try await self.sendConfirmationRequester.requestConfirmation(
+                confirmationPresentation,
+                elicitation: context.elicitation
             )
-
-            switch confirmation.action {
-            case .decline:
-                throw MessageSendError.confirmationDeclined
-            case .cancel:
-                throw MessageSendError.confirmationCancelled
-            case .accept:
-                guard confirmation.content?["confirmed"]?.boolValue == true else {
-                    throw MessageSendError.confirmationMalformed
-                }
-            }
 
             try Task.checkCancellation()
             switch preparedDestination {

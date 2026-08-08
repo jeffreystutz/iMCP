@@ -5,6 +5,147 @@ import XCTest
 @testable import iMCP
 
 final class MessageSendTests: XCTestCase {
+    func testConfirmationModeDefaultsAndUnknownValuesFailSafeToAutomatic() {
+        let suiteName = "MessageSendTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(MessagesSendConfirmationMode.load(from: defaults), .automatic)
+        defaults.set(false, forKey: "messagesSendConfirmationRequired")
+        XCTAssertEqual(MessagesSendConfirmationMode.load(from: defaults), .automatic)
+        defaults.set("corrupt", forKey: MessagesSendConfirmationMode.storageKey)
+        XCTAssertEqual(MessagesSendConfirmationMode.load(from: defaults), .automatic)
+        XCTAssertEqual(
+            Set(MessagesSendConfirmationMode.allCases.map(\.rawValue)),
+            Set(["automatic", "mcpForm", "appDialog"])
+        )
+    }
+
+    func testConfirmationModeSelectsExactlyOnePresenter() async throws {
+        let presentation = MessagesSendConfirmationPresentation(
+            title: "Synthetic confirmation",
+            message: "Synthetic exact destination and body"
+        )
+
+        let automaticForm = StubElicitationRequester(result: confirmedResult, supportsForm: true)
+        let unusedNative = RecordingNativeConfirmationPresenter(outcome: .affirmed)
+        try await MessagesFinalSendConfirmationRequester(
+            mode: { .automatic },
+            appPresenter: unusedNative
+        ).requestConfirmation(presentation, elicitation: automaticForm)
+        XCTAssertEqual(automaticForm.requestCount, 1)
+        XCTAssertEqual(unusedNative.requestCount, 0)
+
+        let unsupportedForm = StubElicitationRequester(
+            error: ElicitationRequestError.formUnsupported,
+            supportsForm: false
+        )
+        let automaticNative = RecordingNativeConfirmationPresenter(outcome: .affirmed)
+        try await MessagesFinalSendConfirmationRequester(
+            mode: { .automatic },
+            appPresenter: automaticNative
+        ).requestConfirmation(presentation, elicitation: unsupportedForm)
+        XCTAssertEqual(unsupportedForm.requestCount, 0)
+        XCTAssertEqual(automaticNative.requestCount, 1)
+
+        let explicitForm = StubElicitationRequester(result: confirmedResult, supportsForm: true)
+        let explicitFormNative = RecordingNativeConfirmationPresenter(outcome: .affirmed)
+        try await MessagesFinalSendConfirmationRequester(
+            mode: { .mcpForm },
+            appPresenter: explicitFormNative
+        ).requestConfirmation(presentation, elicitation: explicitForm)
+        XCTAssertEqual(explicitForm.requestCount, 1)
+        XCTAssertEqual(explicitFormNative.requestCount, 0)
+
+        let explicitAppForm = StubElicitationRequester(result: confirmedResult, supportsForm: true)
+        let explicitApp = RecordingNativeConfirmationPresenter(outcome: .affirmed)
+        try await MessagesFinalSendConfirmationRequester(
+            mode: { .appDialog },
+            appPresenter: explicitApp
+        ).requestConfirmation(presentation, elicitation: explicitAppForm)
+        XCTAssertEqual(explicitAppForm.requestCount, 0)
+        XCTAssertEqual(explicitApp.requestCount, 1)
+    }
+
+    func testExplicitMCPModeUnsupportedFailsClosedWithoutNativeFallback() async {
+        let form = StubElicitationRequester(
+            error: ElicitationRequestError.formUnsupported,
+            supportsForm: false
+        )
+        let native = RecordingNativeConfirmationPresenter(outcome: .affirmed)
+        let requester = MessagesFinalSendConfirmationRequester(
+            mode: { .mcpForm },
+            appPresenter: native
+        )
+
+        do {
+            try await requester.requestConfirmation(
+                .init(title: "Synthetic", message: "Synthetic"),
+                elicitation: form
+            )
+            XCTFail("Expected unsupported MCP form confirmation to fail")
+        } catch ElicitationRequestError.formUnsupported {
+            XCTAssertEqual(native.requestCount, 0)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testAutomaticMCPFailuresAreTerminalWithoutNativeFallback() async {
+        let forms = [
+            StubElicitationRequester(result: .init(action: .decline)),
+            StubElicitationRequester(result: .init(action: .cancel)),
+            StubElicitationRequester(
+                result: .init(action: .accept, content: ["confirmed": .bool(false)])
+            ),
+            StubElicitationRequester(error: ElicitationRequestError.timedOut),
+            StubElicitationRequester(error: SyntheticConfirmationError.requestFailed),
+        ]
+
+        for form in forms {
+            let native = RecordingNativeConfirmationPresenter(outcome: .affirmed)
+            let requester = MessagesFinalSendConfirmationRequester(
+                mode: { .automatic },
+                appPresenter: native
+            )
+            do {
+                try await requester.requestConfirmation(
+                    .init(title: "Synthetic", message: "Synthetic"),
+                    elicitation: form
+                )
+                XCTFail("Expected MCP confirmation failure")
+            } catch {
+                XCTAssertEqual(form.requestCount, 1)
+                XCTAssertEqual(native.requestCount, 0)
+            }
+        }
+    }
+
+    func testAutomaticMCPParentCancellationNeverFallsBackToNative() async throws {
+        let native = RecordingNativeConfirmationPresenter(outcome: .affirmed)
+        let requester = MessagesFinalSendConfirmationRequester(
+            mode: { .automatic },
+            appPresenter: native
+        )
+        let task = Task {
+            try await requester.requestConfirmation(
+                .init(title: "Synthetic", message: "Synthetic"),
+                elicitation: SlowElicitationRequester()
+            )
+        }
+
+        try? await Task.sleep(for: .milliseconds(10))
+        task.cancel()
+        do {
+            try await task.value
+            XCTFail("Expected confirmation cancellation")
+        } catch is CancellationError {
+            XCTAssertEqual(native.requestCount, 0)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testAcceptedEmailSubmissionDispatchesOnceAndReturnsRedactedStatus() async throws {
         let sender = RecordingMessagesSender()
         let requester = StubElicitationRequester(result: confirmedResult)
@@ -54,6 +195,137 @@ final class MessageSendTests: XCTestCase {
         let encoded = String(data: try JSONEncoder().encode(result), encoding: .utf8)!
         XCTAssertFalse(encoded.contains("brand-new@example.invalid"))
         XCTAssertFalse(encoded.contains("exact-authorized-body"))
+    }
+
+    func testMCPAndNativeReceiveTheSameAuthoritativeConfirmationPresentation() async throws {
+        let mcpSender = RecordingMessagesSender()
+        let mcp = StubElicitationRequester(result: confirmedResult)
+        _ = try await sendTool(
+            sender: mcpSender,
+            chatRepository: RecordingSendChatRepository(results: [
+                .success(groupChat), .success(groupChat),
+            ])
+        )(
+            ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("same-exact-body")],
+            context: ToolCallContext(elicitation: mcp)
+        )
+
+        let nativeSender = RecordingMessagesSender()
+        let native = RecordingNativeConfirmationPresenter(outcome: .affirmed)
+        let appRequester = MessagesFinalSendConfirmationRequester(
+            mode: { .appDialog },
+            appPresenter: native
+        )
+        _ = try await sendTool(
+            sender: nativeSender,
+            chatRepository: RecordingSendChatRepository(results: [
+                .success(groupChat), .success(groupChat),
+            ]),
+            sendConfirmationRequester: appRequester
+        )(
+            ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("same-exact-body")],
+            context: ToolCallContext(
+                elicitation: StubElicitationRequester(result: confirmedResult)
+            )
+        )
+
+        XCTAssertEqual(native.lastPresentation?.title, mcp.lastTitle)
+        XCTAssertEqual(native.lastPresentation?.message, mcp.lastMessage)
+        XCTAssertTrue(native.lastPresentation?.message.contains("Synthetic Group") == true)
+        XCTAssertTrue(native.lastPresentation?.message.contains("first@example.invalid") == true)
+        XCTAssertTrue(native.lastPresentation?.message.contains("second@example.invalid") == true)
+        XCTAssertTrue(native.lastPresentation?.message.contains("same-exact-body") == true)
+    }
+
+    func testNativeCancelAndUnexpectedResponsesDispatchZero() async {
+        let native = RecordingNativeConfirmationPresenter(outcome: .cancelled)
+        let sender = RecordingMessagesSender()
+        await assertSendError(.confirmationCancelled) {
+            _ = try await self.sendTool(
+                sender: sender,
+                sendConfirmationRequester: MessagesFinalSendConfirmationRequester(
+                    mode: { .appDialog },
+                    appPresenter: native
+                )
+            )(
+                [
+                    "recipient": .string("recipient@example.invalid"),
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+        let submissionCount = await sender.submissionCount
+        XCTAssertEqual(submissionCount, 0)
+        XCTAssertEqual(native.requestCount, 1)
+        XCTAssertEqual(
+            AppKitMessagesSendConfirmationPresenter.outcome(for: .abort),
+            .cancelled
+        )
+    }
+
+    func testNativeAffirmationRevalidatesThenDispatchesExactlyOnce() async throws {
+        let repository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(directChat),
+        ])
+        let native = RecordingNativeConfirmationPresenter(outcome: .affirmed) {
+            XCTAssertEqual(repository.resolveCount, 1)
+        }
+        let sender = RecordingMessagesSender()
+        _ = try await sendTool(
+            sender: sender,
+            chatRepository: repository,
+            sendConfirmationRequester: MessagesFinalSendConfirmationRequester(
+                mode: { .appDialog },
+                appPresenter: native
+            )
+        )(
+            ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+            context: ToolCallContext(
+                elicitation: StubElicitationRequester(result: confirmedResult)
+            )
+        )
+
+        XCTAssertEqual(repository.resolveCount, 2)
+        let chatSubmissionCount = await sender.chatSubmissionCount
+        let rawSubmissionCount = await sender.submissionCount
+        XCTAssertEqual(chatSubmissionCount, 1)
+        XCTAssertEqual(rawSubmissionCount, 0)
+    }
+
+    func testNativeAffirmationStillFailsClosedForStaleDestination() async {
+        let changed = MessagesResolvedChatDestination(
+            chatGuid: directChat.chatGuid,
+            displayName: directChat.displayName,
+            roomName: directChat.roomName,
+            kind: directChat.kind,
+            participantCount: 2,
+            participantHandles: directChat.participantHandles + ["changed@example.invalid"],
+            service: directChat.service
+        )
+        let repository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(changed),
+        ])
+        let sender = RecordingMessagesSender()
+        await assertSendError(.staleChatIdentifier) {
+            _ = try await self.sendTool(
+                sender: sender,
+                chatRepository: repository,
+                sendConfirmationRequester: MessagesFinalSendConfirmationRequester(
+                    mode: { .appDialog },
+                    appPresenter: RecordingNativeConfirmationPresenter(outcome: .affirmed)
+                )
+            )(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+        let chatSubmissionCount = await sender.chatSubmissionCount
+        XCTAssertEqual(chatSubmissionCount, 0)
     }
 
     func testExactE164HandleIsAcceptedWithoutNormalization() async throws {
@@ -234,6 +506,7 @@ final class MessageSendTests: XCTestCase {
         // predicate were removed. Guard against any of them returning.
         let sources = [
             "App/Services/Messages.swift",
+            "App/Services/MessagesSendConfirmation.swift",
             "App/Views/SettingsView.swift",
             "App/Services/MessagesSender.swift",
         ]
@@ -257,6 +530,18 @@ final class MessageSendTests: XCTestCase {
                 )
             }
         }
+
+        let nativeSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "App/Services/MessagesSendConfirmation.swift"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(nativeSource.contains("@MainActor"))
+        XCTAssertTrue(nativeSource.contains("activate(ignoringOtherApps: true)"))
+        XCTAssertTrue(nativeSource.contains("orderFrontRegardless()"))
+        XCTAssertTrue(nativeSource.contains("addButton(withTitle: \"Send\")"))
+        XCTAssertTrue(nativeSource.contains("addButton(withTitle: \"Cancel\")"))
     }
 
     func testAmbiguousAutomationFailureIsNotRetried() async {
@@ -418,6 +703,9 @@ final class MessageSendTests: XCTestCase {
         XCTAssertTrue(requester.lastMessage.contains("Synthetic Room"))
         XCTAssertTrue(requester.lastMessage.contains("Type: group"))
         XCTAssertTrue(requester.lastMessage.contains("Participant count: 2"))
+        XCTAssertTrue(requester.lastMessage.contains("first@example.invalid"))
+        XCTAssertTrue(requester.lastMessage.contains("second@example.invalid"))
+        XCTAssertTrue(requester.lastMessage.contains("test-body"))
         let chatSubmissions = await sender.chatSubmissionCount
         XCTAssertEqual(chatSubmissions, 0)
     }
@@ -853,13 +1141,16 @@ final class MessageSendTests: XCTestCase {
 
     private func sendTool(
         sender: RecordingMessagesSender,
-        chatRepository: (any MessagesChatListing)? = nil
+        chatRepository: (any MessagesChatListing)? = nil,
+        sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting =
+            MessagesFinalSendConfirmationRequester(mode: { .mcpForm })
     ) throws -> iMCP.Tool {
         let repository = chatRepository ?? RecordingSendChatRepository(results: [])
         return try XCTUnwrap(
             MessageService(
                 sender: sender,
                 chatRepository: repository,
+                sendConfirmationRequester: sendConfirmationRequester,
                 chatDatabasePathOverride: "/synthetic/chat.db"
             ).tools.first { $0.name == "messages_send" }
         )
@@ -968,23 +1259,30 @@ private final class StubElicitationRequester: ElicitationRequester, @unchecked S
     private let error: Error?
     private var storedRequestCount = 0
     private var storedLastMessage = ""
+    private var storedLastTitle: String?
+
+    let supportsFormElicitation: Bool
 
     var requestCount: Int { lock.withLock { storedRequestCount } }
     var lastMessage: String { lock.withLock { storedLastMessage } }
+    var lastTitle: String? { lock.withLock { storedLastTitle } }
 
-    init(result: CreateElicitation.Result) {
+    init(result: CreateElicitation.Result, supportsForm: Bool = true) {
         self.results = [result]
         self.error = nil
+        self.supportsFormElicitation = supportsForm
     }
 
-    init(results: [CreateElicitation.Result]) {
+    init(results: [CreateElicitation.Result], supportsForm: Bool = true) {
         self.results = results
         self.error = nil
+        self.supportsFormElicitation = supportsForm
     }
 
-    init(error: Error) {
+    init(error: Error, supportsForm: Bool = true) {
         self.results = []
         self.error = error
+        self.supportsFormElicitation = supportsForm
     }
 
     func requestForm(
@@ -994,6 +1292,7 @@ private final class StubElicitationRequester: ElicitationRequester, @unchecked S
         let result = lock.withLock {
             storedRequestCount += 1
             storedLastMessage = message
+            storedLastTitle = schema.title
             return results.isEmpty ? nil : results.removeFirst()
         }
         if let error { throw error }
@@ -1003,11 +1302,52 @@ private final class StubElicitationRequester: ElicitationRequester, @unchecked S
 }
 
 private struct SlowElicitationRequester: ElicitationRequester {
+    let supportsFormElicitation = true
+
     func requestForm(
         message: String,
         schema: Elicitation.RequestSchema
     ) async throws -> CreateElicitation.Result {
         try await Task.sleep(for: .seconds(10))
         return .init(action: .accept, content: ["confirmed": .bool(true)])
+    }
+}
+
+private enum SyntheticConfirmationError: Error {
+    case requestFailed
+}
+
+private final class RecordingNativeConfirmationPresenter:
+    MessagesNativeSendConfirmationPresenting, @unchecked Sendable
+{
+    private let lock = NSLock()
+    private let outcome: MessagesNativeSendConfirmationOutcome
+    private let onRequest: @Sendable () -> Void
+    private var storedRequestCount = 0
+    private var storedLastPresentation: MessagesSendConfirmationPresentation?
+
+    var requestCount: Int { lock.withLock { storedRequestCount } }
+    var lastPresentation: MessagesSendConfirmationPresentation? {
+        lock.withLock { storedLastPresentation }
+    }
+
+    init(
+        outcome: MessagesNativeSendConfirmationOutcome,
+        onRequest: @escaping @Sendable () -> Void = {}
+    ) {
+        self.outcome = outcome
+        self.onRequest = onRequest
+    }
+
+    @MainActor
+    func requestConfirmation(
+        _ presentation: MessagesSendConfirmationPresentation
+    ) throws -> MessagesNativeSendConfirmationOutcome {
+        lock.withLock {
+            storedRequestCount += 1
+            storedLastPresentation = presentation
+        }
+        onRequest()
+        return outcome
     }
 }

@@ -66,6 +66,8 @@ struct SettingsView: View {
 
 struct GeneralSettingsView: View {
     @ObservedObject var serverController: ServerController
+    @AppStorage(MessagesSendConfirmationMode.storageKey)
+    private var sendConfirmationMode = MessagesSendConfirmationMode.defaultValue.rawValue
     @State private var showingResetAlert = false
     @State private var selectedClients = Set<String>()
 
@@ -76,8 +78,20 @@ struct GeneralSettingsView: View {
     var body: some View {
         Form {
             Section("Message Sending") {
+                Picker(
+                    "Send confirmation",
+                    selection: Binding(
+                        get: { MessagesSendConfirmationMode.decode(sendConfirmationMode) },
+                        set: { sendConfirmationMode = $0.rawValue }
+                    )
+                ) {
+                    ForEach(MessagesSendConfirmationMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+
                 Text(
-                    "Every message submission requires a separate MCP form confirmation showing the exact destination and message text. This cannot be turned off."
+                    "Automatic uses an MCP form when the client advertises support; otherwise iMCP shows the confirmation. Choose iMCP app for clients that do not visibly support form elicitation. A confirmation is always required."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)

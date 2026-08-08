@@ -133,14 +133,14 @@ iMessage only.
 The tool:
 
 - may elicit missing input, then validates the effective values;
-- always performs a separate form-elicitation confirmation, for every
-  destination form, with no opt-out of any kind;
+- always performs a separate final confirmation, for every destination form,
+  with no opt-out of any kind;
 - shows the exact destination and exact body in that confirmation, because it is
   the surface on which the user authorizes an externally visible side effect;
 - treats missing-input elicitation as input gathering only, never as
   authorization;
-- fails closed for unsupported, declined, cancelled, malformed, or timed-out
-  elicitation;
+- fails closed for unsupported, declined, cancelled, dismissed, malformed,
+  timed-out, errored, or task-cancelled confirmation;
 - requests TCC only after a successful confirmation;
 - passes recipient and body as Apple Event descriptors to a fixed in-process
   handler;
@@ -148,6 +148,21 @@ The tool:
   ambiguous outcome;
 - reports only that Messages accepted a submission, never delivery; and
 - never logs or returns recipients or message bodies.
+
+Final send confirmation presentation is persisted as Automatic, MCP form, or
+iMCP app. Missing or invalid preferences resolve to Automatic; there is no off
+state. Automatic selects MCP form before authorization begins when the current
+connection advertises form support, otherwise it selects the native iMCP AppKit
+dialog. Explicit MCP form mode never falls back, and explicit iMCP app mode never
+issues an MCP final-confirmation request. Once an MCP confirmation request has
+begun, every negative or failed outcome is terminal for that send and can never
+open the native dialog as a second authorization opportunity.
+
+Both presenters consume one immutable title/message value built by the existing
+destination-specific formatter. The native dialog is final-send authorization
+only, not a generic native JSON-schema or missing-input elicitation renderer. It
+runs on the main actor, activates iMCP, presents frontmost Send and Cancel
+actions, and treats dismissal or any unexpected result as cancellation.
 
 The first version has no contact lookup, normalization, groups, attachments,
 SMS, RCS, fallback, or delivery tracking. Existing `messages_fetch` behavior
@@ -334,8 +349,8 @@ states each build and test. Likely boundaries, kept in dependency order:
 4. **Chat-target sending and existing-conversation matching.** Opaque chat IDs,
    revalidation before dispatch, and exact participant-set matching.
 5. **New-recipient routing.** Only after its own experiments.
-6. **Contacts resolution**, then **attachments**, then **compatibility and
-   release documentation.**
+6. **Contacts resolution**, then **attachments**, then **release
+   documentation.**
 
 These boundaries are a plan, not a commitment; confirm them against the actual
 accumulated diff when decomposition begins.

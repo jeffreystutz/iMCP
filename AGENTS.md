@@ -63,9 +63,10 @@ The binding rules:
 
 - No real message may be sent without separate explicit authorization of the
   exact destination and the exact body for that manual test.
-- Every message submission requires its own accepted form confirmation. There is
-  no setting, build flag, debug path, environment variable, or injected
-  dependency that may bypass it.
+- Every message submission requires its own accepted final confirmation through
+  exactly one supported presentation mechanism. There is no setting, build
+  flag, debug path, environment variable, or injected Boolean that may bypass
+  it.
 - Product work must preserve the fixed-script, descriptor-input, one-dispatch,
   no-retry, fail-closed architecture. AppleScript source stays fixed; untrusted
   identifiers and message content enter only as Apple Event descriptors.

@@ -46,12 +46,26 @@ not be appropriate upstream.
 
 ## Decision
 
-Use an actor-serialized, in-process fixed AppleScript handler. Require an
-accepted form-elicitation confirmation carrying an explicit affirmative Boolean
-before every submission, on every destination form. There is no setting, build
-flag, debug path, environment variable, or injectable dependency that can
-bypass it. Missing-input elicitation gathers values only and is never treated
-as authorization; a separate final confirmation always follows.
+Use an actor-serialized, in-process fixed AppleScript handler. Require one
+explicit affirmative final confirmation before every submission, on every
+destination form. There is no setting, build flag, debug path, environment
+variable, or injectable Boolean that can bypass it. Missing-input elicitation
+gathers values only and is never treated as authorization; a separate final
+confirmation always follows.
+
+Final confirmation has one persisted presentation mode: Automatic, MCP form,
+or iMCP app. Missing, unknown, or corrupt values decode as Automatic; no mode
+means off. Automatic selects MCP form before authorization begins when the
+current connection advertises form elicitation, otherwise it selects the native
+iMCP dialog. MCP form never falls back. iMCP app never sends an MCP final-
+confirmation request.
+
+Selection occurs once. After an MCP final-confirmation request is dispatched,
+decline, cancel, timeout, malformed acceptance, request error, and parent-task
+cancellation are terminal and dispatch nothing. They never open a native dialog
+for the same send. The native AppKit dialog runs on the main actor, activates
+iMCP, presents frontmost Send and Cancel actions, and treats every response
+other than the explicit affirmative action as cancellation.
 
 The confirmation displays the exact destination and the exact body. It is the
 surface on which a person authorizes an externally visible side effect, so
@@ -113,8 +127,8 @@ Descriptor arguments avoid interpolating user-controlled content into source.
 ### Positive
 
 - Permission and confirmation boundaries are explicit and unconditional.
-- A client that cannot present a form cannot send at all, which is the intended
-  fail-closed outcome rather than a gap to work around.
+- Clients without MCP form UI can still authorize through the visible native
+  iMCP dialog without weakening the confirmation boundary.
 - Tests can replace the automation adapter without touching Messages.
 - No private database or framework writes are required.
 
@@ -124,7 +138,8 @@ Descriptor arguments avoid interpolating user-controlled content into source.
 - Script execution is synchronous and cancellation after dispatch is
   inherently ambiguous.
 - Submission cannot establish delivery.
-- Clients that do not support form elicitation cannot send at all.
+- Native confirmation is limited to final send authorization; missing-input and
+  generic structured elicitation remain MCP-form-only.
 - A recipient whose existing conversation cannot be resolved exactly fails
   rather than sending, so some legitimate sends require an explicit `chat_id`.
 - Timeout or cancellation cancels the wrapper's underlying request task but
@@ -137,6 +152,8 @@ Descriptor arguments avoid interpolating user-controlled content into source.
 - Duplicate sends: issue one event and prohibit automatic retry.
 - Confirmation bypass: no bypass exists. A regression test asserts the removed
   preference key, settings UI, and injectable predicate have not returned.
+- Double prompting: choose one presenter before authorization and never catch an
+  MCP failure into native fallback.
 - Privacy leakage: exclude recipient and body from logs, errors, and results.
 - Distribution rejection: document Developer ID/notarization uncertainty with
   the maintainer; local development viability is a separate gate.
@@ -156,10 +173,11 @@ command and performed no account, chat, participant, contact, or history
 enumeration. No message was sent.
 
 Automated tests use a fake dispatcher and cover every no-send confirmation
-path, missing-input elicitation being distinct from final confirmation,
-exact-value authorization content, unresolvable direct membership failing
-closed, redacted results, fixed script source, and the at-most-one dispatch
-invariant.
+path, mode defaults and selection, terminal MCP failures with zero native
+fallback, native cancellation, shared exact-value authorization content,
+missing-input elicitation being distinct from final confirmation, unresolvable
+direct membership failing closed, redacted results, fixed script source, and
+the at-most-one dispatch invariant.
 
 On 2026-07-21, a second ignored signed sandboxed probe performed no-send lookup
 only. Messages' scripting definition identifies `chat.id` as the chat GUID and
@@ -188,3 +206,4 @@ custom trust setting was added.
 - Messages 26 scripting definition
 - Apple Events automation entitlement and TCC documentation
 - MCP form elicitation specification
+- AppKit `NSAlert` and application activation APIs

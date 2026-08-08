@@ -1260,6 +1260,8 @@ private struct NonDispatchingSender: MessagesSending {
 }
 
 private struct UnsupportedElicitation: ElicitationRequester {
+    let supportsFormElicitation = false
+
     func requestForm(
         message: String,
         schema: Elicitation.RequestSchema
