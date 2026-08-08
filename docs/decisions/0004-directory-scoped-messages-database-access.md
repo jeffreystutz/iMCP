@@ -23,6 +23,24 @@ read-only security-scoped bookmark for a user-selected directory containing
 The SQLite connection is opened with `SQLITE_OPEN_READONLY`, extended result
 codes are enabled, and `PRAGMA query_only = ON` is required before a query.
 
+The selected directory is persisted as an **app-scoped** security-scoped
+bookmark, so the app declares `com.apple.security.files.bookmarks.app-scope` in
+both its Debug and Release entitlements. Bookmark data is created with
+`[.withSecurityScope, .securityScopeAllowOnlyReadAccess]` and resolved with
+`.withSecurityScope`. Both options are required: `.withSecurityScope` is what
+makes the bookmark security-scoped, and the read-only option is only meaningful
+alongside it. Omitting either — or omitting the entitlement — fails at runtime
+when the bookmark is created, with `NSCocoaErrorDomain` 256, "Failed to retrieve
+app-scope key". The same options apply to the legacy single-file `messages_fetch`
+bookmark.
+
+Because these guarantees exist only in a signed, sandboxed process, manual
+permission and TCC verification must use a correctly signed app. The ordinary
+credential-free CI Debug artifact is unsigned and carries no entitlements at
+all, so it cannot exercise or validate this behavior. See
+[`development-workflow.md`](../development-workflow.md) for the signed
+manual-verification build.
+
 The app validates that the selected directory contains a readable `chat.db`.
 It stores neither the path nor database metadata in logs. Repository failures
 may log only a fixed operation stage and a numeric SQLite result code.

@@ -36,6 +36,17 @@ enum MessagesChatListingError: LocalizedError, Equatable, Sendable {
 final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     static let shared = MessageService()
 
+    /// Options for persisting user-selected Messages locations across launches.
+    ///
+    /// `.withSecurityScope` is what makes the bookmark security-scoped at all, and the app
+    /// must additionally declare `com.apple.security.files.bookmarks.app-scope` for the
+    /// sandbox to issue one. Without both, creation fails with the Cocoa error
+    /// "Failed to retrieve app-scope key". `.securityScopeAllowOnlyReadAccess` narrows the
+    /// restored scope to reading, and is only meaningful alongside `.withSecurityScope`.
+    static let readOnlySecurityScopedBookmarkOptions: URL.BookmarkCreationOptions = [
+        .withSecurityScope, .securityScopeAllowOnlyReadAccess,
+    ]
+
     private let sender: any MessagesSending
     private let chatRepository: any MessagesChatListing
     private let chatDatabasePathOverride: String?
@@ -893,7 +904,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
 
     private func storeChatDatabaseDirectoryBookmark(for directoryURL: URL) throws {
         let bookmarkData = try directoryURL.bookmarkData(
-            options: .securityScopeAllowOnlyReadAccess,
+            options: Self.readOnlySecurityScopedBookmarkOptions,
             includingResourceValuesForKeys: nil,
             relativeTo: nil
         )
@@ -944,7 +955,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     private func storeBookmark(for url: URL) {
         do {
             let bookmarkData = try url.bookmarkData(
-                options: .securityScopeAllowOnlyReadAccess,
+                options: Self.readOnlySecurityScopedBookmarkOptions,
                 includingResourceValuesForKeys: nil,
                 relativeTo: nil
             )

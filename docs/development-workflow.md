@@ -81,6 +81,81 @@ For each milestone:
 These mirror `.github/workflows/ci.yml`. No verification step may send a real
 message.
 
+### Signed build for manual permission and TCC verification
+
+**Do not use the ordinary Debug artifact above for sandbox, entitlement, TCC, or
+manual Messages acceptance testing.** The app target's checked-in Debug
+configuration sets `CODE_SIGNING_ALLOWED = NO` so CI can build on a clean
+machine with no developer certificate. That artifact is therefore unsigned and
+carries **no entitlements at all** — `codesign -d --entitlements -` on it prints
+the executable path and nothing else. App Sandbox, user-selected file access,
+app-scoped bookmarks, and Apple Events automation are all absent, so permission
+behavior observed with it is meaningless.
+
+The two builds serve different purposes:
+
+| Build | Signed | Purpose |
+| --- | --- | --- |
+| `.build/DerivedData` (above) | No | Credential-free CI: compile, tests, proxy round trip |
+| `.build/ManualVerification` (below) | Yes | Permission, TCC, sandbox, and manual Messages acceptance |
+
+Produce the signed artifact with command-line overrides only — no repository
+change and no committed credentials. The development team is derived from the
+Apple Development certificate already in your keychain, so the command is
+portable across contributors:
+
+```sh
+DEV_TEAM=$(security find-certificate -c "Apple Development" -p \
+  | openssl x509 -noout -subject \
+  | sed -n 's/.*OU *= *\([A-Z0-9]*\).*/\1/p')
+
+xcodebuild -quiet \
+  -scheme iMCP \
+  -configuration Debug \
+  -destination "platform=macOS" \
+  -derivedDataPath .build/ManualVerification \
+  CODE_SIGNING_ALLOWED=YES \
+  DEVELOPMENT_TEAM="$DEV_TEAM" \
+  build
+```
+
+The Debug configuration already specifies `CODE_SIGN_STYLE = Manual` and an
+`Apple Development` identity for macOS, so `CODE_SIGNING_ALLOWED=YES` plus a
+team is all that is required. Confirm an identity exists first with
+`security find-identity -v -p codesigning`.
+
+Inspect the resulting **embedded** signature, not the `.entitlements` source
+file:
+
+```sh
+codesign -d --entitlements - --xml \
+  .build/ManualVerification/Build/Products/Debug/iMCP.app | plutil -p -
+
+codesign -dv --verbose=4 \
+  .build/ManualVerification/Build/Products/Debug/iMCP.app
+```
+
+The signature must contain at least:
+
+```text
+com.apple.security.app-sandbox
+com.apple.security.files.user-selected.read-write
+com.apple.security.files.bookmarks.app-scope
+com.apple.security.automation.apple-events
+```
+
+`app-sandbox` and `files.user-selected.read-write` are injected at signing time
+by the `ENABLE_APP_SANDBOX` and `ENABLE_USER_SELECTED_FILES` build settings, so
+they appear in the signature rather than in the entitlements source file.
+`files.bookmarks.app-scope` has no build setting and is declared in
+`App/App.Debug.entitlements` and `App/App.entitlements` directly. Verify the
+signature itself with `codesign --verify --strict`, and confirm
+`CodeDirectory ... flags=0x10000(runtime)` shows Hardened Runtime is active.
+
+`.build/` is git-ignored, so neither artifact is ever committed. Never add
+certificates, private keys, provisioning profiles, or a personal team ID to the
+repository or to CI, and never make CI depend on signing.
+
 ## Review and acceptance boundary
 
 - The supervising ChatGPT reviews the **exact pushed head** and the complete
