@@ -11,3 +11,4 @@ for this project.
 | [0004](0004-directory-scoped-messages-database-access.md) | Proposed | Use a read-only directory bookmark for SQLite access to the live Messages database family. |
 | [0005](0005-schema-resilient-messages-conversation-index.md) | Proposed | Discover schema capabilities and assemble bounded summary/full conversation metadata in stages. |
 | [0006](0006-new-recipient-system-composition.md) | Proposed | Compose to a recipient with no existing conversation in the system-owned Messages panel instead of a guessed iMessage participant. |
+| [0007](0007-reusable-search-operations-behind-mcp-adapters.md) | Proposed | Put contact and conversation search behind reusable operations with thin MCP adapters, and model conversation discovery as conversation evidence rather than send routing. |

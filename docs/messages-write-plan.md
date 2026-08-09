@@ -13,6 +13,11 @@ semantics over `MessagesHandleIdentity`: every requested identity must be presen
 additional conversation participants are allowed, and `kind` composes with the
 same complete bounded-page scan.
 
+Contact search and conversation search now sit behind reusable domain operations
+with thin MCP adapters, and `messages_find_conversations` returns per-handle
+conversation evidence. The cross-service composite over those operations is
+designed but not implemented.
+
 ## Verified baseline
 
 - The app and CLI target macOS 15.1 and build in Swift 5 language mode.
@@ -376,6 +381,37 @@ listing needs the additional folder scope and offers the folder picker once.
 Fresh Messages activation presents the same explanation. Choosing “Not Now”
 preserves existing fetch and send configuration; chat listing remains
 unavailable and requests the permission when invoked.
+
+## Recipient and conversation discovery
+
+Discovery keeps four responsibilities apart: Contacts finds people, Messages
+finds conversations, the LLM interprets identity and destination, and
+`messages_send` acts on one exact destination. An earlier
+`messages_match_recipients` proposal, which would have published the send
+matcher's `unique` / `none` / `ambiguous` / `incomplete` states as the discovery
+model, was superseded before implementation; those remain private send-safety
+semantics.
+
+Business logic sits in reusable domain operations with MCP tools as thin
+adapters over them — `ContactSearching` under `contacts_search`, and
+`MessagesConversationSearching` under the new `messages_find_conversations`.
+Each operation exposes exactly the facts its own tool returns. See
+[Messages conversation search](messages-conversation-search.md) and Proposed
+ADR 0007 for the input, output, completeness, ordering, truncation, query-shape,
+and privacy semantics.
+
+`contacts_search` behavior is unchanged by that extraction: same inputs, same
+normalization, same AND combination, same empty-input rejection, same `[Person]`
+result, same authorization model. It still drops Contacts labels and emits phone
+values as stored rather than guaranteed E.164, which stays a separate
+Contacts-side question and is not a reason to infer country codes in Messages.
+
+The remaining step is a read-only convenience interface that literally composes
+the two operations: contact search, extract the returned exact communication
+identities, one conversation search across them, and a mechanical join. It must
+call the operations directly rather than invoking MCP tools, and must add no
+person selection, contact-method selection, ranking, confidence, or send
+behavior. It is not implemented yet.
 
 ## Reference implementation
 

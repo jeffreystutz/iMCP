@@ -853,6 +853,150 @@ struct SQLiteMessagesChatRepository: MessagesChatListing {
     }
 }
 
+extension SQLiteMessagesChatRepository: MessagesConversationSearching {
+    /// Metadata keys describing the fields a conversation summary can carry.
+    static let conversationSearchAvailabilityKeys = [
+        "displayName", "kind", "latestActivityTimestamp", "participants",
+        "participantCountry", "participantOriginalHandle", "participantService", "service",
+    ]
+
+    func findConversations(
+        handles: [String],
+        limitPerHandle: Int,
+        databasePath: String
+    ) throws -> MessagesConversationSearchResult {
+        // Duplicate handles are one unit of work; the public result re-expands them below.
+        var distinct: [String] = []
+        for handle in handles where !distinct.contains(handle) { distinct.append(handle) }
+
+        let database = try openReadOnly(databasePath)
+        defer { sqlite3_close(database) }
+        let guardState = QueryGuard(timeout: timeout)
+        let context = Unmanaged.passUnretained(guardState).toOpaque()
+        sqlite3_progress_handler(
+            database,
+            1_000,
+            { context in
+                guard let context else { return 0 }
+                return Unmanaged<QueryGuard>.fromOpaque(context).takeUnretainedValue().shouldStop
+                    ? 1 : 0
+            },
+            context
+        )
+        defer { sqlite3_progress_handler(database, 0, nil, nil) }
+
+        let capabilities = try MessagesSchemaCapabilities.discover(in: database)
+        guard capabilities.hasColumn("guid", in: "chat") else {
+            throw MessagesChatRepositoryError.minimumSchemaUnavailable
+        }
+        // Discovery compares supplied identities against stored participant identities.
+        // Without readable handle text there is no comparison to make, and reporting every
+        // handle as `complete` with no conversations would assert an absence this schema
+        // cannot establish. Fail instead of manufacturing per-handle completeness.
+        guard participantIdentitySupported(capabilities) else {
+            throw MessagesChatRepositoryError.queryFailed(
+                stage: "participants-unavailable",
+                code: SQLITE_OK
+            )
+        }
+
+        var availability = availability(for: capabilities)
+        try execute("BEGIN DEFERRED TRANSACTION", stage: "search-snapshot", database: database)
+        do {
+            var matches: [String: [MessagesConversationSummary]] = [:]
+            var truncated: Set<String> = []
+            var incomplete: Set<String> = []
+
+            // One ordered pass over the conversation index, shared by every requested
+            // handle. Pages bound each round trip; the number of queries follows the size
+            // of the database, never the number of handles. The pass runs to exhaustion
+            // because stopping early could miss a stored identity that makes a handle's
+            // lookup incomplete.
+            var offset = 0
+            while true {
+                try checkBoundary(guardState)
+                var page = try fetchChats(
+                    database: database,
+                    capabilities: capabilities,
+                    limit: filterPageSize,
+                    offset: offset
+                )
+                if page.isEmpty { break }
+                offset += page.count
+                try checkBoundary(guardState)
+                try fetchParticipants(
+                    into: &page,
+                    database: database,
+                    capabilities: capabilities,
+                    availability: &availability
+                )
+                for record in page {
+                    let participants = record.chat.participants ?? []
+                    let identities = Set(participants.map(\.handle))
+                    for handle in distinct where identities.contains(handle) {
+                        // Pages already arrive newest first with the index's deterministic
+                        // tie-breaker, so appending preserves that order per handle.
+                        if matches[handle, default: []].count < limitPerHandle {
+                            matches[handle, default: []].append(summary(for: record.chat))
+                        } else {
+                            truncated.insert(handle)
+                        }
+                    }
+
+                    // A stored identity that strict normalization cannot compare exactly —
+                    // a phone number kept in a local format, for instance — might denote a
+                    // requested handle, and no country code may be inferred to find out.
+                    // Such a conversation is never claimed as a match; it only records that
+                    // this handle's lookup could have missed something.
+                    let unresolvable = identities.filter {
+                        MessagesHandleNormalization.normalize($0) == nil
+                    }
+                    guard !unresolvable.isEmpty else { continue }
+                    for handle in distinct where !incomplete.contains(handle) {
+                        if unresolvable.contains(where: {
+                            Self.unresolvableHandle($0, couldDenoteAnyOf: [handle])
+                        }) {
+                            incomplete.insert(handle)
+                        }
+                    }
+                }
+            }
+            try execute("COMMIT", stage: "search-snapshot", database: database)
+
+            return MessagesConversationSearchResult(
+                metadataAvailability: availability.filter {
+                    Self.conversationSearchAvailabilityKeys.contains($0.key)
+                },
+                results: handles.map { handle in
+                    MessagesHandleConversations(
+                        handle: handle,
+                        lookupCompleteness: incomplete.contains(handle) ? .incomplete : .complete,
+                        truncated: truncated.contains(handle),
+                        conversations: matches[handle] ?? []
+                    )
+                }
+            )
+        } catch {
+            sqlite3_exec(database, "ROLLBACK", nil, nil, nil)
+            throw error
+        }
+    }
+
+    private func summary(for chat: MessagesChat) -> MessagesConversationSummary {
+        let participants = chat.participants ?? []
+        return MessagesConversationSummary(
+            chatId: chat.chatId,
+            // Classification comes from the same normalized identities the index uses, so a
+            // group can never be summarized as a direct conversation.
+            kind: chat.kind ?? (participants.count > 1 ? .group : .direct),
+            displayName: chat.displayName,
+            participants: participants,
+            service: chat.service,
+            latestActivity: chat.latestActivity
+        )
+    }
+}
+
 private extension SQLiteMessagesChatRepository {
     func resolvedDestination(
         rowId: Int64,

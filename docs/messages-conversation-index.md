@@ -230,3 +230,15 @@ attachment metadata, SQL, or database rows.
 The opaque chat ID provides versioning, validation, and concealment of the
 underlying GUID representation. It is not an access control and does not make
 the other intentionally returned conversation metadata confidential.
+
+## Handle-oriented discovery
+
+`messages_find_conversations` is the sibling read tool for the question "which
+conversations is each of these exact identities part of?". It reuses this
+index's paging, participant identity, ordering, opaque identifiers, and
+metadata-availability semantics rather than defining a competing identity model,
+and returns a smaller conversation summary plus a per-handle lookup-completeness
+signal. See [`messages-conversation-search.md`](messages-conversation-search.md).
+
+This tool's participant filter is unchanged by that addition: it still returns
+conversations containing *every* supplied identity, and gained no OR semantics.

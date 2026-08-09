@@ -10,6 +10,9 @@
 		A10400000000000000000001 /* FormElicitationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10200000000000000000001 /* FormElicitationTests.swift */; };
 		B10400000000000000000001 /* MessageSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10200000000000000000001 /* MessageSendTests.swift */; };
 		C10400000000000000000001 /* MessagesChatListingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10200000000000000000001 /* MessagesChatListingTests.swift */; };
+		E10400000000000000000001 /* ChatDatabaseFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10200000000000000000001 /* ChatDatabaseFixture.swift */; };
+		G10400000000000000000001 /* MessagesConversationSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = G10200000000000000000001 /* MessagesConversationSearchTests.swift */; };
+		H10400000000000000000001 /* ContactSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = H10200000000000000000001 /* ContactSearchTests.swift */; };
 		D10400000000000000000001 /* MessagesBookmarkAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10200000000000000000001 /* MessagesBookmarkAccessTests.swift */; };
 		76F80A6E3EDBFB02048A6ED8 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0E66768348853754D32208C /* Cocoa.framework */; };
 		826C0834A5B647F8A918E54D /* ServiceLifecycle in Frameworks */ = {isa = PBXBuildFile; productRef = DCE061F8A68D0CD546D919E2 /* ServiceLifecycle */; };
@@ -69,6 +72,9 @@
 		A10200000000000000000001 /* FormElicitationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormElicitationTests.swift; sourceTree = "<group>"; };
 		B10200000000000000000001 /* MessageSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageSendTests.swift; sourceTree = "<group>"; };
 		C10200000000000000000001 /* MessagesChatListingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagesChatListingTests.swift; sourceTree = "<group>"; };
+		E10200000000000000000001 /* ChatDatabaseFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDatabaseFixture.swift; sourceTree = "<group>"; };
+		G10200000000000000000001 /* MessagesConversationSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagesConversationSearchTests.swift; sourceTree = "<group>"; };
+		H10200000000000000000001 /* ContactSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactSearchTests.swift; sourceTree = "<group>"; };
 		D10200000000000000000001 /* MessagesBookmarkAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagesBookmarkAccessTests.swift; sourceTree = "<group>"; };
 		6A5CFBBEC66BC8CDA9D65496 /* imcp-serverTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "imcp-serverTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		75E148EAC5AC8B3263C5AA13 /* ServiceGroupConfigurationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ServiceGroupConfigurationTests.swift; sourceTree = "<group>"; };
@@ -168,6 +174,9 @@
 				B10200000000000000000001 /* MessageSendTests.swift */,
 				C10200000000000000000001 /* MessagesChatListingTests.swift */,
 				D10200000000000000000001 /* MessagesBookmarkAccessTests.swift */,
+				E10200000000000000000001 /* ChatDatabaseFixture.swift */,
+				G10200000000000000000001 /* MessagesConversationSearchTests.swift */,
+				H10200000000000000000001 /* ContactSearchTests.swift */,
 			);
 			path = AppTests;
 			sourceTree = "<group>";
@@ -361,6 +370,9 @@
 				B10400000000000000000001 /* MessageSendTests.swift in Sources */,
 				C10400000000000000000001 /* MessagesChatListingTests.swift in Sources */,
 				D10400000000000000000001 /* MessagesBookmarkAccessTests.swift in Sources */,
+				E10400000000000000000001 /* ChatDatabaseFixture.swift in Sources */,
+				G10400000000000000000001 /* MessagesConversationSearchTests.swift in Sources */,
+				H10400000000000000000001 /* ContactSearchTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

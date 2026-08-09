@@ -15,6 +15,15 @@ private let messagesDirectoryAccessUpgradeVersionKey: String =
 private let currentMessagesDirectoryAccessUpgradeVersion = 1
 private let defaultLimit = 30
 private let maximumChatLimit = 100
+/// Bounds for conversation discovery.
+///
+/// The handle bound is sized for the fan-out of one contact search — a handful of candidate
+/// people, each with a few phone numbers and email addresses — rather than for bulk export.
+/// The per-handle bound applies independently to each supplied handle, so one very active
+/// candidate cannot consume another candidate's result budget.
+private let maximumConversationSearchHandles = 20
+private let defaultConversationsPerHandle = 10
+private let maximumConversationsPerHandle = 25
 
 enum MessagesChatListingError: LocalizedError, Equatable, Sendable {
     case invalidLimit
@@ -36,6 +45,30 @@ enum MessagesChatListingError: LocalizedError, Equatable, Sendable {
     }
 }
 
+/// Input failures for conversation discovery.
+///
+/// None of these carries the rejected value. A malformed handle is still a private
+/// identity, and upper layers may interpolate an error into a message the model sees.
+enum MessagesConversationSearchError: LocalizedError, Equatable, Sendable {
+    case invalidHandles
+    case tooManyHandles
+    case invalidLimit
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidHandles:
+            return
+                "Every handle must be one exact E.164 phone number or email address. Supply at least one."
+        case .tooManyHandles:
+            return
+                "A conversation search accepts at most \(maximumConversationSearchHandles) handles."
+        case .invalidLimit:
+            return
+                "The per-handle conversation limit must be an integer from 1 through \(maximumConversationsPerHandle)."
+        }
+    }
+}
+
 final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     static let shared = MessageService()
 
@@ -53,6 +86,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     private let sender: any MessagesSending
     private let composer: any MessagesNewRecipientComposing
     private let chatRepository: any MessagesChatListing
+    private let conversationSearch: any MessagesConversationSearching
     private let sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting
     private let chatDatabasePathOverride: String?
     private let chatListingLog: @Sendable (Int) -> Void
@@ -61,6 +95,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         sender: any MessagesSending = AppleScriptMessagesSender(),
         composer: any MessagesNewRecipientComposing = SystemMessagesComposer(),
         chatRepository: any MessagesChatListing = SQLiteMessagesChatRepository(),
+        conversationSearch: any MessagesConversationSearching = SQLiteMessagesChatRepository(),
         sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting =
             MessagesFinalSendConfirmationRequester(),
         chatDatabasePathOverride: String? = nil,
@@ -71,6 +106,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         self.sender = sender
         self.composer = composer
         self.chatRepository = chatRepository
+        self.conversationSearch = conversationSearch
         self.sendConfirmationRequester = sendConfirmationRequester
         self.chatDatabasePathOverride = chatDatabasePathOverride
         self.chatListingLog = chatListingLog
@@ -233,6 +269,74 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 "Listed Messages conversations detail=\(detail.rawValue, privacy: .public) count=\(index.chats.count) elapsed=\(String(describing: elapsed), privacy: .public)"
             )
             return index
+        }
+
+        Tool(
+            name: "messages_find_conversations",
+            description:
+                "Find the existing Messages conversations associated with exact phone or email handles you already have, such as the communication identities returned by contacts_search. Each supplied handle gets its own result holding the direct and group conversations that include it, newest first, with participants, service, and latest activity. Group conversations are returned as context about who a handle talks with; that never implies a later message should go to a group. This tool does not search contacts, resolve names, rank people, choose a destination, recommend a recipient, or send anything, and it never converts a local phone number into E.164. Read the per-handle lookupCompleteness before concluding that a handle has no conversations.",
+            inputSchema: .object(
+                properties: [
+                    "handles": .array(
+                        description:
+                            "Exact communication handles to look up. Each must be a strict E.164 phone number or a valid email address; nothing is inferred or rewritten, and one invalid entry fails the whole request.",
+                        items: .string(
+                            description: "One exact E.164 phone number or email address"
+                        ),
+                        minItems: 1,
+                        maxItems: maximumConversationSearchHandles
+                    ),
+                    "limit": .integer(
+                        description:
+                            "Maximum conversations returned for each supplied handle, applied independently per handle",
+                        default: .int(defaultConversationsPerHandle),
+                        minimum: 1,
+                        maximum: maximumConversationsPerHandle
+                    ),
+                ],
+                required: ["handles"],
+                additionalProperties: false
+            ),
+            annotations: .init(
+                title: "Find Messages Conversations",
+                readOnlyHint: true,
+                openWorldHint: false
+            )
+        ) { arguments in
+            // Every input is validated before the database is opened, so a malformed
+            // request never becomes a query.
+            guard let requested = arguments["handles"]?.arrayValue, !requested.isEmpty else {
+                throw MessagesConversationSearchError.invalidHandles
+            }
+            guard requested.count <= maximumConversationSearchHandles else {
+                throw MessagesConversationSearchError.tooManyHandles
+            }
+            var handles: [String] = []
+            for value in requested {
+                guard case let .string(handle) = value,
+                    let normalized = MessagesHandleNormalization.normalize(handle)
+                else { throw MessagesConversationSearchError.invalidHandles }
+                handles.append(normalized)
+            }
+
+            let limit: Int
+            if let value = arguments["limit"] {
+                guard let requestedLimit = value.intValue,
+                    (1 ... maximumConversationsPerHandle).contains(requestedLimit)
+                else { throw MessagesConversationSearchError.invalidLimit }
+                limit = requestedLimit
+            } else {
+                limit = defaultConversationsPerHandle
+            }
+
+            let start = ContinuousClock.now
+            let result = try await self.findConversations(handles: handles, limitPerHandle: limit)
+            let elapsed = start.duration(to: .now)
+            let conversationCount = result.results.reduce(0) { $0 + $1.conversations.count }
+            log.notice(
+                "Searched Messages conversations handles=\(handles.count, privacy: .public) conversations=\(conversationCount, privacy: .public) elapsed=\(String(describing: elapsed), privacy: .public)"
+            )
+            return result
         }
 
         Tool(
@@ -545,47 +649,77 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         }
     }
 
+    /// Runs one read-only conversation-database operation under the directory-scoped
+    /// bookmark, requesting that read access once if it has not been granted yet.
+    ///
+    /// This is the read model both conversation-index tools share. It opens no Apple Event
+    /// connection, requests no Automation authority, and adds no entitlement.
+    private func withChatDatabase<T>(
+        stage: String,
+        _ operation: (String) throws -> T
+    ) async throws -> T {
+        let databasePath: String
+        let directoryURL: URL?
+        if let chatDatabasePathOverride {
+            databasePath = chatDatabasePathOverride
+            directoryURL = nil
+        } else {
+            if !canAccessChatDatabaseDirectoryUsingBookmark {
+                guard await showChatDatabaseDirectoryAccessAlert() else {
+                    throw DatabaseAccessError.userDeclinedAccess
+                }
+                let selectedURL = try await showChatDatabaseDirectoryPicker()
+                try storeChatDatabaseDirectoryBookmark(for: selectedURL)
+            }
+            let resolvedURL = try resolveChatDatabaseDirectoryBookmarkURL()
+            directoryURL = resolvedURL
+            databasePath = resolvedURL.appendingPathComponent("chat.db").path
+        }
+
+        func run() throws -> T {
+            do {
+                return try operation(databasePath)
+            } catch let error as MessagesChatRepositoryError {
+                // Only the stage name and the numeric SQLite code are diagnosable. No
+                // handle, participant, chat identity, or row content may be logged.
+                log.error(
+                    "\(stage, privacy: .public) failed stage=\(error.diagnosticStage, privacy: .public) sqliteCode=\(error.sqliteCode, privacy: .public)"
+                )
+                throw error
+            }
+        }
+
+        guard let directoryURL else { return try run() }
+        return try withSecurityScopedAccess(directoryURL) { _ in try run() }
+    }
+
     private func listChats(
         limit: Int,
         kind: MessagesChatKind?,
         participants: Set<String>?,
         detail: MessagesChatDetail
     ) async throws -> MessagesConversationIndex {
-        if let chatDatabasePathOverride {
-            return try chatRepository.listChats(
-                databasePath: chatDatabasePathOverride,
+        try await withChatDatabase(stage: "chat-listing") { databasePath in
+            try chatRepository.listChats(
+                databasePath: databasePath,
                 limit: limit,
                 kind: kind,
                 participants: participants,
                 detail: detail
             )
         }
+    }
 
-        if !canAccessChatDatabaseDirectoryUsingBookmark {
-            guard await showChatDatabaseDirectoryAccessAlert() else {
-                throw DatabaseAccessError.userDeclinedAccess
-            }
-            let directoryURL = try await showChatDatabaseDirectoryPicker()
-            try storeChatDatabaseDirectoryBookmark(for: directoryURL)
-        }
-
-        let directoryURL = try resolveChatDatabaseDirectoryBookmarkURL()
-        return try withSecurityScopedAccess(directoryURL) { directoryURL in
-            let databasePath = directoryURL.appendingPathComponent("chat.db").path
-            do {
-                return try chatRepository.listChats(
-                    databasePath: databasePath,
-                    limit: limit,
-                    kind: kind,
-                    participants: participants,
-                    detail: detail
-                )
-            } catch let error as MessagesChatRepositoryError {
-                log.error(
-                    "Chat listing failed stage=\(error.diagnosticStage, privacy: .public) sqliteCode=\(error.sqliteCode, privacy: .public)"
-                )
-                throw error
-            }
+    private func findConversations(
+        handles: [String],
+        limitPerHandle: Int
+    ) async throws -> MessagesConversationSearchResult {
+        try await withChatDatabase(stage: "conversation-search") { databasePath in
+            try conversationSearch.findConversations(
+                handles: handles,
+                limitPerHandle: limitPerHandle,
+                databasePath: databasePath
+            )
         }
     }
 

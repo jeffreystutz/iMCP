@@ -77,10 +77,113 @@ private let contactProperties: OrderedDictionary<String, JSONSchema> = [
     ),
 ]
 
+/// One contact-discovery request, expressed in the same terms as the public
+/// `contacts_search` tool input.
+///
+/// Each field carries the value exactly as supplied. Normalization belongs to the search
+/// operation so every caller — the MCP adapter today, a cross-service reader later —
+/// resolves the same criteria to the same contacts.
+struct ContactSearchQuery: Equatable, Sendable {
+    var name: String?
+    var phone: String?
+    var email: String?
+
+    init(name: String? = nil, phone: String? = nil, email: String? = nil) {
+        self.name = name
+        self.phone = phone
+        self.email = email
+    }
+}
+
+enum ContactSearchError: LocalizedError, Equatable, Sendable {
+    case noSearchCriteria
+
+    var errorDescription: String? {
+        switch self {
+        case .noSearchCriteria: "At least one valid search parameter is required"
+        }
+    }
+}
+
+/// Contact discovery, separated from the MCP interface that exposes it.
+///
+/// The operation answers only "which contacts match these criteria". It does not decide
+/// which person the caller meant, and it exposes exactly the facts the public
+/// `contacts_search` tool returns, so a later composite reader cannot reason from richer
+/// hidden contact data than a client could obtain by calling that tool itself.
+protocol ContactSearching: Sendable {
+    func search(_ query: ContactSearchQuery) async throws -> [Person]
+}
+
+/// Production contact search backed by the user's Contacts database.
+///
+/// `CNContactStore` is documented as thread-safe, and this type adds no mutable state of
+/// its own, so the unchecked conformance describes an invariant the framework already
+/// provides.
+struct CNContactStoreSearch: ContactSearching, @unchecked Sendable {
+    private let store: CNContactStore
+
+    init(store: CNContactStore = CNContactStore()) {
+        self.store = store
+    }
+
+    /// Builds the predicate for a query, or reports that no usable criterion was supplied.
+    ///
+    /// Several criteria combine with AND. A name or email that is empty once trimmed
+    /// contributes no criterion, so supplying only such a value is the same as supplying
+    /// nothing. A phone number is passed to Contacts as given.
+    static func predicate(for query: ContactSearchQuery) throws -> NSPredicate {
+        var predicates: [NSPredicate] = []
+
+        if let name = query.name {
+            let normalizedName = name.trimmingCharacters(in: .whitespaces)
+            if !normalizedName.isEmpty {
+                predicates.append(CNContact.predicateForContacts(matchingName: normalizedName))
+            }
+        }
+
+        if let phone = query.phone {
+            let phoneNumber = CNPhoneNumber(stringValue: phone)
+            predicates.append(CNContact.predicateForContacts(matching: phoneNumber))
+        }
+
+        if let email = query.email {
+            // Normalize email to lowercase
+            let normalizedEmail = email.trimmingCharacters(in: .whitespaces).lowercased()
+            if !normalizedEmail.isEmpty {
+                predicates.append(
+                    CNContact.predicateForContacts(matchingEmailAddress: normalizedEmail)
+                )
+            }
+        }
+
+        guard !predicates.isEmpty else { throw ContactSearchError.noSearchCriteria }
+
+        // Combine predicates with AND if multiple criteria are provided
+        return predicates.count == 1
+            ? predicates[0]
+            : NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
+    }
+
+    func search(_ query: ContactSearchQuery) async throws -> [Person] {
+        let predicate = try Self.predicate(for: query)
+        let store = self.store
+        let contacts = try await Task(priority: .utility) {
+            try store.unifiedContacts(matching: predicate, keysToFetch: contactKeys)
+        }.value
+        return contacts.compactMap { Person($0) }
+    }
+}
+
 final class ContactsService: Service {
     private let contactStore = CNContactStore()
+    private let contactSearch: any ContactSearching
 
     static let shared = ContactsService()
+
+    init(contactSearch: any ContactSearching = CNContactStoreSearch()) {
+        self.contactSearch = contactSearch
+    }
 
     private func runContactStore<T>(_ operation: @escaping () throws -> T) async throws -> T {
         try await Task(priority: .utility) {
@@ -174,54 +277,11 @@ final class ContactsService: Service {
                 openWorldHint: false
             )
         ) { arguments in
-            var predicates: [NSPredicate] = []
-
-            if case let .string(name) = arguments["name"] {
-                let normalizedName = name.trimmingCharacters(in: .whitespaces)
-                if !normalizedName.isEmpty {
-                    predicates.append(CNContact.predicateForContacts(matchingName: normalizedName))
-                }
-            }
-
-            if case let .string(phone) = arguments["phone"] {
-                let phoneNumber = CNPhoneNumber(stringValue: phone)
-                predicates.append(CNContact.predicateForContacts(matching: phoneNumber))
-            }
-
-            if case let .string(email) = arguments["email"] {
-                // Normalize email to lowercase
-                let normalizedEmail = email.trimmingCharacters(in: .whitespaces).lowercased()
-                if !normalizedEmail.isEmpty {
-                    predicates.append(
-                        CNContact.predicateForContacts(matchingEmailAddress: normalizedEmail)
-                    )
-                }
-            }
-
-            guard !predicates.isEmpty else {
-                throw NSError(
-                    domain: "ContactsService",
-                    code: 1,
-                    userInfo: [
-                        NSLocalizedDescriptionKey: "At least one valid search parameter is required"
-                    ]
-                )
-            }
-
-            // Combine predicates with AND if multiple criteria are provided
-            let finalPredicate =
-                predicates.count == 1
-                ? predicates[0]
-                : NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
-
-            let contacts = try await self.runContactStore {
-                try self.contactStore.unifiedContacts(
-                    matching: finalPredicate,
-                    keysToFetch: contactKeys
-                )
-            }
-
-            return contacts.compactMap { Person($0) }
+            var query = ContactSearchQuery()
+            if case let .string(name) = arguments["name"] { query.name = name }
+            if case let .string(phone) = arguments["phone"] { query.phone = phone }
+            if case let .string(email) = arguments["email"] { query.email = email }
+            return try await self.contactSearch.search(query)
         }
 
         Tool(
