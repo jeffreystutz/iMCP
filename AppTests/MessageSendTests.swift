@@ -251,18 +251,54 @@ final class MessageSendTests: XCTestCase {
                 XCTFail("Unexpected error: \(error)")
             }
 
-            // No second composition, no AppleScript fallback, no confirmation.
+            // No second composition, no AppleScript fallback, no confirmation, and
+            // no retry — including for the ambiguous generic failure, where a retry
+            // is exactly what could duplicate a message.
             let compositions = await composer.compositionCount
             let chatSubmissions = await sender.chatSubmissionCount
-            XCTAssertEqual(compositions, 1)
-            XCTAssertEqual(chatSubmissions, 0)
+            let addressabilityProbes = await sender.addressabilityCount
+            let authorizationRequests = await sender.authorizationRequestCount
+            XCTAssertEqual(compositions, 1, "\(expected) started a second composition")
+            XCTAssertEqual(chatSubmissions, 0, "\(expected) fell back to AppleScript")
+            XCTAssertEqual(addressabilityProbes, 0)
+            XCTAssertEqual(authorizationRequests, 0)
             XCTAssertEqual(requester.requestCount, 0)
 
             let message = error(expected)
-            for leaked in ["brand-new@example.invalid", "test-body"] {
+            for leaked in ["brand-new@example.invalid", "test-body", "iMessage", "SMS", "RCS"] {
                 XCTAssertFalse(message.contains(leaked), "\(expected) leaked \(leaked)")
             }
-            XCTAssertTrue(message.contains("Nothing was sent."))
+        }
+    }
+
+    func testGenericCompositionFailureReportsAnUnknownRatherThanSafeOutcome() {
+        // Once the system panel has been presented, a non-cancellation delegate
+        // failure does not establish that nothing was submitted. Claiming otherwise
+        // would invite a duplicate send.
+        let ambiguous = MessagesCompositionError.compositionFailed.localizedDescription
+        XCTAssertFalse(
+            ambiguous.contains("Nothing was sent"),
+            "generic composition failure still claims nothing was sent"
+        )
+        XCTAssertTrue(ambiguous.contains("unknown"))
+        XCTAssertTrue(ambiguous.contains("did not retry"))
+        for leaked in [
+            "brand-new@example.invalid", "exact-seed-body", "iMessage", "SMS", "RCS",
+            "NSCocoaErrorDomain", "SyntheticDomain", "/private/", "NSSharingService",
+        ] {
+            XCTAssertFalse(ambiguous.contains(leaked), "the ambiguous failure leaked \(leaked)")
+        }
+
+        // Outcomes that genuinely establish no send keep their definite wording, and
+        // cancellation stays distinguishable from the ambiguous case.
+        for definite in [
+            MessagesCompositionError.compositionCancelled,
+            .compositionUnavailable,
+            .compositionBusy,
+        ] {
+            XCTAssertTrue(definite.localizedDescription.contains("Nothing was sent."))
+            XCTAssertNotEqual(definite, .compositionFailed)
+            XCTAssertNotEqual(definite.localizedDescription, ambiguous)
         }
     }
 
@@ -1451,6 +1487,47 @@ final class MessageSendTests: XCTestCase {
             XCTAssertEqual(error, .compositionCancelled)
         }
         XCTAssertEqual(panel.presentCount, 1, "a cancelled composition was retried")
+    }
+
+    @MainActor
+    func testGenericDelegateFailureResolvesOnceAndStartsNothingElse() async throws {
+        let panel = StubCompositionPanel()
+        let composition = Task { @MainActor in
+            try await MessagesCompositionCoordinator.compose(
+                recipient: "brand-new@example.invalid",
+                body: "exact-seed-body",
+                panel: panel
+            )
+        }
+        await waitForPresentation(panel)
+
+        let delegate = try XCTUnwrap(panel.lastDelegate)
+        let service = try XCTUnwrap(NSSharingService(named: .composeMessage))
+        delegate.sharingService?(
+            service,
+            didFailToShareItems: [],
+            error: NSError(domain: "SyntheticDomain", code: 42)
+        )
+
+        do {
+            _ = try await composition.value
+            XCTFail("Expected the generic composition failure to surface")
+        } catch let error as MessagesCompositionError {
+            XCTAssertEqual(error, .compositionFailed)
+        }
+
+        // Terminal: no second presentation, exactly one release, and late or
+        // duplicate callbacks cannot resume the continuation again.
+        XCTAssertEqual(panel.presentCount, 1)
+        XCTAssertEqual(panel.releaseCount, 1)
+        delegate.sharingService?(service, didShareItems: [])
+        delegate.sharingService?(
+            service,
+            didFailToShareItems: [],
+            error: NSError(domain: "SyntheticDomain", code: 43)
+        )
+        XCTAssertEqual(panel.presentCount, 1)
+        XCTAssertEqual(panel.releaseCount, 1)
     }
 
     @MainActor

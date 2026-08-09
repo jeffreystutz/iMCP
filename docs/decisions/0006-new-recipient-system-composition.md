@@ -104,10 +104,24 @@ surface later without context, and it never falls back to AppleScript. This does
 not block unrelated read-only tools, and it is separate from the AppleScript
 actor's serialization.
 
-Outcomes map from the documented delegate callbacks: `didFailToShareItems` with
-`NSCocoaErrorDomain` / `NSUserCancelledError` is user cancellation; any other
-failure is a sanitized composition failure carrying nothing from the underlying
-error; `didShareItems` means the sharing interaction completed.
+Outcomes map from the documented delegate callbacks. `didFailToShareItems` with
+`NSCocoaErrorDomain` / `NSUserCancelledError` is user cancellation, which
+experiment confirmed sends nothing. `didShareItems` means the sharing
+interaction completed.
+
+Any other `didFailToShareItems` error is an **ambiguous** outcome, not a safe
+one. That callback documents only that an error occurred while sharing; it does
+not establish that no message was submitted before the error, and by then the
+panel has already been presented and the human may have acted. iMCP therefore
+reports that the composition failed and that whether a message was sent is
+unknown. It must not say nothing was sent, and it must not retry or switch
+routes — an unknown outcome is precisely the case where a retry could duplicate
+a real message. The underlying error is still collapsed to one sanitized value
+that carries no items, recipient, body, route, or filesystem detail.
+
+`compositionUnavailable` and `compositionBusy` are different: both occur before
+this request presents a panel, so they keep their definite "nothing was sent"
+semantics.
 
 A cancelled task must not present the panel. After presentation, caller
 cancellation starts no other route, performs no retry, synthesizes no Send or
@@ -153,6 +167,10 @@ extension point if approved item URLs are added later.
 - Double presentation: a single-active gate fails closed, and the gate is
   released on every terminal outcome including early unavailability.
 - Leaked detail: non-cancellation failures are collapsed to one sanitized error.
+- Duplicate sends after an unclear failure: the ambiguous outcome is terminal,
+  says the send status is unknown rather than claiming safety, and triggers no
+  retry or route change. Tests assert the wording and the absence of any further
+  dispatch, composition, or permission request.
 
 ## Validation
 

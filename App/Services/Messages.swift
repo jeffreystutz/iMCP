@@ -387,7 +387,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 additionalProperties: false
             ),
             annotations: .init(
-                title: "Send iMessage",
+                title: "Send Message",
                 readOnlyHint: false,
                 destructiveHint: false,
                 idempotentHint: false,
@@ -652,9 +652,9 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
 
         if !required.isEmpty {
             let response = try await context.elicitation.requestForm(
-                message: "Provide the missing information required to prepare an iMessage.",
+                message: "Provide the missing information required to prepare a message.",
                 schema: .init(
-                    title: "Complete iMessage",
+                    title: "Complete Message",
                     properties: properties,
                     required: required
                 )

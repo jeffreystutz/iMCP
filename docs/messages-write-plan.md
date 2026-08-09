@@ -160,6 +160,15 @@ values were the ones sent. App Sandbox is retained, no Accessibility or private
 framework is involved, and the path needs no additional entitlement. See ADR
 0006.
 
+Composition failures divide by what they actually establish. User cancellation
+(`NSUserCancelledError`) and the pre-presentation unavailable and busy cases sent
+nothing, and say so. Any other delegate failure arrives after the panel was
+presented and establishes only that an error occurred while sharing, so it is
+reported as ambiguous: the composition failed and whether a message was sent is
+unknown. That outcome is terminal — no retry, no fallback, no second route —
+because an unknown result is exactly where a retry could duplicate a message.
+The underlying error is sanitized in every case.
+
 ## First send behavior
 
 `messages_send` initially accepts plain text and one exact canonical

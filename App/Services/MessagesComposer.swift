@@ -12,9 +12,22 @@ enum MessagesCompositionOutcome: Equatable, Sendable {
 }
 
 enum MessagesCompositionError: LocalizedError, Equatable, Sendable {
+    /// The system compose service could not be created or could not accept the
+    /// items. This happens before any panel is presented, so nothing was sent.
     case compositionUnavailable
+    /// Another composition is already active, so this request presented no panel
+    /// of its own and nothing was sent.
     case compositionBusy
+    /// The human dismissed the panel without sending, reported as
+    /// `NSUserCancelledError`. Verified by experiment to send nothing.
     case compositionCancelled
+    /// The sharing service reported a non-cancellation failure after the panel was
+    /// presented.
+    ///
+    /// This is an **ambiguous** outcome. The delegate callback documents only that
+    /// an error occurred while sharing; it does not establish that no message was
+    /// submitted first. iMCP therefore claims nothing about the send status and
+    /// never retries or switches routes on it.
     case compositionFailed
 
     var errorDescription: String? {
@@ -27,7 +40,8 @@ enum MessagesCompositionError: LocalizedError, Equatable, Sendable {
         case .compositionCancelled:
             return "The Messages composition was cancelled. Nothing was sent."
         case .compositionFailed:
-            return "The Messages composition did not complete. Nothing was sent."
+            return
+                "The Messages composition reported a failure. Whether a message was sent is unknown, and iMCP did not retry."
         }
     }
 }
@@ -168,6 +182,11 @@ final class MessagesCompositionCoordinator: NSObject, NSSharingServiceDelegate {
 
     /// Maps a sharing-service failure without exposing items, recipient, body, or
     /// any underlying filesystem detail.
+    ///
+    /// Only the documented cancellation code establishes that nothing was sent.
+    /// Every other failure collapses to the ambiguous case, which is deliberately
+    /// terminal: an unknown outcome is exactly the situation in which a retry could
+    /// duplicate a message.
     static func outcome(forFailure error: Error) -> MessagesCompositionError {
         let error = error as NSError
         if error.domain == NSCocoaErrorDomain, error.code == NSUserCancelledError {
