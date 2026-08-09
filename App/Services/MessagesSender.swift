@@ -37,7 +37,6 @@ protocol MessagesSending: Sendable {
     /// valid database conversation can be temporarily unaddressable.
     func isChatAddressable(chatGUID: String) async throws -> Bool
 
-    func submit(recipient: String, body: String) async throws
     func submit(chatGUID: String, body: String) async throws
 }
 
@@ -135,14 +134,6 @@ struct AppleScriptMessagesSender: MessagesSending {
     /// descriptors, never as interpolated source. `chatIsAddressable` is read-only:
     /// it performs no participant, account, or history enumeration and no `send`.
     static let scriptSource = """
-        on submitDirectMessage(recipientHandle, messageBody)
-            tell application id "com.apple.MobileSMS"
-                set targetService to first service whose service type = iMessage
-                set targetParticipant to participant recipientHandle of targetService
-                send messageBody to targetParticipant
-            end tell
-        end submitDirectMessage
-
         on chatIsAddressable(chatGUID)
             tell application id "com.apple.MobileSMS"
                 return (exists chat id chatGUID)
@@ -198,19 +189,6 @@ struct AppleScriptMessagesSender: MessagesSending {
             isChatSend: false
         )
         return result.booleanValue
-    }
-
-    @MainActor
-    func submit(recipient: String, body: String) throws {
-        try Task.checkCancellation()
-        guard Self.determinePermission(askUserIfNeeded: true) == noErr else {
-            throw MessageSendError.automationDenied
-        }
-        _ = try execute(
-            handler: "submitDirectMessage",
-            arguments: [recipient, body],
-            isChatSend: false
-        )
     }
 
     @MainActor

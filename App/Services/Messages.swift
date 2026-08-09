@@ -51,6 +51,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     ]
 
     private let sender: any MessagesSending
+    private let composer: any MessagesNewRecipientComposing
     private let chatRepository: any MessagesChatListing
     private let sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting
     private let chatDatabasePathOverride: String?
@@ -58,6 +59,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
 
     init(
         sender: any MessagesSending = AppleScriptMessagesSender(),
+        composer: any MessagesNewRecipientComposing = SystemMessagesComposer(),
         chatRepository: any MessagesChatListing = SQLiteMessagesChatRepository(),
         sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting =
             MessagesFinalSendConfirmationRequester(),
@@ -67,6 +69,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         }
     ) {
         self.sender = sender
+        self.composer = composer
         self.chatRepository = chatRepository
         self.sendConfirmationRequester = sendConfirmationRequester
         self.chatDatabasePathOverride = chatDatabasePathOverride
@@ -355,12 +358,12 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         Tool(
             name: "messages_send",
             description:
-                "Submit one plain-text message using exactly one destination. A recipient first uses one uniquely matching existing direct conversation, or retains raw-recipient behavior when none exists. Recipients can address only an existing group conversation: iMCP cannot create a new group from a list, and the complete participant set must exactly match one existing group or the call fails without sending. When multiple groups have the same participant set, use chat_id; chat_id is preferred when the intended group is already known. Every send requires final confirmation.",
+                "Send one plain-text message to exactly one destination, by one of two routes that never fall back to each other. A recipient that uniquely matches one existing direct conversation, or an explicit chat_id, is submitted to that existing conversation after a required confirmation showing the exact destination and body. A recipient verified to have no existing conversation instead opens a Messages compose window, seeded with that recipient and body, which you review and send yourself; because you can edit it there, iMCP does not confirm it first and cannot report what was ultimately sent. Ambiguous or unresolvable matching fails without sending. Recipients can address only an existing group conversation: iMCP cannot create a new group from a list, and the complete participant set must exactly match one existing group or the call fails without sending. When multiple groups have the same participant set, use chat_id; chat_id is preferred when the intended group is already known. Messages chooses iMessage, SMS, or RCS; this tool never selects it.",
             inputSchema: .object(
                 properties: [
                     "recipient": .string(
                         description:
-                            "One exact E.164 phone number or email address. A unique existing direct conversation is used when available; otherwise the established raw-recipient path is used."
+                            "One exact E.164 phone number or email address. A unique existing direct conversation is submitted to after confirmation. A recipient verified to have no existing conversation instead opens a user-controlled Messages compose window seeded with this recipient and body, which the user reviews, may edit, and sends personally. Ambiguous or unresolvable matching fails without sending."
                     ),
                     "recipients": .array(
                         description:
@@ -405,9 +408,10 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 let participants = Set([MessagesHandleNormalization.normalize(recipient)!])
                 switch try await self.matchSendConversation(participants, kind: .direct) {
                 case .none:
-                    // Only a verified absence of any matching conversation may fall back to
-                    // the raw-recipient path. Unresolved membership is not evidence of absence.
-                    preparedDestination = .rawRecipient(recipient)
+                    // Only a verified absence of any matching conversation reaches
+                    // system-owned composition. Unresolved membership is not evidence of
+                    // absence, and no failure of another route ever arrives here.
+                    preparedDestination = .newRecipient(recipient)
                 case .incomplete:
                     throw MessageSendError.incompleteDirectMembership
                 case .ambiguous:
@@ -441,6 +445,23 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 )
             }
 
+            // A recipient with no existing conversation is composed, not submitted.
+            // Authorization for this mode is the human's own review and Send action in
+            // the system-owned Messages panel, so iMCP requests no final confirmation:
+            // recipient and body stay editable there, and an earlier immutable
+            // confirmation could not honestly authorize whatever is ultimately sent.
+            if case .newRecipient(let recipient) = preparedDestination {
+                try Task.checkCancellation()
+                _ = try await self.composer.compose(
+                    seedRecipient: recipient,
+                    seedBody: input.body
+                )
+                log.notice(
+                    "User completed a Messages composition mode=system_messages_compose"
+                )
+                return MessageSendResult.userCompletedComposition
+            }
+
             // Messages exposes only a bounded, recency-biased subset of its
             // conversations to automation, so a valid database conversation can be
             // temporarily unaddressable. Establishing that before confirmation spares
@@ -464,28 +485,21 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 }
             }
 
-            // Every destination form requires its own final confirmation. The production
-            // router always selects exactly one real presenter; no mode bypasses authorization.
-            let confirmationPresentation: MessagesSendConfirmationPresentation
-            switch preparedDestination {
-            case .rawRecipient(let recipient):
-                confirmationPresentation = .init(
-                    title: "Confirm new direct message",
-                    message: self.rawRecipientConfirmationMessage(
-                        recipient: recipient,
-                        body: input.body
-                    )
-                )
-            case .explicitChat(_, let initialChat), .matched(_, _, let initialChat):
-                confirmationPresentation = .init(
-                    title: "Confirm existing-chat submission",
-                    message: self.chatConfirmationMessage(
-                        initialChat,
-                        body: input.body,
-                        matchedFromParticipants: preparedDestination.isMatchedGroup
-                    )
-                )
+            // Every existing-conversation form requires its own final confirmation. The
+            // production router always selects exactly one real presenter; no mode
+            // bypasses authorization. Composition already returned above, so anything
+            // reaching here resolved to an existing conversation.
+            guard let initialChat = preparedDestination.initialChat else {
+                throw MessageSendError.invalidDestination
             }
+            let confirmationPresentation = MessagesSendConfirmationPresentation(
+                title: "Confirm existing-chat submission",
+                message: self.chatConfirmationMessage(
+                    initialChat,
+                    body: input.body,
+                    matchedFromParticipants: preparedDestination.isMatchedGroup
+                )
+            )
             try await self.sendConfirmationRequester.requestConfirmation(
                 confirmationPresentation,
                 elicitation: context.elicitation
@@ -493,10 +507,9 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
 
             try Task.checkCancellation()
             switch preparedDestination {
-            case .rawRecipient(let recipient):
-                try await self.sender.submit(recipient: recipient, body: input.body)
-                log.notice("Messages accepted one submission destination=recipient path=raw-recipient")
-                return MessageSubmissionResult(status: "submitted", service: "iMessage")
+            case .newRecipient:
+                // Already returned above; composition never reaches the send router.
+                throw MessageSendError.invalidDestination
             case .explicitChat(let publicChatID, let initialChat):
                 let revalidatedChat = try await self.resolveSendChat(publicChatID)
                 guard revalidatedChat == initialChat else {
@@ -511,7 +524,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 log.notice(
                     "Messages accepted one submission destination=chat kind=\(revalidatedChat.kind.rawValue, privacy: .public)"
                 )
-                return MessageSubmissionResult(status: "submitted", service: "Messages")
+                return MessageSendResult.submitted(service: "Messages")
             case .matched(let publicChatID, let expectedParticipants, let initial):
                 let match = try await self.matchSendConversation(
                     expectedParticipants,
@@ -527,7 +540,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 log.notice(
                     "Messages accepted one submission destination=\(initial.kind == .group ? "recipients" : "recipient", privacy: .public) resolution=unique path=existing-chat kind=\(initial.kind.rawValue, privacy: .public)"
                 )
-                return MessageSubmissionResult(status: "submitted", service: "Messages")
+                return MessageSendResult.submitted(service: "Messages")
             }
         }
     }
@@ -583,7 +596,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     }
 
     private enum PreparedSendDestination {
-        case rawRecipient(String)
+        case newRecipient(String)
         case explicitChat(publicChatID: String, initial: MessagesResolvedChatDestination)
         case matched(
             publicChatID: String,
@@ -599,7 +612,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         /// The existing conversation this send resolved to, when it resolved to one.
         var initialChat: MessagesResolvedChatDestination? {
             switch self {
-            case .rawRecipient:
+            case .newRecipient:
                 return nil
             case .explicitChat(_, let initial), .matched(_, _, let initial):
                 return initial
@@ -752,21 +765,14 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         }
     }
 
-    /// Builds the final authorization prompt for a recipient with no existing conversation.
+    /// Builds the final authorization prompt for an existing conversation.
     ///
     /// This prompt is the user-facing authorization surface, so it deliberately shows the
     /// exact destination and exact body that will be handed to the sender. Those values
     /// must never reach logs, diagnostics, errors, or tool results.
-    private func rawRecipientConfirmationMessage(recipient: String, body: String) -> String {
-        [
-            "Submit this message as a new direct conversation?",
-            "No existing conversation matches this recipient, so Messages will start a new direct conversation rather than replying in an existing thread.",
-            "Recipient: \(recipient)",
-            "Message:",
-            body,
-        ].joined(separator: "\n")
-    }
-
+    ///
+    /// There is no counterpart for a new recipient: that mode is authorized in the
+    /// system-owned Messages panel, where both values remain editable.
     private func chatConfirmationMessage(
         _ chat: MessagesResolvedChatDestination,
         body: String,
@@ -1044,7 +1050,26 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
     }
 }
 
-private struct MessageSubmissionResult: Encodable {
+/// Redacted send outcome. It never carries the recipient, body, chat identifier,
+/// chosen transport, account, message database identifier, or attachment path.
+private struct MessageSendResult: Encodable {
     let status: String
-    let service: String
+    let service: String?
+    let mode: String?
+
+    /// Messages accepted one submission. This is never a delivery claim.
+    static func submitted(service: String) -> MessageSendResult {
+        MessageSendResult(status: "submitted", service: service, mode: nil)
+    }
+
+    /// The human completed the system Messages composition flow.
+    ///
+    /// It asserts neither that the seeded recipient and body were the values
+    /// ultimately used — the system panel leaves both editable — nor that anything
+    /// was delivered.
+    static let userCompletedComposition = MessageSendResult(
+        status: "user_completed_composition",
+        service: nil,
+        mode: "system_messages_compose"
+    )
 }

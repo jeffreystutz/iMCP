@@ -10,3 +10,4 @@ for this project.
 | [0003](0003-opaque-messages-chat-identifiers.md) | Proposed | Wrap Messages chat GUIDs in versioned opaque identifiers and resolve them with exact bound lookups. |
 | [0004](0004-directory-scoped-messages-database-access.md) | Proposed | Use a read-only directory bookmark for SQLite access to the live Messages database family. |
 | [0005](0005-schema-resilient-messages-conversation-index.md) | Proposed | Discover schema capabilities and assemble bounded summary/full conversation metadata in stages. |
+| [0006](0006-new-recipient-system-composition.md) | Proposed | Compose to a recipient with no existing conversation in the system-owned Messages panel instead of a guessed iMessage participant. |

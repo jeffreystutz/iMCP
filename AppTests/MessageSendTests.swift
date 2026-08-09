@@ -149,15 +149,15 @@ final class MessageSendTests: XCTestCase {
     func testAcceptedEmailSubmissionDispatchesOnceAndReturnsRedactedStatus() async throws {
         let sender = RecordingMessagesSender()
         let requester = StubElicitationRequester(result: confirmedResult)
-        let result = try await sendTool(sender: sender)(
+        let result = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
             ["recipient": .string("recipient@example.invalid"), "body": .string("test-body")],
             context: ToolCallContext(elicitation: requester)
         )
 
-        let submissionCount = await sender.submissionCount
+        let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 1)
         XCTAssertEqual(result.objectValue?["status"]?.stringValue, "submitted")
-        XCTAssertEqual(result.objectValue?["service"]?.stringValue, "iMessage")
+        XCTAssertEqual(result.objectValue?["service"]?.stringValue, "Messages")
         let encoded = String(data: try JSONEncoder().encode(result), encoding: .utf8)!
         XCTAssertFalse(encoded.contains("recipient@example.invalid"))
         XCTAssertFalse(encoded.contains("test-body"))
@@ -166,35 +166,108 @@ final class MessageSendTests: XCTestCase {
         XCTAssertTrue(requester.lastMessage.contains("test-body"))
     }
 
-    func testRawRecipientConfirmationShowsExactDestinationBodyAndNewConversation() async throws {
-        let sender = RecordingMessagesSender()
-        let repository = RecordingSendChatRepository(results: [], matches: [.none])
-        let requester = StubElicitationRequester(result: confirmedResult)
+    func testUnmatchedRecipientComposesWithoutIMCPConfirmation() async throws {
+        // Phone and email behave identically: neither has an existing conversation,
+        // so both are handed to system-owned composition rather than dispatched.
+        for recipient in ["+" + "1555" + "0100002", "brand-new@example.invalid"] {
+            let sender = RecordingMessagesSender()
+            let composer = RecordingMessagesComposer()
+            let repository = RecordingSendChatRepository(results: [], matches: [.none])
+            let requester = StubElicitationRequester(result: confirmedResult)
 
-        let result = try await sendTool(sender: sender, chatRepository: repository)(
-            [
-                "recipient": .string("brand-new@example.invalid"),
-                "body": .string("exact-authorized-body"),
-            ],
-            context: ToolCallContext(elicitation: requester)
-        )
+            let result = try await sendTool(
+                sender: sender,
+                composer: composer,
+                chatRepository: repository
+            )(
+                [
+                    "recipient": .string(recipient),
+                    "body": .string("exact-seed-body"),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
 
-        XCTAssertEqual(requester.requestCount, 1)
-        XCTAssertTrue(requester.lastMessage.contains("Recipient: brand-new@example.invalid"))
-        XCTAssertTrue(requester.lastMessage.contains("exact-authorized-body"))
-        XCTAssertTrue(requester.lastMessage.contains("new direct conversation"))
-        XCTAssertFalse(requester.lastMessage.contains("existing Messages conversation"))
+            // The system panel is the authorization surface for this mode, so iMCP
+            // must not have asked for its own confirmation first.
+            XCTAssertEqual(requester.requestCount, 0, "\(recipient) received an iMCP confirmation")
+            let compositions = await composer.compositionCount
+            let seedRecipient = await composer.lastSeedRecipient
+            let seedBody = await composer.lastSeedBody
+            XCTAssertEqual(compositions, 1)
+            XCTAssertEqual(seedRecipient, recipient, "the seed must not be normalized")
+            XCTAssertEqual(seedBody, "exact-seed-body")
 
-        // The sender receives exactly the confirmed values.
-        let lastRecipient = await sender.lastRecipient
-        let lastBody = await sender.lastBody
-        XCTAssertEqual(lastRecipient, "brand-new@example.invalid")
-        XCTAssertEqual(lastBody, "exact-authorized-body")
+            // Nothing was dispatched through Messages automation on any route.
+            let chatSubmissions = await sender.chatSubmissionCount
+            let addressabilityProbes = await sender.addressabilityCount
+            let authorizationRequests = await sender.authorizationRequestCount
+            XCTAssertEqual(chatSubmissions, 0)
+            XCTAssertEqual(addressabilityProbes, 0)
+            XCTAssertEqual(authorizationRequests, 0)
 
-        // Neither value may appear in the tool result.
-        let encoded = String(data: try JSONEncoder().encode(result), encoding: .utf8)!
-        XCTAssertFalse(encoded.contains("brand-new@example.invalid"))
-        XCTAssertFalse(encoded.contains("exact-authorized-body"))
+            XCTAssertEqual(
+                result.objectValue?["status"]?.stringValue,
+                "user_completed_composition"
+            )
+            XCTAssertEqual(result.objectValue?["mode"]?.stringValue, "system_messages_compose")
+            // The result must claim neither a submission nor a transport.
+            XCTAssertNil(result.objectValue?["service"])
+            let encoded = String(data: try JSONEncoder().encode(result), encoding: .utf8)!
+            for leaked in [recipient, "exact-seed-body", "iMessage", "SMS", "RCS", "submitted"] {
+                XCTAssertFalse(encoded.contains(leaked), "composition result leaked \(leaked)")
+            }
+        }
+    }
+
+    func testCompositionCancellationAndFailureNeverDispatchOrRetry() async {
+        let cases: [(Error, MessagesCompositionError)] = [
+            (MessagesCompositionError.compositionCancelled, .compositionCancelled),
+            (MessagesCompositionError.compositionFailed, .compositionFailed),
+            (MessagesCompositionError.compositionUnavailable, .compositionUnavailable),
+            (MessagesCompositionError.compositionBusy, .compositionBusy),
+        ]
+        for (thrown, expected) in cases {
+            let sender = RecordingMessagesSender()
+            let composer = RecordingMessagesComposer(outcome: .failure(thrown))
+            let repository = RecordingSendChatRepository(results: [], matches: [.none])
+            let requester = StubElicitationRequester(result: confirmedResult)
+
+            do {
+                _ = try await sendTool(
+                    sender: sender,
+                    composer: composer,
+                    chatRepository: repository
+                )(
+                    [
+                        "recipient": .string("brand-new@example.invalid"),
+                        "body": .string("test-body"),
+                    ],
+                    context: ToolCallContext(elicitation: requester)
+                )
+                XCTFail("Expected the composition to fail")
+            } catch let error as MessagesCompositionError {
+                XCTAssertEqual(error, expected)
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+
+            // No second composition, no AppleScript fallback, no confirmation.
+            let compositions = await composer.compositionCount
+            let chatSubmissions = await sender.chatSubmissionCount
+            XCTAssertEqual(compositions, 1)
+            XCTAssertEqual(chatSubmissions, 0)
+            XCTAssertEqual(requester.requestCount, 0)
+
+            let message = error(expected)
+            for leaked in ["brand-new@example.invalid", "test-body"] {
+                XCTAssertFalse(message.contains(leaked), "\(expected) leaked \(leaked)")
+            }
+            XCTAssertTrue(message.contains("Nothing was sent."))
+        }
+    }
+
+    private func error(_ error: MessagesCompositionError) -> String {
+        error.localizedDescription
     }
 
     func testMCPAndNativeReceiveTheSameAuthoritativeConfirmationPresentation() async throws {
@@ -243,6 +316,7 @@ final class MessageSendTests: XCTestCase {
         await assertSendError(.confirmationCancelled) {
             _ = try await self.sendTool(
                 sender: sender,
+                chatRepository: self.matchedDirectRepository(),
                 sendConfirmationRequester: MessagesFinalSendConfirmationRequester(
                     mode: { .appDialog },
                     appPresenter: native
@@ -257,7 +331,7 @@ final class MessageSendTests: XCTestCase {
                 )
             )
         }
-        let submissionCount = await sender.submissionCount
+        let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 0)
         XCTAssertEqual(native.requestCount, 1)
         XCTAssertEqual(
@@ -330,18 +404,23 @@ final class MessageSendTests: XCTestCase {
 
     func testExactE164HandleIsAcceptedWithoutNormalization() async throws {
         let sender = RecordingMessagesSender()
+        let composer = RecordingMessagesComposer()
         let recipient = "+" + "1555" + "0100001"
-        _ = try await sendTool(sender: sender)(
+        _ = try await sendTool(
+            sender: sender,
+            composer: composer,
+            chatRepository: RecordingSendChatRepository(results: [], matches: [.none])
+        )(
             ["recipient": .string(recipient), "body": .string("test-body")],
             context: ToolCallContext(
                 elicitation: StubElicitationRequester(result: confirmedResult)
             )
         )
 
-        let submissionCount = await sender.submissionCount
-        let lastRecipient = await sender.lastRecipient
-        XCTAssertEqual(submissionCount, 1)
-        XCTAssertTrue(lastRecipient == recipient)
+        let compositionCount = await composer.compositionCount
+        let seedRecipient = await composer.lastSeedRecipient
+        XCTAssertEqual(compositionCount, 1)
+        XCTAssertTrue(seedRecipient == recipient)
     }
 
     func testInvalidHandleFailsBeforeConfirmationOrDispatch() async {
@@ -372,13 +451,13 @@ final class MessageSendTests: XCTestCase {
             confirmedResult,
         ])
 
-        _ = try await sendTool(sender: sender)(
+        _ = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
             ["recipient": .string("recipient@example.invalid")],
             context: ToolCallContext(elicitation: requester)
         )
 
         XCTAssertEqual(requester.requestCount, 2)
-        let submissionCount = await sender.submissionCount
+        let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 1)
     }
 
@@ -422,7 +501,10 @@ final class MessageSendTests: XCTestCase {
         for (result, expectedError) in results {
             let sender = RecordingMessagesSender()
             await assertSendError(expectedError) {
-                _ = try await self.sendTool(sender: sender)(
+                _ = try await self.sendTool(
+                    sender: sender,
+                    chatRepository: self.matchedDirectRepository()
+                )(
                     [
                         "recipient": .string("recipient@example.invalid"),
                         "body": .string("test-body"),
@@ -432,7 +514,7 @@ final class MessageSendTests: XCTestCase {
                     )
                 )
             }
-            let submissionCount = await sender.submissionCount
+            let submissionCount = await sender.chatSubmissionCount
             XCTAssertEqual(submissionCount, 0)
         }
     }
@@ -442,7 +524,7 @@ final class MessageSendTests: XCTestCase {
         let requester = StubElicitationRequester(error: ElicitationRequestError.formUnsupported)
 
         do {
-            _ = try await sendTool(sender: sender)(
+            _ = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
                 [
                     "recipient": .string("recipient@example.invalid"),
                     "body": .string("test-body"),
@@ -456,16 +538,15 @@ final class MessageSendTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
 
-        let submissionCount = await sender.submissionCount
+        let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 0)
     }
 
-    func testCompleteRawRecipientCallStillRequestsExactlyOneFinalConfirmation() async throws {
+    func testCompleteMatchedRecipientCallStillRequestsExactlyOneFinalConfirmation() async throws {
         let sender = RecordingMessagesSender()
-        let repository = RecordingSendChatRepository(results: [], matches: [.none])
         let requester = StubElicitationRequester(result: confirmedResult)
 
-        _ = try await sendTool(sender: sender, chatRepository: repository)(
+        _ = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
             [
                 "recipient": .string("recipient@example.invalid"),
                 "body": .string("test-body"),
@@ -475,7 +556,7 @@ final class MessageSendTests: XCTestCase {
 
         // Nothing supplies every input up front well enough to skip confirmation.
         XCTAssertEqual(requester.requestCount, 1)
-        let submissionCount = await sender.submissionCount
+        let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 1)
     }
 
@@ -483,13 +564,15 @@ final class MessageSendTests: XCTestCase {
         // A client that supplies the body but cannot show a form must dispatch zero: the
         // input round trip is not authorization.
         let sender = RecordingMessagesSender()
-        let repository = RecordingSendChatRepository(results: [], matches: [.none])
         let requester = StubElicitationRequester(
             results: [.init(action: .accept, content: ["body": .string("test-body")])]
         )
 
         await assertSendError(.inputMalformed) {
-            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+            _ = try await self.sendTool(
+                sender: sender,
+                chatRepository: self.matchedDirectRepository()
+            )(
                 ["recipient": .string("recipient@example.invalid")],
                 context: ToolCallContext(elicitation: requester)
             )
@@ -497,7 +580,7 @@ final class MessageSendTests: XCTestCase {
 
         // Two requests: one for the missing body, one for the separate final confirmation.
         XCTAssertEqual(requester.requestCount, 2)
-        let submissionCount = await sender.submissionCount
+        let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 0)
     }
 
@@ -548,7 +631,10 @@ final class MessageSendTests: XCTestCase {
         let sender = RecordingMessagesSender(error: MessageSendError.automationFailed)
 
         await assertSendError(.automationFailed) {
-            _ = try await self.sendTool(sender: sender)(
+            _ = try await self.sendTool(
+                sender: sender,
+                chatRepository: self.matchedDirectRepository()
+            )(
                 [
                     "recipient": .string("recipient@example.invalid"),
                     "body": .string("test-body"),
@@ -559,13 +645,13 @@ final class MessageSendTests: XCTestCase {
             )
         }
 
-        let submissionCount = await sender.submissionCount
+        let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 1)
     }
 
     func testCancelledToolCallDoesNotDispatch() async throws {
         let sender = RecordingMessagesSender()
-        let tool = try sendTool(sender: sender)
+        let tool = try sendTool(sender: sender, chatRepository: matchedDirectRepository())
         let task = Task {
             try await tool(
                 [
@@ -587,7 +673,7 @@ final class MessageSendTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
 
-        let submissionCount = await sender.submissionCount
+        let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 0)
     }
 
@@ -605,7 +691,6 @@ final class MessageSendTests: XCTestCase {
     }
 
     func testAppleScriptIsFixedAndUsesDescriptorParameters() {
-        XCTAssertTrue(AppleScriptMessagesSender.scriptSource.contains("recipientHandle"))
         XCTAssertTrue(AppleScriptMessagesSender.scriptSource.contains("chatGUID"))
         XCTAssertTrue(AppleScriptMessagesSender.scriptSource.contains("messageBody"))
         XCTAssertFalse(AppleScriptMessagesSender.scriptSource.contains("recipient@example.invalid"))
@@ -939,35 +1024,200 @@ final class MessageSendTests: XCTestCase {
         XCTAssertTrue(requester.lastMessage.contains("test-body"))
     }
 
-    func testUnmatchedDirectPreservesRawPathAndAmbiguityFailsClosed() async throws {
-        let rawSender = RecordingMessagesSender()
-        let rawRepository = RecordingSendChatRepository(results: [], matches: [.none])
-        _ = try await sendTool(sender: rawSender, chatRepository: rawRepository)(
-            ["recipient": .string("new@example.invalid"), "body": .string("test-body")],
+    func testUnresolvedDirectMatchingNeverReachesComposition() async {
+        // Only a verified absence composes. Ambiguity and unresolvable membership are
+        // not evidence of absence, so they fail closed with no panel at all.
+        let cases: [(MessagesConversationMatch, MessageSendError)] = [
+            (.ambiguous, .ambiguousDirectConversation),
+            (.incomplete, .incompleteDirectMembership),
+        ]
+        for (match, expected) in cases {
+            let sender = RecordingMessagesSender()
+            let composer = RecordingMessagesComposer()
+            let repository = RecordingSendChatRepository(results: [], matches: [match])
+            await assertSendError(expected) {
+                _ = try await self.sendTool(
+                    sender: sender,
+                    composer: composer,
+                    chatRepository: repository
+                )(
+                    ["recipient": .string("one@example.invalid"), "body": .string("test-body")],
+                    context: ToolCallContext(
+                        elicitation: StubElicitationRequester(result: self.confirmedResult)
+                    )
+                )
+            }
+            let compositions = await composer.compositionCount
+            let chatCount = await sender.chatSubmissionCount
+            XCTAssertEqual(compositions, 0, "\(expected) opened a system compose panel")
+            XCTAssertEqual(chatCount, 0)
+        }
+    }
+
+    func testExistingChatFailuresNeverBecomeNewRecipientComposition() async {
+        // An existing-chat failure stays an existing-chat failure. It must never be
+        // reinterpreted as "no conversation exists" and rerouted to the system panel.
+        let unavailableSender = RecordingMessagesSender(
+            authorization: .authorized,
+            addressability: [false]
+        )
+        let unavailableComposer = RecordingMessagesComposer()
+        await assertSendError(.chatUnavailableInAutomation) {
+            _ = try await self.sendTool(
+                sender: unavailableSender,
+                composer: unavailableComposer,
+                chatRepository: self.matchedDirectRepository()
+            )(
+                ["recipient": .string("recipient@example.invalid"), "body": .string("test-body")],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+        let unavailableCompositions = await unavailableComposer.compositionCount
+        XCTAssertEqual(unavailableCompositions, 0)
+
+        let staleSender = RecordingMessagesSender()
+        let staleComposer = RecordingMessagesComposer()
+        let match = MessagesConversationMatch.unique(
+            publicChatID: "imcp-chat-v1_synthetic",
+            destination: directChat
+        )
+        await assertSendError(.staleMatchedConversation) {
+            _ = try await self.sendTool(
+                sender: staleSender,
+                composer: staleComposer,
+                chatRepository: RecordingSendChatRepository(results: [], matches: [match, .none])
+            )(
+                ["recipient": .string("recipient@example.invalid"), "body": .string("test-body")],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+        let staleCompositions = await staleComposer.compositionCount
+        let staleSubmissions = await staleSender.chatSubmissionCount
+        XCTAssertEqual(staleCompositions, 0, "a stale destination reopened as a new recipient")
+        XCTAssertEqual(staleSubmissions, 0)
+
+        // A group with no exact match fails closed; groups never compose.
+        let groupSender = RecordingMessagesSender()
+        let groupComposer = RecordingMessagesComposer()
+        await assertSendError(.groupConversationNotFound) {
+            _ = try await self.sendTool(
+                sender: groupSender,
+                composer: groupComposer,
+                chatRepository: RecordingSendChatRepository(results: [], matches: [.none])
+            )(
+                [
+                    "recipients": .array([
+                        .string("first@example.invalid"), .string("second@example.invalid"),
+                    ]),
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+        let groupCompositions = await groupComposer.compositionCount
+        XCTAssertEqual(groupCompositions, 0)
+    }
+
+    func testExplicitChatAndGroupDestinationsNeverCompose() async throws {
+        let chatComposer = RecordingMessagesComposer()
+        let chatSender = RecordingMessagesSender()
+        _ = try await sendTool(
+            sender: chatSender,
+            composer: chatComposer,
+            chatRepository: RecordingSendChatRepository(results: [
+                .success(directChat), .success(directChat),
+            ])
+        )(
+            ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
             context: ToolCallContext(
                 elicitation: StubElicitationRequester(result: confirmedResult)
             )
         )
-        let rawSubmissionCount = await rawSender.submissionCount
-        let rawChatCount = await rawSender.chatSubmissionCount
-        XCTAssertEqual(rawSubmissionCount, 1)
-        XCTAssertEqual(rawChatCount, 0)
+        let chatCompositions = await chatComposer.compositionCount
+        let chatSubmissions = await chatSender.chatSubmissionCount
+        XCTAssertEqual(chatCompositions, 0)
+        XCTAssertEqual(chatSubmissions, 1)
 
-        let ambiguousSender = RecordingMessagesSender()
-        let ambiguousRepository = RecordingSendChatRepository(results: [], matches: [.ambiguous])
-        await assertSendError(.ambiguousDirectConversation) {
-            _ = try await self.sendTool(
-                sender: ambiguousSender,
-                chatRepository: ambiguousRepository
-            )(
-                ["recipient": .string("one@example.invalid"), "body": .string("test-body")],
-                context: ToolCallContext(elicitation: StubElicitationRequester(result: confirmedResult))
+        let groupComposer = RecordingMessagesComposer()
+        let groupSender = RecordingMessagesSender()
+        let groupMatch = MessagesConversationMatch.unique(
+            publicChatID: "imcp-chat-v1_synthetic",
+            destination: groupChat
+        )
+        _ = try await sendTool(
+            sender: groupSender,
+            composer: groupComposer,
+            chatRepository: RecordingSendChatRepository(
+                results: [],
+                matches: [groupMatch, groupMatch]
             )
-        }
-        let ambiguousRawCount = await ambiguousSender.submissionCount
-        let ambiguousChatCount = await ambiguousSender.chatSubmissionCount
-        XCTAssertEqual(ambiguousRawCount, 0)
-        XCTAssertEqual(ambiguousChatCount, 0)
+        )(
+            [
+                "recipients": .array([
+                    .string("first@example.invalid"), .string("second@example.invalid"),
+                ]),
+                "body": .string("test-body"),
+            ],
+            context: ToolCallContext(
+                elicitation: StubElicitationRequester(result: confirmedResult)
+            )
+        )
+        let groupCompositions = await groupComposer.compositionCount
+        let groupSubmissions = await groupSender.chatSubmissionCount
+        XCTAssertEqual(groupCompositions, 0)
+        XCTAssertEqual(groupSubmissions, 1)
+    }
+
+    func testAuthorizationModelsStaySeparate() async throws {
+        // Existing chat: exactly one confirmation, zero compositions.
+        let existingLog = SendEventLog()
+        let existingComposer = RecordingMessagesComposer(eventLog: existingLog)
+        let existingSender = RecordingMessagesSender(eventLog: existingLog)
+        let existingRequester = StubElicitationRequester(
+            result: confirmedResult,
+            eventLog: existingLog
+        )
+        _ = try await sendTool(
+            sender: existingSender,
+            composer: existingComposer,
+            chatRepository: matchedDirectRepository()
+        )(
+            ["recipient": .string("recipient@example.invalid"), "body": .string("test-body")],
+            context: ToolCallContext(elicitation: existingRequester)
+        )
+        XCTAssertEqual(existingRequester.requestCount, 1)
+        let existingCompositions = await existingComposer.compositionCount
+        XCTAssertEqual(existingCompositions, 0)
+        XCTAssertFalse(existingLog.events.contains("compose"))
+
+        // New recipient: exactly one composition, zero confirmations, and the
+        // missing-input round trip stays distinct from either authorization surface.
+        let newLog = SendEventLog()
+        let newComposer = RecordingMessagesComposer(eventLog: newLog)
+        let newSender = RecordingMessagesSender(eventLog: newLog)
+        let newRequester = StubElicitationRequester(
+            results: [.init(action: .accept, content: ["body": .string("test-body")])]
+        )
+        _ = try await sendTool(
+            sender: newSender,
+            composer: newComposer,
+            chatRepository: RecordingSendChatRepository(results: [], matches: [.none])
+        )(
+            ["recipient": .string("brand-new@example.invalid")],
+            context: ToolCallContext(elicitation: newRequester)
+        )
+        // One elicitation only: the missing body. It gathered input, it did not
+        // authorize anything.
+        XCTAssertEqual(newRequester.requestCount, 1)
+        let newCompositions = await newComposer.compositionCount
+        XCTAssertEqual(newCompositions, 1)
+        XCTAssertEqual(newLog.events, ["compose"])
     }
 
     func testIncompleteDirectMembershipFailsClosedWithoutConfirmationOrDispatch() async {
@@ -1109,6 +1359,241 @@ final class MessageSendTests: XCTestCase {
         }
         let staleChatCount = await sender.chatSubmissionCount
         XCTAssertEqual(staleChatCount, 0)
+    }
+
+    // MARK: - Sharing-service composition lifecycle
+
+    @MainActor
+    func testCompositionSeedsExactValuesAndCompletesExactlyOnce() async throws {
+        let panel = StubCompositionPanel()
+        let composition = Task { @MainActor in
+            try await MessagesCompositionCoordinator.compose(
+                recipient: "brand-new@example.invalid",
+                body: "exact-seed-body",
+                panel: panel
+            )
+        }
+        await waitForPresentation(panel)
+
+        XCTAssertEqual(panel.presentCount, 1)
+        XCTAssertEqual(panel.lastRecipient, "brand-new@example.invalid")
+        // The body travels as the item array, which is also what capability checks use.
+        XCTAssertEqual(panel.lastItems.count, 1)
+        XCTAssertEqual(panel.lastItems.first as? String, "exact-seed-body")
+
+        let delegate = try XCTUnwrap(panel.lastDelegate)
+        let service = try XCTUnwrap(NSSharingService(named: .composeMessage))
+        delegate.sharingService?(service, didShareItems: ["exact-seed-body"])
+
+        let outcome = try await composition.value
+        XCTAssertEqual(outcome, .userCompleted)
+        XCTAssertEqual(panel.releaseCount, 1)
+
+        // Late or duplicate callbacks must not resume a second time or re-release.
+        delegate.sharingService?(service, didShareItems: [])
+        delegate.sharingService?(
+            service,
+            didFailToShareItems: [],
+            error: NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError)
+        )
+        XCTAssertEqual(panel.releaseCount, 1)
+    }
+
+    @MainActor
+    func testCompositionDelegateOutcomesMapWithoutLeakingDetail() async throws {
+        let cancelled = NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError)
+        XCTAssertEqual(
+            MessagesCompositionCoordinator.outcome(forFailure: cancelled),
+            .compositionCancelled
+        )
+        XCTAssertEqual(NSUserCancelledError, 3072)
+        let otherFailures: [Error] = [
+            NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError),
+            NSError(
+                domain: "SyntheticDomain",
+                code: 42,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "brand-new@example.invalid /private/synthetic/path"
+                ]
+            ),
+            SyntheticCompositionError.serviceFailed,
+        ]
+        for other in otherFailures {
+            XCTAssertEqual(
+                MessagesCompositionCoordinator.outcome(forFailure: other),
+                .compositionFailed
+            )
+        }
+        // Sanitized: the mapped error text carries nothing from the underlying failure.
+        let sanitized = MessagesCompositionError.compositionFailed.localizedDescription
+        for leaked in ["brand-new@example.invalid", "/private/synthetic/path", "SyntheticDomain"] {
+            XCTAssertFalse(sanitized.contains(leaked))
+        }
+
+        // Cancellation surfaces as its own terminal outcome, with no retry.
+        let panel = StubCompositionPanel()
+        let composition = Task { @MainActor in
+            try await MessagesCompositionCoordinator.compose(
+                recipient: "brand-new@example.invalid",
+                body: "exact-seed-body",
+                panel: panel
+            )
+        }
+        await waitForPresentation(panel)
+        let delegate = try XCTUnwrap(panel.lastDelegate)
+        let service = try XCTUnwrap(NSSharingService(named: .composeMessage))
+        delegate.sharingService?(service, didFailToShareItems: [], error: cancelled)
+
+        do {
+            _ = try await composition.value
+            XCTFail("Expected the cancelled composition to fail")
+        } catch let error as MessagesCompositionError {
+            XCTAssertEqual(error, .compositionCancelled)
+        }
+        XCTAssertEqual(panel.presentCount, 1, "a cancelled composition was retried")
+    }
+
+    @MainActor
+    func testOnlyOneCompositionPanelIsPresentedAtATime() async throws {
+        let first = StubCompositionPanel()
+        let composition = Task { @MainActor in
+            try await MessagesCompositionCoordinator.compose(
+                recipient: "brand-new@example.invalid",
+                body: "exact-seed-body",
+                panel: first
+            )
+        }
+        await waitForPresentation(first)
+
+        let second = StubCompositionPanel()
+        do {
+            _ = try await MessagesCompositionCoordinator.compose(
+                recipient: "another-new@example.invalid",
+                body: "second-seed-body",
+                panel: second
+            )
+            XCTFail("Expected the second composition to fail closed")
+        } catch let error as MessagesCompositionError {
+            XCTAssertEqual(error, .compositionBusy)
+        }
+        // Failed closed rather than queued: nothing may surface later out of context.
+        XCTAssertEqual(second.presentCount, 0)
+
+        let delegate = try XCTUnwrap(first.lastDelegate)
+        let service = try XCTUnwrap(NSSharingService(named: .composeMessage))
+        delegate.sharingService?(service, didShareItems: [])
+        _ = try await composition.value
+        XCTAssertEqual(second.presentCount, 0)
+
+        // The gate reopens once the active composition reaches a terminal outcome.
+        let third = StubCompositionPanel()
+        let reopened = Task { @MainActor in
+            try await MessagesCompositionCoordinator.compose(
+                recipient: "third-new@example.invalid",
+                body: "third-seed-body",
+                panel: third
+            )
+        }
+        await waitForPresentation(third)
+        let thirdDelegate = try XCTUnwrap(third.lastDelegate)
+        thirdDelegate.sharingService?(service, didShareItems: [])
+        _ = try await reopened.value
+    }
+
+    @MainActor
+    func testUnavailableCompositionServiceFailsWithoutPresenting() async {
+        let panel = StubCompositionPanel(canPresent: false)
+        do {
+            _ = try await MessagesCompositionCoordinator.compose(
+                recipient: "brand-new@example.invalid",
+                body: "exact-seed-body",
+                panel: panel
+            )
+            XCTFail("Expected an unavailable composition service to fail")
+        } catch let error as MessagesCompositionError {
+            XCTAssertEqual(error, .compositionUnavailable)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertEqual(panel.presentCount, 1)
+
+        // The single-active gate must be released even on this early failure.
+        let next = StubCompositionPanel(canPresent: false)
+        do {
+            _ = try await MessagesCompositionCoordinator.compose(
+                recipient: "brand-new@example.invalid",
+                body: "exact-seed-body",
+                panel: next
+            )
+            XCTFail("Expected an unavailable composition service to fail")
+        } catch let error as MessagesCompositionError {
+            XCTAssertEqual(error, .compositionUnavailable)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    @MainActor
+    func testCancelledTaskPresentsNoCompositionPanel() async {
+        let panel = StubCompositionPanel()
+        let composition = Task { @MainActor in
+            try await SystemMessagesComposer(makePanel: { panel })
+                .compose(seedRecipient: "brand-new@example.invalid", seedBody: "exact-seed-body")
+        }
+        composition.cancel()
+
+        do {
+            _ = try await composition.value
+            XCTFail("Expected the cancelled composition to fail")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertEqual(panel.presentCount, 0)
+    }
+
+    @MainActor
+    func testCancellingAfterPresentationNeitherRetriesNorClosesThePanel() async throws {
+        let panel = StubCompositionPanel()
+        let composition = Task { @MainActor in
+            try await MessagesCompositionCoordinator.compose(
+                recipient: "brand-new@example.invalid",
+                body: "exact-seed-body",
+                panel: panel
+            )
+        }
+        await waitForPresentation(panel)
+
+        // Once system UI is visible, caller cancellation proves nothing about what the
+        // human did next, so iMCP starts no other route, synthesizes no Send or Cancel,
+        // and keeps the delegate alive for the real outcome.
+        composition.cancel()
+        await Task.yield()
+        XCTAssertEqual(panel.presentCount, 1)
+        XCTAssertEqual(panel.releaseCount, 0)
+
+        let delegate = try XCTUnwrap(panel.lastDelegate)
+        let service = try XCTUnwrap(NSSharingService(named: .composeMessage))
+        delegate.sharingService?(service, didShareItems: [])
+
+        let outcome = try await composition.value
+        XCTAssertEqual(outcome, .userCompleted)
+        XCTAssertEqual(panel.presentCount, 1)
+        XCTAssertEqual(panel.releaseCount, 1)
+    }
+
+    @MainActor
+    private func waitForPresentation(
+        _ panel: StubCompositionPanel,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0 ..< 1_000 {
+            if panel.presentCount > 0 { return }
+            await Task.yield()
+        }
+        XCTFail("The composition panel was never presented", file: file, line: line)
     }
 
     // MARK: - Existing-chat automation addressability
@@ -1439,6 +1924,46 @@ final class MessageSendTests: XCTestCase {
         }
     }
 
+    func testNoProductionPathCanBindAnUnmatchedRecipientToAnAccount() throws {
+        // The raw participant path selected an iMessage account for any handle, with
+        // no evidence iMessage was the right route. It is gone, not merely unused.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        for source in [
+            "App/Services/Messages.swift",
+            "App/Services/MessagesSender.swift",
+            "App/Services/MessagesComposer.swift",
+            "App/Services/MessagesSendConfirmation.swift",
+        ] {
+            let contents = try String(
+                contentsOf: root.appendingPathComponent(source),
+                encoding: .utf8
+            )
+            for symbol in [
+                "submitDirectMessage",
+                "recipientHandle",
+                "targetParticipant",
+                "service type = iMessage",
+                "submit(recipient:",
+                "rawRecipient",
+            ] {
+                XCTAssertFalse(
+                    contents.contains(symbol),
+                    "\(source) still references the removed raw-recipient path: \(symbol)"
+                )
+            }
+        }
+
+        let script = AppleScriptMessagesSender.scriptSource
+        for symbol in ["participant", "service type", "account"] {
+            XCTAssertFalse(
+                script.contains(symbol),
+                "the fixed script still fabricates a destination using \(symbol)"
+            )
+        }
+    }
+
     func testFixedScriptExposesAReadOnlyAddressabilityHandler() {
         let source = AppleScriptMessagesSender.scriptSource
         XCTAssertTrue(source.contains("on chatIsAddressable(chatGUID)"))
@@ -1486,6 +2011,7 @@ final class MessageSendTests: XCTestCase {
 
     private func sendTool(
         sender: RecordingMessagesSender,
+        composer: RecordingMessagesComposer? = nil,
         chatRepository: (any MessagesChatListing)? = nil,
         sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting =
             MessagesFinalSendConfirmationRequester(mode: { .mcpForm })
@@ -1494,11 +2020,22 @@ final class MessageSendTests: XCTestCase {
         return try XCTUnwrap(
             MessageService(
                 sender: sender,
+                composer: composer ?? RecordingMessagesComposer(),
                 chatRepository: repository,
                 sendConfirmationRequester: sendConfirmationRequester,
                 chatDatabasePathOverride: "/synthetic/chat.db"
             ).tools.first { $0.name == "messages_send" }
         )
+    }
+
+    /// A direct conversation that already exists, so the call keeps the programmatic
+    /// existing-chat path and its mandatory confirmation.
+    private func matchedDirectRepository() -> RecordingSendChatRepository {
+        let match = MessagesConversationMatch.unique(
+            publicChatID: "imcp-chat-v1_synthetic",
+            destination: directChat
+        )
+        return RecordingSendChatRepository(results: [], matches: [match, match])
     }
 
     private func assertSendError(
@@ -1565,11 +2102,15 @@ private actor RecordingMessagesSender: MessagesSending {
         return addressability.isEmpty ? true : addressability.removeFirst()
     }
 
+    /// Not a `MessagesSending` requirement any more, so production cannot reach it.
+    /// It stays as a trap: every "raw submissions stayed at zero" assertion in this
+    /// suite now also asserts something the type system already forbids.
     func submit(recipient: String, body: String) throws {
         submissionCount += 1
         lastRecipient = recipient
         lastBody = body
         eventLog?.record("raw-submit")
+        XCTFail("An unmatched recipient must never reach AppleScript dispatch")
         if let error { throw error }
     }
 
@@ -1580,6 +2121,65 @@ private actor RecordingMessagesSender: MessagesSending {
         eventLog?.record("chat-submit")
         if let error { throw error }
     }
+}
+
+private actor RecordingMessagesComposer: MessagesNewRecipientComposing {
+    private(set) var compositionCount = 0
+    private(set) var lastSeedRecipient: String?
+    private(set) var lastSeedBody: String?
+    private let outcome: Result<MessagesCompositionOutcome, Error>
+    private let eventLog: SendEventLog?
+
+    init(
+        outcome: Result<MessagesCompositionOutcome, Error> = .success(.userCompleted),
+        eventLog: SendEventLog? = nil
+    ) {
+        self.outcome = outcome
+        self.eventLog = eventLog
+    }
+
+    func compose(
+        seedRecipient: String,
+        seedBody: String
+    ) async throws -> MessagesCompositionOutcome {
+        compositionCount += 1
+        lastSeedRecipient = seedRecipient
+        lastSeedBody = seedBody
+        eventLog?.record("compose")
+        return try outcome.get()
+    }
+}
+
+/// Stands in for the AppKit edge so the composition lifecycle can be exercised
+/// without presenting a real system panel.
+@MainActor
+private final class StubCompositionPanel: MessagesCompositionPanelPresenting {
+    private(set) var presentCount = 0
+    private(set) var releaseCount = 0
+    private(set) var lastRecipient: String?
+    private(set) var lastItems: [Any] = []
+    private(set) weak var lastDelegate: NSSharingServiceDelegate?
+    private let canPresent: Bool
+
+    init(canPresent: Bool = true) {
+        self.canPresent = canPresent
+    }
+
+    func present(recipient: String, items: [Any], delegate: NSSharingServiceDelegate) -> Bool {
+        presentCount += 1
+        lastRecipient = recipient
+        lastItems = items
+        lastDelegate = delegate
+        return canPresent
+    }
+
+    func release() {
+        releaseCount += 1
+    }
+}
+
+private enum SyntheticCompositionError: Error {
+    case serviceFailed
 }
 
 /// Orders events across the confirmation router and the automation adapter so tests

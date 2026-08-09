@@ -77,10 +77,11 @@ descriptors, dispatch no more than one `send` event, and never retry after
 dispatch or an ambiguous result.
 
 The recipient path first compares one validated handle with direct-chat
-membership. Only a verified no-match may use the plain-text iMessage recipient
-path, and its confirmation states that a new direct conversation will be
-started. A unique match uses the existing-chat path. Multiple matches fail and
-require a chat ID.
+membership. A unique match uses the existing-chat path described here. Multiple
+matches fail and require a chat ID. A verified no-match is no longer sent
+programmatically at all: it is composed in system-owned Messages UI under a
+separate authorization model. See ADR 0006, which supersedes the plain-text
+iMessage recipient path this record originally specified.
 
 Unresolvable membership is distinct from a verified no-match. When a stored
 participant cannot be compared exactly — a phone number kept in a local or

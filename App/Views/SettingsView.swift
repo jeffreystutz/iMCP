@@ -91,7 +91,13 @@ struct GeneralSettingsView: View {
                 }
 
                 Text(
-                    "Automatic uses an MCP form when the client advertises support; otherwise iMCP shows the confirmation. Choose iMCP app for clients that do not visibly support form elicitation. A confirmation is always required."
+                    "How iMCP confirms a message sent to a conversation you already have. Automatic uses an MCP form when the client advertises support; otherwise iMCP shows the confirmation. Choose iMCP app for clients that do not visibly support form elicitation. A confirmation is always required."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Text(
+                    "This setting does not apply to a recipient you have no conversation with. Those open a Messages compose window that you review, may edit, and send yourself."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)

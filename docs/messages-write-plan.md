@@ -124,11 +124,46 @@ macOS Automation prompt, prompted preflight returned success and the harmless
 fixed handler obtained only the Messages application name. No message was sent
 and no account, chat, participant, contact, or history enumeration occurred.
 
+## Hybrid routing
+
+`messages_send` has two deliberately different routes, chosen by destination
+resolution before any authorization, with **no automatic fallback in either
+direction**.
+
+**Existing conversation — semantic programmatic send.** Resolve the destination
+in the Messages database, present the immutable iMCP confirmation of the exact
+destination and exact body, obtain Automation authority, revalidate the database
+destination, verify the exact chat is still addressable, then dispatch exactly
+one fixed-script chat-target send. Existing iMessage, SMS, and RCS conversations
+all use this one path; nothing branches on service.
+
+**New direct recipient — user-controlled composition.** Once the database has
+proved that no existing direct conversation matches the exact recipient, seed
+`NSSharingService.Name.composeMessage` with that recipient and body and present
+the system-owned Messages panel. The human reviews, may edit either value, and
+personally presses Send.
+
+The authorization models differ, and the difference is the point. The
+programmatic path is authorized by an iMCP confirmation of values that cannot
+then change. The composition path is authorized by the human's own action in the
+system panel, so iMCP presents no confirmation in front of it: an earlier
+immutable confirmation could not truthfully authorize values that remain
+editable. Missing-input elicitation may still precede routing, because gathering
+an input is not authorizing a send. The confirmation-mode setting therefore
+governs the programmatic path only.
+
+Route selection for a new recipient is delegated to Messages. There is no
+caller-facing service selector, and an authorized experiment confirmed Messages
+will choose SMS with no transport supplied. `didShareItems` reports that the
+sharing interaction completed — not delivery, and not evidence that the seeded
+values were the ones sent. App Sandbox is retained, no Accessibility or private
+framework is involved, and the path needs no additional entitlement. See ADR
+0006.
+
 ## First send behavior
 
 `messages_send` initially accepts plain text and one exact canonical
-E.164-style phone handle or syntactically valid email handle. It targets
-iMessage only.
+E.164-style phone handle or syntactically valid email handle.
 
 The tool:
 
@@ -164,9 +199,8 @@ only, not a generic native JSON-schema or missing-input elicitation renderer. It
 runs on the main actor, activates iMCP, presents frontmost Send and Cancel
 actions, and treats dismissal or any unexpected result as cancellation.
 
-The first version has no contact lookup, normalization, groups, attachments,
-SMS, RCS, fallback, or delivery tracking. Existing `messages_fetch` behavior
-is preserved.
+There is no contact lookup, attachment support, transport selection, fallback,
+or delivery tracking. Existing `messages_fetch` behavior is preserved.
 
 The existing-conversation resolver accepts exactly one effective destination:
 `recipient`, `recipients`, or `chat_id`. A chat ID must be the opaque value returned by
@@ -177,9 +211,9 @@ An exact `recipient` is normalized only for matching: verified E.164 numbers
 remain byte-for-byte unchanged, and syntactically valid email addresses are
 trimmed and lowercased. No country code is inferred, and phone and email
 identities are never merged. One unique direct membership match uses the
-existing-chat path. No match preserves the original raw-recipient path;
-multiple direct matches fail and require `chat_id`. Group chats are never
-considered for this single-recipient lookup.
+existing-chat path. A verified no-match uses system-owned composition; multiple
+direct matches fail and require `chat_id`. Group chats are never considered for
+this single-recipient lookup.
 
 `recipients` is the complete set of remote participants in an existing group.
 Input order and exact duplicate membership rows do not matter, but there must
@@ -198,7 +232,7 @@ acceptance, and all confirmed metadata must still match before dispatch.
 Recipient- and participant-matched conversations follow the same mandatory
 confirmation path and repeat the exact membership match before dispatch. A
 changed or stale match fails rather than selecting another chat or switching
-to raw-recipient dispatch.
+to new-recipient composition.
 
 Messages' public scripting dictionary defines `chat.id` as the chat GUID and
 allows `send` to a chat. A signed, sandboxed, ignored no-send probe compared up
