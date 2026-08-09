@@ -7,15 +7,38 @@ import AppKit
 import Carbon
 import Foundation
 
-protocol MessagesSending: Sendable {
-    func submit(recipient: String, body: String) async throws
-    func submit(chatGUID: String, body: String) async throws
+/// Messages Automation authority as reported without ever prompting the user.
+///
+/// This exists so the send flow can decide whether a harmless pre-confirmation
+/// addressability check is safe. Only `.authorized` permits an Apple Event
+/// before the user has authorized the send; every other value defers all
+/// Messages automation until after final confirmation.
+enum MessagesAutomationAuthorization: Equatable, Sendable {
+    case authorized
+    case consentRequired
+    case denied
+    case unknown
 }
 
-extension MessagesSending {
-    func submit(chatGUID: String, body: String) async throws {
-        throw MessageSendError.unsupportedChatType
-    }
+protocol MessagesSending: Sendable {
+    /// Reports current Messages Automation authority without prompting.
+    func automationAuthorization() async -> MessagesAutomationAuthorization
+
+    /// Requests Messages Automation authority, prompting when macOS requires it.
+    ///
+    /// Call this only after the send has been authorized: it is the step that can
+    /// present the system Automation prompt.
+    func requestAutomationAuthorization() async throws
+
+    /// Reports whether Messages currently exposes this exact chat to automation.
+    ///
+    /// Read-only and non-prompting. Messages publishes only a bounded,
+    /// recency-biased subset of its conversations to scripting, so a perfectly
+    /// valid database conversation can be temporarily unaddressable.
+    func isChatAddressable(chatGUID: String) async throws -> Bool
+
+    func submit(recipient: String, body: String) async throws
+    func submit(chatGUID: String, body: String) async throws
 }
 
 enum MessageSendError: LocalizedError, Sendable {
@@ -35,7 +58,7 @@ enum MessageSendError: LocalizedError, Sendable {
     case invalidChatIdentifier
     case staleChatIdentifier
     case ambiguousChatResolution
-    case unsupportedChatType
+    case chatUnavailableInAutomation
     case emptyBody
     case confirmationDeclined
     case confirmationCancelled
@@ -80,8 +103,9 @@ enum MessageSendError: LocalizedError, Sendable {
             return "The chat identifier no longer resolves to an existing conversation."
         case .ambiguousChatResolution:
             return "The chat identifier does not resolve unambiguously."
-        case .unsupportedChatType:
-            return "Messages does not expose this conversation for safe automation."
+        case .chatUnavailableInAutomation:
+            return
+                "The selected conversation is not currently available through Messages automation, so iMCP cannot safely address it. Nothing was sent. Opening or using that conversation in Messages and trying again may make it available."
         case .emptyBody:
             return "The message body must not be empty."
         case .confirmationDeclined:
@@ -106,6 +130,10 @@ struct AppleScriptMessagesSender: MessagesSending {
     private static let chatNotFoundError = -10_001
     private static let chatAmbiguousError = -10_002
     private static let applicationUnavailableError = -600
+
+    /// The complete fixed script. Untrusted values only ever arrive as Apple Event
+    /// descriptors, never as interpolated source. `chatIsAddressable` is read-only:
+    /// it performs no participant, account, or history enumeration and no `send`.
     static let scriptSource = """
         on submitDirectMessage(recipientHandle, messageBody)
             tell application id "com.apple.MobileSMS"
@@ -114,6 +142,12 @@ struct AppleScriptMessagesSender: MessagesSending {
                 send messageBody to targetParticipant
             end tell
         end submitDirectMessage
+
+        on chatIsAddressable(chatGUID)
+            tell application id "com.apple.MobileSMS"
+                return (exists chat id chatGUID)
+            end tell
+        end chatIsAddressable
 
         on submitChatMessage(chatGUID, messageBody)
             tell application id "com.apple.MobileSMS"
@@ -126,34 +160,90 @@ struct AppleScriptMessagesSender: MessagesSending {
         """
 
     @MainActor
+    func automationAuthorization() -> MessagesAutomationAuthorization {
+        switch Self.determinePermission(askUserIfNeeded: false) {
+        case noErr:
+            return .authorized
+        case OSStatus(errAEEventWouldRequireUserConsent):
+            return .consentRequired
+        case OSStatus(errAEEventNotPermitted):
+            return .denied
+        default:
+            // Messages not running, or any status this build does not recognize.
+            // Treat it as unknown so the caller keeps the conservative sequence.
+            return .unknown
+        }
+    }
+
+    @MainActor
+    func requestAutomationAuthorization() throws {
+        try Task.checkCancellation()
+        guard Self.determinePermission(askUserIfNeeded: true) == noErr else {
+            throw MessageSendError.automationDenied
+        }
+    }
+
+    @MainActor
+    func isChatAddressable(chatGUID: String) throws -> Bool {
+        try Task.checkCancellation()
+        // Never prompts. The send flow either establishes authority beforehand or
+        // skips this check entirely, so a harmless probe can never be the reason a
+        // permission prompt appears.
+        guard Self.determinePermission(askUserIfNeeded: false) == noErr else {
+            throw MessageSendError.automationDenied
+        }
+        let result = try execute(
+            handler: "chatIsAddressable",
+            arguments: [chatGUID],
+            isChatSend: false
+        )
+        return result.booleanValue
+    }
+
+    @MainActor
     func submit(recipient: String, body: String) throws {
-        try execute(handler: "submitDirectMessage", destination: recipient, body: body, isChat: false)
+        try Task.checkCancellation()
+        guard Self.determinePermission(askUserIfNeeded: true) == noErr else {
+            throw MessageSendError.automationDenied
+        }
+        _ = try execute(
+            handler: "submitDirectMessage",
+            arguments: [recipient, body],
+            isChatSend: false
+        )
     }
 
     @MainActor
     func submit(chatGUID: String, body: String) throws {
-        try execute(handler: "submitChatMessage", destination: chatGUID, body: body, isChat: true)
+        try Task.checkCancellation()
+        guard Self.determinePermission(askUserIfNeeded: true) == noErr else {
+            throw MessageSendError.automationDenied
+        }
+        _ = try execute(
+            handler: "submitChatMessage",
+            arguments: [chatGUID, body],
+            isChatSend: true
+        )
     }
 
     @MainActor
-    private func execute(
-        handler: String,
-        destination: String,
-        body: String,
-        isChat: Bool
-    ) throws {
-        try Task.checkCancellation()
+    private static func determinePermission(askUserIfNeeded: Bool) -> OSStatus {
         let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.MobileSMS")
-        let permission = AEDeterminePermissionToAutomateTarget(
+        return AEDeterminePermissionToAutomateTarget(
             target.aeDesc,
             AEEventClass(kCoreEventClass),
             AEEventID(kAEGetData),
-            true
+            askUserIfNeeded
         )
-        guard permission == noErr else {
-            throw MessageSendError.automationDenied
-        }
+    }
 
+    @MainActor
+    @discardableResult
+    private func execute(
+        handler: String,
+        arguments: [String],
+        isChatSend: Bool
+    ) throws -> NSAppleEventDescriptor {
         var compilationError: NSDictionary?
         guard let script = NSAppleScript(source: Self.scriptSource),
             script.compileAndReturnError(&compilationError)
@@ -172,19 +262,24 @@ struct AppleScriptMessagesSender: MessagesSending {
             NSAppleEventDescriptor(string: handler),
             forKeyword: AEKeyword(keyASSubroutineName)
         )
-        let arguments = NSAppleEventDescriptor.list()
-        arguments.insert(NSAppleEventDescriptor(string: destination), at: 1)
-        arguments.insert(NSAppleEventDescriptor(string: body), at: 2)
-        event.setParam(arguments, forKeyword: AEKeyword(keyDirectObject))
+        let parameters = NSAppleEventDescriptor.list()
+        for (offset, argument) in arguments.enumerated() {
+            parameters.insert(NSAppleEventDescriptor(string: argument), at: offset + 1)
+        }
+        event.setParam(parameters, forKeyword: AEKeyword(keyDirectObject))
 
         var executionError: NSDictionary?
-        _ = script.executeAppleEvent(event, error: &executionError)
+        let result = script.executeAppleEvent(event, error: &executionError)
         if let executionError {
             let code = executionError[NSAppleScript.errorNumber] as? Int
-            if isChat, code == Self.chatNotFoundError {
-                throw MessageSendError.unsupportedChatType
+            // Zero scripting matches means Messages is not currently exposing the
+            // conversation, which is an addressability limit rather than anything
+            // about its service type. This remains the last race defense even though
+            // the flow already checked addressability immediately beforehand.
+            if code == Self.chatNotFoundError {
+                throw MessageSendError.chatUnavailableInAutomation
             }
-            if isChat, code == Self.chatAmbiguousError {
+            if code == Self.chatAmbiguousError {
                 throw MessageSendError.ambiguousChatResolution
             }
             if code == Int(errAEEventNotPermitted) {
@@ -193,8 +288,10 @@ struct AppleScriptMessagesSender: MessagesSending {
             if code == Self.applicationUnavailableError {
                 throw MessageSendError.messagesUnavailable
             }
-            throw isChat ? MessageSendError.ambiguousSubmission : MessageSendError.automationFailed
+            throw isChatSend
+                ? MessageSendError.ambiguousSubmission : MessageSendError.automationFailed
         }
+        return result
     }
 }
 

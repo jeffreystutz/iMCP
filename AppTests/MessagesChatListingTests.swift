@@ -1254,7 +1254,25 @@ private final class RecordingChatRepository: MessagesChatListing, @unchecked Sen
 }
 
 private struct NonDispatchingSender: MessagesSending {
+    func automationAuthorization() -> MessagesAutomationAuthorization {
+        XCTFail("Conversation indexing must not consult Messages automation")
+        return .denied
+    }
+
+    func requestAutomationAuthorization() throws {
+        XCTFail("Conversation indexing must not request automation permission")
+    }
+
+    func isChatAddressable(chatGUID: String) throws -> Bool {
+        XCTFail("Conversation indexing must not send Apple Events")
+        return false
+    }
+
     func submit(recipient: String, body: String) throws {
+        XCTFail("Conversation indexing must not dispatch a message")
+    }
+
+    func submit(chatGUID: String, body: String) throws {
         XCTFail("Conversation indexing must not dispatch a message")
     }
 }

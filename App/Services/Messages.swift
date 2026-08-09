@@ -441,6 +441,29 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                 )
             }
 
+            // Messages exposes only a bounded, recency-biased subset of its
+            // conversations to automation, so a valid database conversation can be
+            // temporarily unaddressable. Establishing that before confirmation spares
+            // the user from authorizing a send that could not be dispatched. The probe
+            // is an Apple Event, so it runs only where it cannot cause a permission
+            // prompt: no TCC prompt may ever precede the final confirmation.
+            if let initialChat = preparedDestination.initialChat {
+                switch await self.sender.automationAuthorization() {
+                case .denied:
+                    throw MessageSendError.automationDenied
+                case .authorized:
+                    guard
+                        try await self.sender.isChatAddressable(chatGUID: initialChat.chatGuid)
+                    else {
+                        throw MessageSendError.chatUnavailableInAutomation
+                    }
+                case .consentRequired, .unknown:
+                    // Probing now could prompt. Addressability is verified after the
+                    // user authorizes the send instead.
+                    break
+                }
+            }
+
             // Every destination form requires its own final confirmation. The production
             // router always selects exactly one real presenter; no mode bypasses authorization.
             let confirmationPresentation: MessagesSendConfirmationPresentation
@@ -480,6 +503,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                     throw MessageSendError.staleChatIdentifier
                 }
                 try Task.checkCancellation()
+                try await self.authorizeAndVerifyAddressability(revalidatedChat.chatGuid)
                 try await self.sender.submit(
                     chatGUID: revalidatedChat.chatGuid,
                     body: input.body
@@ -498,6 +522,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
                     revalidatedChat == initial
                 else { throw MessageSendError.staleMatchedConversation }
                 try Task.checkCancellation()
+                try await self.authorizeAndVerifyAddressability(revalidatedChat.chatGuid)
                 try await self.sender.submit(chatGUID: revalidatedChat.chatGuid, body: input.body)
                 log.notice(
                     "Messages accepted one submission destination=\(initial.kind == .group ? "recipients" : "recipient", privacy: .public) resolution=unique path=existing-chat kind=\(initial.kind.rawValue, privacy: .public)"
@@ -569,6 +594,16 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         var isMatchedGroup: Bool {
             if case .matched(_, _, let initial) = self { return initial.kind == .group }
             return false
+        }
+
+        /// The existing conversation this send resolved to, when it resolved to one.
+        var initialChat: MessagesResolvedChatDestination? {
+            switch self {
+            case .rawRecipient:
+                return nil
+            case .explicitChat(_, let initial), .matched(_, _, let initial):
+                return initial
+            }
         }
     }
 
@@ -679,6 +714,20 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
             default:
                 throw MessageSendError.staleChatIdentifier
             }
+        }
+    }
+
+    /// Obtains Messages Automation authority, then reconfirms that Messages still
+    /// exposes this exact chat.
+    ///
+    /// Only the user's accepted confirmation may lead here, because this is the step
+    /// that can present the system Automation prompt. The pre-confirmation probe is
+    /// an optimization and reserves nothing: a conversation can leave the scripting
+    /// window at any moment, so this guard runs immediately before every dispatch.
+    private func authorizeAndVerifyAddressability(_ chatGUID: String) async throws {
+        try await sender.requestAutomationAuthorization()
+        guard try await sender.isChatAddressable(chatGUID: chatGUID) else {
+            throw MessageSendError.chatUnavailableInAutomation
         }
     }
 

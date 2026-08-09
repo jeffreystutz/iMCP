@@ -1111,6 +1111,351 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(staleChatCount, 0)
     }
 
+    // MARK: - Existing-chat automation addressability
+
+    func testAlreadyAuthorizedUnavailableChatSkipsConfirmationAndDispatch() async {
+        let sender = RecordingMessagesSender(authorization: .authorized, addressability: [false])
+        let repository = RecordingSendChatRepository(results: [.success(directChat)])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        await assertSendError(.chatUnavailableInAutomation) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+
+        XCTAssertEqual(requester.requestCount, 0, "unavailable chat still asked for authorization")
+        let probes = await sender.addressabilityCount
+        let authorizationRequests = await sender.authorizationRequestCount
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(probes, 1)
+        XCTAssertEqual(authorizationRequests, 0, "a failed pre-check must not request TCC")
+        XCTAssertEqual(chatSubmissions, 0)
+    }
+
+    func testAlreadyAuthorizedAvailableChatProceedsToConfirmationAndDispatch() async throws {
+        let sender = RecordingMessagesSender(authorization: .authorized)
+        let repository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(directChat),
+        ])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        _ = try await sendTool(sender: sender, chatRepository: repository)(
+            ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+            context: ToolCallContext(elicitation: requester)
+        )
+
+        XCTAssertEqual(requester.requestCount, 1)
+        let probes = await sender.addressabilityCount
+        let guids = await sender.addressabilityGUIDs
+        let chatSubmissions = await sender.chatSubmissionCount
+        // Once before confirmation, once immediately before dispatch.
+        XCTAssertEqual(probes, 2)
+        XCTAssertEqual(guids, ["synthetic-guid.example", "synthetic-guid.example"])
+        XCTAssertEqual(chatSubmissions, 1)
+    }
+
+    func testDeniedAutomationFailsClosedWithoutConfirmationOrPrompt() async {
+        let sender = RecordingMessagesSender(authorization: .denied)
+        let repository = RecordingSendChatRepository(results: [.success(directChat)])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        await assertSendError(.automationDenied) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+
+        XCTAssertEqual(requester.requestCount, 0)
+        let probes = await sender.addressabilityCount
+        let authorizationRequests = await sender.authorizationRequestCount
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(probes, 0)
+        XCTAssertEqual(authorizationRequests, 0)
+        XCTAssertEqual(chatSubmissions, 0)
+    }
+
+    func testConsentRequiredNeverAutomatesBeforeConfirmationAndPromptsAfterIt() async throws {
+        for status in [MessagesAutomationAuthorization.consentRequired, .unknown] {
+            let log = SendEventLog()
+            let sender = RecordingMessagesSender(authorization: status, eventLog: log)
+            let repository = RecordingSendChatRepository(results: [
+                .success(directChat), .success(directChat),
+            ])
+            let requester = StubElicitationRequester(result: confirmedResult, eventLog: log)
+
+            _ = try await sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+
+            // The status check itself cannot prompt. Nothing that can prompt, and no
+            // Apple Event at all, may precede the immutable confirmation.
+            XCTAssertEqual(
+                log.events,
+                [
+                    "automation-status",
+                    "elicitation",
+                    "automation-request",
+                    "addressability",
+                    "chat-submit",
+                ],
+                "TCC or addressability moved ahead of confirmation for \(status)"
+            )
+        }
+    }
+
+    func testConsentRequiredDeclineRequestsNoPermissionAndDispatchesZero() async {
+        let sender = RecordingMessagesSender(authorization: .consentRequired)
+        let repository = RecordingSendChatRepository(results: [.success(directChat)])
+        let requester = StubElicitationRequester(result: .init(action: .decline))
+
+        await assertSendError(.confirmationDeclined) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+
+        let authorizationRequests = await sender.authorizationRequestCount
+        let probes = await sender.addressabilityCount
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(authorizationRequests, 0)
+        XCTAssertEqual(probes, 0)
+        XCTAssertEqual(chatSubmissions, 0)
+    }
+
+    func testDeniedPermissionAfterConfirmationDispatchesZero() async {
+        let sender = RecordingMessagesSender(
+            authorization: .consentRequired,
+            authorizationError: MessageSendError.automationDenied
+        )
+        let repository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(directChat),
+        ])
+
+        await assertSendError(.automationDenied) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+
+        let authorizationRequests = await sender.authorizationRequestCount
+        let probes = await sender.addressabilityCount
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(authorizationRequests, 1)
+        XCTAssertEqual(probes, 0)
+        XCTAssertEqual(chatSubmissions, 0)
+    }
+
+    func testUnavailableAfterConfirmationDispatchesZeroAndIsNotRetried() async {
+        // Consent-required discovers unavailability only after TCC; the already-authorized
+        // case proves the early probe never authorizes or reserves the conversation.
+        let cases: [(MessagesAutomationAuthorization, [Bool], Int)] = [
+            (.consentRequired, [false], 1),
+            (.authorized, [true, false], 2),
+        ]
+        for (status, addressability, expectedProbes) in cases {
+            let sender = RecordingMessagesSender(
+                authorization: status,
+                addressability: addressability
+            )
+            let repository = RecordingSendChatRepository(results: [
+                .success(directChat), .success(directChat),
+            ])
+
+            await assertSendError(.chatUnavailableInAutomation) {
+                _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                    ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                    context: ToolCallContext(
+                        elicitation: StubElicitationRequester(result: self.confirmedResult)
+                    )
+                )
+            }
+
+            let probes = await sender.addressabilityCount
+            let chatSubmissions = await sender.chatSubmissionCount
+            let rawSubmissions = await sender.submissionCount
+            XCTAssertEqual(probes, expectedProbes)
+            XCTAssertEqual(chatSubmissions, 0)
+            XCTAssertEqual(rawSubmissions, 0, "an unaddressable chat must not change route")
+        }
+    }
+
+    func testStaleDestinationAfterConfirmationFailsBeforeAnyPermissionRequest() async {
+        let changed = MessagesResolvedChatDestination(
+            chatGuid: directChat.chatGuid,
+            displayName: directChat.displayName,
+            roomName: directChat.roomName,
+            kind: directChat.kind,
+            participantCount: 2,
+            participantHandles: directChat.participantHandles + ["changed@example.invalid"],
+            service: directChat.service
+        )
+        let sender = RecordingMessagesSender(authorization: .authorized)
+        let repository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(changed),
+        ])
+
+        await assertSendError(.staleChatIdentifier) {
+            _ = try await self.sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+
+        let authorizationRequests = await sender.authorizationRequestCount
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(authorizationRequests, 0, "stale destination must fail before TCC")
+        XCTAssertEqual(chatSubmissions, 0)
+    }
+
+    func testAddressabilityIsIndependentOfChatServiceType() async throws {
+        // Recent iMessage, SMS, and RCS conversations all resolve through the same
+        // public `chat` abstraction, so no branch may key on service.
+        for service in ["iMessage", "SMS", "RCS", "Unknown"] {
+            let chat = MessagesResolvedChatDestination(
+                chatGuid: "synthetic-guid.example",
+                displayName: "Synthetic Direct",
+                roomName: nil,
+                kind: .direct,
+                participantCount: 1,
+                participantHandles: ["recipient@example.invalid"],
+                service: service
+            )
+            let sender = RecordingMessagesSender(authorization: .authorized)
+            let repository = RecordingSendChatRepository(results: [
+                .success(chat), .success(chat),
+            ])
+            _ = try await sendTool(sender: sender, chatRepository: repository)(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: confirmedResult)
+                )
+            )
+            let chatSubmissions = await sender.chatSubmissionCount
+            XCTAssertEqual(chatSubmissions, 1, "service \(service) was treated differently")
+        }
+
+        let unavailableSender = RecordingMessagesSender(
+            authorization: .authorized,
+            addressability: [false]
+        )
+        let smsChat = MessagesResolvedChatDestination(
+            chatGuid: "synthetic-guid.example",
+            displayName: "Synthetic Direct",
+            roomName: nil,
+            kind: .direct,
+            participantCount: 1,
+            participantHandles: ["recipient@example.invalid"],
+            service: "SMS"
+        )
+        await assertSendError(.chatUnavailableInAutomation) {
+            _ = try await self.sendTool(
+                sender: unavailableSender,
+                chatRepository: RecordingSendChatRepository(results: [.success(smsChat)])
+            )(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+    }
+
+    func testMatchedRecipientAndGroupSendsAlsoVerifyAddressability() async throws {
+        for (chat, arguments) in [
+            (
+                directChat,
+                [
+                    "recipient": Value.string("recipient@example.invalid"),
+                    "body": .string("test-body"),
+                ]
+            ),
+            (
+                groupChat,
+                [
+                    "recipients": Value.array([
+                        .string("first@example.invalid"), .string("second@example.invalid"),
+                    ]),
+                    "body": .string("test-body"),
+                ]
+            ),
+        ] {
+            let sender = RecordingMessagesSender(authorization: .authorized)
+            let match = MessagesConversationMatch.unique(
+                publicChatID: "imcp-chat-v1_synthetic",
+                destination: chat
+            )
+            let repository = RecordingSendChatRepository(results: [], matches: [match, match])
+            _ = try await sendTool(sender: sender, chatRepository: repository)(
+                arguments,
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: confirmedResult)
+                )
+            )
+            let probes = await sender.addressabilityCount
+            let guids = await sender.addressabilityGUIDs
+            let chatSubmissions = await sender.chatSubmissionCount
+            XCTAssertEqual(probes, 2)
+            XCTAssertEqual(guids, [chat.chatGuid, chat.chatGuid])
+            XCTAssertEqual(chatSubmissions, 1)
+        }
+    }
+
+    func testAutomationAddressabilityErrorNamesTheRealConditionWithoutPrivateValues() throws {
+        let description = MessageSendError.chatUnavailableInAutomation.localizedDescription
+        XCTAssertTrue(description.contains("not currently available through Messages automation"))
+        XCTAssertTrue(description.contains("Nothing was sent."))
+        for leaked in [
+            "synthetic-guid.example", "recipient@example.invalid", "test-body", "SMS", "RCS",
+            "iMessage",
+        ] {
+            XCTAssertFalse(
+                description.contains(leaked),
+                "the addressability error must not expose \(leaked)"
+            )
+        }
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        for source in ["App/Services/MessagesSender.swift", "App/Services/Messages.swift"] {
+            let contents = try String(
+                contentsOf: root.appendingPathComponent(source),
+                encoding: .utf8
+            )
+            XCTAssertFalse(
+                contents.contains("unsupportedChatType"),
+                "\(source) still uses the misleading chat-type error name"
+            )
+        }
+    }
+
+    func testFixedScriptExposesAReadOnlyAddressabilityHandler() {
+        let source = AppleScriptMessagesSender.scriptSource
+        XCTAssertTrue(source.contains("on chatIsAddressable(chatGUID)"))
+        XCTAssertTrue(source.contains("exists chat id chatGUID"))
+        // The probe reads addressability and nothing else.
+        let handler = source.components(separatedBy: "on chatIsAddressable(chatGUID)")[1]
+            .components(separatedBy: "end chatIsAddressable")[0]
+        for forbidden in ["send", "participant", "account", "message", "delete", "set "] {
+            XCTAssertFalse(
+                handler.contains(forbidden),
+                "the addressability handler must not reference \(forbidden)"
+            )
+        }
+        // The zero-match guard remains the last race defense before dispatch.
+        XCTAssertTrue(source.contains("if (count of targetChats) is 0 then error"))
+    }
+
     private var directChat: MessagesResolvedChatDestination {
         MessagesResolvedChatDestination(
             chatGuid: "synthetic-guid.example",
@@ -1177,16 +1522,54 @@ private actor RecordingMessagesSender: MessagesSending {
     private(set) var lastRecipient: String?
     private(set) var lastChatGUID: String?
     private(set) var lastBody: String?
+    private(set) var authorizationStatusCount = 0
+    private(set) var authorizationRequestCount = 0
+    private(set) var addressabilityCount = 0
+    private(set) var addressabilityGUIDs: [String] = []
     private let error: Error?
+    private let authorization: MessagesAutomationAuthorization
+    private let authorizationError: Error?
+    private var addressability: [Bool]
+    private let eventLog: SendEventLog?
 
-    init(error: Error? = nil) {
+    init(
+        error: Error? = nil,
+        authorization: MessagesAutomationAuthorization = .consentRequired,
+        authorizationError: Error? = nil,
+        addressability: [Bool] = [],
+        eventLog: SendEventLog? = nil
+    ) {
         self.error = error
+        self.authorization = authorization
+        self.authorizationError = authorizationError
+        self.addressability = addressability
+        self.eventLog = eventLog
+    }
+
+    func automationAuthorization() -> MessagesAutomationAuthorization {
+        authorizationStatusCount += 1
+        eventLog?.record("automation-status")
+        return authorization
+    }
+
+    func requestAutomationAuthorization() throws {
+        authorizationRequestCount += 1
+        eventLog?.record("automation-request")
+        if let authorizationError { throw authorizationError }
+    }
+
+    func isChatAddressable(chatGUID: String) throws -> Bool {
+        addressabilityCount += 1
+        addressabilityGUIDs.append(chatGUID)
+        eventLog?.record("addressability")
+        return addressability.isEmpty ? true : addressability.removeFirst()
     }
 
     func submit(recipient: String, body: String) throws {
         submissionCount += 1
         lastRecipient = recipient
         lastBody = body
+        eventLog?.record("raw-submit")
         if let error { throw error }
     }
 
@@ -1194,7 +1577,21 @@ private actor RecordingMessagesSender: MessagesSending {
         chatSubmissionCount += 1
         lastChatGUID = chatGUID
         lastBody = body
+        eventLog?.record("chat-submit")
         if let error { throw error }
+    }
+}
+
+/// Orders events across the confirmation router and the automation adapter so tests
+/// can assert sequencing invariants, not just call counts.
+private final class SendEventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEvents: [String] = []
+
+    var events: [String] { lock.withLock { storedEvents } }
+
+    func record(_ event: String) {
+        lock.withLock { storedEvents.append(event) }
     }
 }
 
@@ -1260,6 +1657,7 @@ private final class StubElicitationRequester: ElicitationRequester, @unchecked S
     private var storedRequestCount = 0
     private var storedLastMessage = ""
     private var storedLastTitle: String?
+    private let eventLog: SendEventLog?
 
     let supportsFormElicitation: Bool
 
@@ -1267,22 +1665,29 @@ private final class StubElicitationRequester: ElicitationRequester, @unchecked S
     var lastMessage: String { lock.withLock { storedLastMessage } }
     var lastTitle: String? { lock.withLock { storedLastTitle } }
 
-    init(result: CreateElicitation.Result, supportsForm: Bool = true) {
+    init(
+        result: CreateElicitation.Result,
+        supportsForm: Bool = true,
+        eventLog: SendEventLog? = nil
+    ) {
         self.results = [result]
         self.error = nil
         self.supportsFormElicitation = supportsForm
+        self.eventLog = eventLog
     }
 
     init(results: [CreateElicitation.Result], supportsForm: Bool = true) {
         self.results = results
         self.error = nil
         self.supportsFormElicitation = supportsForm
+        self.eventLog = nil
     }
 
     init(error: Error, supportsForm: Bool = true) {
         self.results = []
         self.error = error
         self.supportsFormElicitation = supportsForm
+        self.eventLog = nil
     }
 
     func requestForm(
@@ -1295,6 +1700,7 @@ private final class StubElicitationRequester: ElicitationRequester, @unchecked S
             storedLastTitle = schema.title
             return results.isEmpty ? nil : results.removeFirst()
         }
+        eventLog?.record("elicitation")
         if let error { throw error }
         guard let result else { throw MessageSendError.inputMalformed }
         return result

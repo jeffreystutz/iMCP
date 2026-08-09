@@ -216,6 +216,43 @@ retries or falls back. Chat success returns only `status: submitted` and
 Actual route preservation and post-dispatch behavior remain manual-verification
 items because the experiment deliberately sent nothing.
 
+### Existing-chat automation addressability
+
+Those unexposed rows are an addressability limit, not a service-type limit.
+Messages publishes only a bounded, recency-biased subset of its conversations to
+scripting, and recent direct iMessage, SMS, and RCS chats all resolve through
+the same public `chat` class. No send path branches on service, and the observed
+window size is never encoded in production.
+
+The zero-match condition is reported as `chatUnavailableInAutomation`. Its text
+says the conversation is not currently available through Messages automation,
+adds a non-promissory hint to open or use it in Messages and retry, and exposes
+no GUID, handle, participant, display name, body, or internal service or account
+identifier.
+
+A read-only fixed handler evaluates `exists chat id <guid>` with the GUID passed
+as a descriptor. It performs no enumeration, no history read, no mutation, and
+no `send`, and it reuses the same actor-serialized script infrastructure as the
+existing chat send.
+
+Because that probe is still an Apple Event, its placement is governed by a
+non-prompting `AEDeterminePermissionToAutomateTarget` status check:
+
+- **already authorized** — probe before confirmation; an unavailable chat fails
+  with zero confirmation and zero dispatch, and an available one proceeds to the
+  immutable confirmation;
+- **denied** — fail closed immediately, with no confirmation and no second
+  permission attempt;
+- **consent required or unrecognized** — no early Apple Event at all, so the
+  conservative sequence is preserved and no permission prompt can precede the
+  confirmation.
+
+After an accepted confirmation the flow revalidates the database destination,
+requests Automation authority, reconfirms addressability for the exact chat, and
+only then dispatches once. The early probe reserves nothing, so this final guard
+is mandatory; the handler's own zero-match check remains the last race defense
+and maps to the same addressability error.
+
 Tool annotations are `readOnlyHint: false`, `destructiveHint: false`,
 `idempotentHint: false`, and `openWorldHint: true`.
 

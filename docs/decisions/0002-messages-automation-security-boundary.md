@@ -108,6 +108,32 @@ as descriptors to a fixed handler. The handler requires exactly one scripting
 chat whose public `id` equals that GUID before issuing its single send event.
 Never fall back to a recipient send.
 
+Messages exposes only a bounded, recency-biased subset of its conversations to
+scripting, so a valid existing conversation can be temporarily unaddressable.
+That is an automation-addressability limit, not a service-type limit: recent
+iMessage, SMS, and RCS conversations all resolve through the same public `chat`
+class, and no send path branches on service. The zero-match condition is
+therefore reported as `chatUnavailableInAutomation`, whose text names the real
+condition and exposes no GUID, handle, participant, display name, body, or
+internal service or account identifier. The observed window size is deliberately
+not encoded anywhere in production.
+
+A read-only `exists chat id <guid>` handler, taking the GUID as a descriptor and
+performing no enumeration, mutation, or `send`, checks addressability before
+confirmation so a user is not asked to authorize a send that cannot be
+dispatched. Because it is still an Apple Event, it runs before confirmation only
+when a non-prompting `AEDeterminePermissionToAutomateTarget` check reports
+Messages Automation is already authorized. A no-prompt report of denial fails
+closed immediately. Consent-required and unrecognized statuses skip the early
+probe entirely and preserve the conservative sequence, so no permission prompt
+can ever precede the confirmation.
+
+The probe is only an optimization; it authorizes and reserves nothing. After an
+accepted confirmation the flow revalidates the database destination, requests
+Automation authority, reconfirms that Messages still exposes the exact chat, and
+only then dispatches once. The handler's own zero-match guard remains the final
+race defense and maps to the same addressability error.
+
 Unique recipient and group-set matches are repeated immediately before
 dispatch. The public ID, classification, normalized participants, and safe
 confirmation metadata must remain unchanged. Revalidation failure never
@@ -184,10 +210,18 @@ only. Messages' scripting definition identifies `chat.id` as the chat GUID and
 permits `send` to a chat. The probe verified unique GUID lookup for recent
 direct iMessage/SMS/RCS conversations and iMessage groups; caller-visible chat
 identifiers and group IDs did not match scripting chat IDs. Some older SMS/RCS
-group database rows were not exposed through scripting and therefore remain
-unsupported rather than receiving a fallback. No route-preservation or
-post-dispatch claim is made until deliberately authorized manual sends are
-observed.
+group database rows were not exposed through scripting and therefore fail closed
+rather than receiving a fallback. No route-preservation or post-dispatch claim
+is made until deliberately authorized manual sends are observed.
+
+On 2026-08-08, a further signed sandboxed no-send investigation established that
+those unexposed rows reflect a recency-bounded scripting window rather than a
+service-type restriction; that recent direct iMessage, SMS, and RCS chats all
+resolve through the same public `chat` class, so no send path needs to branch on
+service; and that `exists chat id <guid>` agreed with the production
+`every chat whose id` lookup on every sampled conversation. Sample sizes and
+per-service counts stay in the trajectory record so they cannot harden into
+product constants.
 
 The app previously carried an Apple Events exception for Terminal, but no
 production source automates Terminal. Shortcuts invokes its command-line tool
