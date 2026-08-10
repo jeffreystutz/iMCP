@@ -209,11 +209,16 @@ database read.
 1. Call the contact-search operation once.
 2. Keep every returned contact unchanged and in the order the operation returned
    it. The composite selects no person.
-3. For each contact, read only the public `telephone` values followed by the
-   public `email` values, in their stored order, and normalize each with the same
-   rule `messages_find_conversations` applies. Values that are not already exact
-   Messages inputs are skipped, never repaired: no country code is inferred, no
-   local number is rewritten, no Contacts label is consulted. Repeats collapse to
+3. For each contact, read only the public `phoneNumbers[].e164` values —
+   Contacts' own already-normalized E.164 identities, produced under one
+   effective region (see [Contacts phone-number
+   normalization](#contacts-phone-number-normalization) below) — followed by
+   the public `email` values, in their stored order, and normalize each with
+   the same rule `messages_find_conversations` applies. A phone entry with no
+   `e164` contributes nothing; a malformed email is skipped. The composite
+   never reads the raw `telephone` field for identity purposes and never normalizes a
+   phone value itself: normalization already happened on the Contacts side,
+   and this step only consumes its already-public result. Repeats collapse to
    their first occurrence.
 4. Build one distinct handle list in contact order, then identity order.
 5. If that list is non-empty, call the conversation lookup exactly **once**, and
@@ -227,7 +232,8 @@ database read.
   when no contact published an exact identity, so Messages was never consulted.
   `null` means no lookup ran; it never means a lookup came back empty.
 - `results`: one entry per returned contact, in contact order, each carrying the
-  unchanged `contact` record and its `identities`.
+  unchanged flat `contact` record (the same Person-shaped object with additive
+  `phoneNumbers` that `contacts_search` returns) and its `identities`.
 - Each identity entry is the unchanged per-handle fact set described above:
   `handle`, `lookupCompleteness`, `truncated`, and `conversations`.
 
@@ -246,6 +252,35 @@ contacts publish. `messages_find_conversations` caps a client-supplied request a
 20 handles; the composite's list comes from the user's own contacts rather than
 from the client, and the underlying query count follows the size of the
 conversation index rather than the number of handles.
+
+## Contacts phone-number normalization
+
+`contacts_search` (and therefore `contacts_find_conversations`) additively
+exposes `phoneNumbers: [{ value, label, e164 }]` alongside the unchanged
+raw `telephone` values. `e164` is produced entirely on the Contacts
+side, under **one effective region**:
+
+- An already-international value (starting with `+`) parses independently of
+  region.
+- A local-format value parses under the effective region: an explicit iMCP
+  Settings override when configured, otherwise the Mac's live system region.
+  The region is read fresh on every search, never snapshotted, so a Settings
+  change or a system region change takes effect on the next search without
+  restarting anything. If the system reports no region and no override is set,
+  a local-format value publishes no identity rather than falling back to a
+  guessed country; explicit international values remain usable.
+- If a value cannot be parsed and validated under that one region, `e164` is
+  absent. No other region is ever tried, no digits are stripped-and-prefixed
+  by hand, and no country is guessed.
+
+Messages stays exact-only throughout: `MessagesHandleNormalization` and every
+Messages send/discovery path gain no country inference. The composite
+consumes only the already-public `phoneNumbers[].e164` fact (see step 3
+above) — it never re-derives an identity from raw `telephone` and never
+reads richer Contacts data (labels, `CNContact`, parser or region state)
+beyond what `phoneNumbers` already exposes. See [ADR
+0008](decisions/0008-contacts-phone-number-normalization.md) for the full
+design and rationale.
 
 ## Service enablement
 

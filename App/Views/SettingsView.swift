@@ -68,6 +68,8 @@ struct GeneralSettingsView: View {
     @ObservedObject var serverController: ServerController
     @AppStorage(MessagesSendConfirmationMode.storageKey)
     private var sendConfirmationMode = MessagesSendConfirmationMode.defaultValue.rawValue
+    @AppStorage(PhoneNumberRegionSetting.storageKey)
+    private var phoneNumberRegion = PhoneNumberRegionSetting.defaultValue.rawValue
     @State private var showingResetAlert = false
     @State private var selectedClients = Set<String>()
 
@@ -98,6 +100,29 @@ struct GeneralSettingsView: View {
 
                 Text(
                     "This setting does not apply to a recipient you have no conversation with. Those open a Messages compose window that you review, may edit, and send yourself."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Section("Phone Number Region") {
+                Picker(
+                    "Region",
+                    selection: Binding(
+                        get: { PhoneNumberRegionSetting.decode(phoneNumberRegion) },
+                        set: { phoneNumberRegion = $0.rawValue }
+                    )
+                ) {
+                    Text("System Region").tag(PhoneNumberRegionSetting.system)
+                    Divider()
+                    ForEach(PhoneNumberRegionCatalog.regionCodes, id: \.self) { regionCode in
+                        Text(PhoneNumberRegionCatalog.displayName(for: regionCode))
+                            .tag(PhoneNumberRegionSetting.override(regionCode))
+                    }
+                }
+
+                Text(
+                    "The region iMCP uses to interpret a locally formatted stored phone number as an exact identity. System Region follows the Mac's current region automatically. An already international number (starting with +) is unaffected by this setting."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)

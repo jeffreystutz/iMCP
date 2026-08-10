@@ -12,3 +12,4 @@ for this project.
 | [0005](0005-schema-resilient-messages-conversation-index.md) | Proposed | Discover schema capabilities and assemble bounded summary/full conversation metadata in stages. |
 | [0006](0006-new-recipient-system-composition.md) | Proposed | Compose to a recipient with no existing conversation in the system-owned Messages panel instead of a guessed iMessage participant. |
 | [0007](0007-reusable-search-operations-behind-mcp-adapters.md) | Proposed | Put contact and conversation search behind reusable operations with thin MCP adapters, and model conversation discovery as conversation evidence rather than send routing. |
+| [0008](0008-contacts-phone-number-normalization.md) | Proposed | Normalize Contacts phone numbers to E.164 via PhoneNumberKit under one live effective region, exposed as an additive public Contacts fact; Messages stays exact-only. |

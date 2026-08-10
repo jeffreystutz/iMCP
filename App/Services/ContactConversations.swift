@@ -8,7 +8,7 @@ import Ontology
 /// top: there is no rank, score, confidence, recommended person, chosen contact method,
 /// chosen conversation, destination, or transport.
 struct ContactConversations: Encodable, Equatable, Sendable {
-    let contact: Person
+    let contact: ContactRecord
     let identities: [MessagesHandleConversations]
 }
 
@@ -82,16 +82,18 @@ struct ContactConversationSearch {
     /// The exact Messages identities one contact publishes, phone values before email
     /// values, each in the order the contact record carries it.
     ///
-    /// Only the public `Person` fields are read, so this can never see richer contact data
-    /// than `contacts_search` returns: no Contacts labels, no `CNContact`. Only values
-    /// that are already exact Messages inputs survive. A locally formatted number or a
-    /// malformed address is dropped rather than repaired, because inferring a country code
-    /// or rewriting digits here would invent an identity the user never stored. Repeats
-    /// collapse to their first occurrence.
-    static func identities(of contact: Person) -> [String] {
+    /// Only the public `ContactRecord` fields are read, so this can never see richer
+    /// contact data than `contacts_search` returns: no `CNContact`, no parser state, no
+    /// region setting, no label beyond what `phoneNumbers` already carries. Phone identity
+    /// comes only from each entry's already-normalized `e164`, never from `person.telephone`
+    /// directly — normalizing a local number is a Contacts-side concern this composite does
+    /// not repeat. A phone value with no `e164` contributes nothing; a malformed email is
+    /// dropped rather than repaired. Repeats collapse to their first occurrence.
+    static func identities(of contact: ContactRecord) -> [String] {
         var identities: [String] = []
         var seen: Set<String> = []
-        for value in (contact.telephone ?? []) + (contact.email ?? []) {
+        let phoneValues = contact.phoneNumbers.compactMap(\.e164)
+        for value in phoneValues + (contact.person.email ?? []) {
             guard let identity = MessagesHandleNormalization.normalize(value) else { continue }
             if seen.insert(identity).inserted { identities.append(identity) }
         }

@@ -105,6 +105,60 @@ enum ContactSearchError: LocalizedError, Equatable, Sendable {
     }
 }
 
+/// One matching contact: the unchanged `Person` record plus the additive, per-value phone
+/// normalization facts.
+///
+/// `person.telephone` stays exactly what Contacts stored, unchanged, for backward
+/// compatibility. `phoneNumbers` is additive: the same raw values, each paired with its
+/// optional label and, when the effective region parses and validates it, its E.164
+/// identity. Nothing here is derived from richer Contacts data than these two fields
+/// expose — no label the composite could not also see, no parser state, no region.
+struct ContactRecord: Encodable, Equatable, Sendable {
+    let person: Person
+    let phoneNumbers: [ContactPhoneNumber]
+
+    private enum CodingKeys: String, CodingKey {
+        case context = "@context"
+        case type = "@type"
+        case id = "@id"
+        case givenName, familyName, email, telephone, address
+        case jobTitle, worksFor, url, birthDate, sameAs
+        case contactPoint, knowsLanguage
+        case spouse, children, siblings, parents, relatedTo
+        case phoneNumbers
+    }
+
+    /// Preserve `Person`'s public JSON-LD shape and add `phoneNumbers` as one sibling.
+    /// This keeps existing callers compatible while making normalization facts public.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        if encoder.codingPath.isEmpty {
+            try container.encode("https://schema.org", forKey: .context)
+        }
+        try container.encode(String(describing: Person.self), forKey: .type)
+        try container.encodeIfPresent(person.identifier, forKey: .id)
+        try container.encodeIfPresent(person.givenName, forKey: .givenName)
+        try container.encodeIfPresent(person.familyName, forKey: .familyName)
+        try container.encodeIfPresent(person.email, forKey: .email)
+        try container.encodeIfPresent(person.telephone, forKey: .telephone)
+        try container.encodeIfPresent(person.address, forKey: .address)
+        try container.encodeIfPresent(person.jobTitle, forKey: .jobTitle)
+        try container.encodeIfPresent(person.worksFor, forKey: .worksFor)
+        try container.encodeIfPresent(person.url, forKey: .url)
+        try container.encodeIfPresent(person.birthDate, forKey: .birthDate)
+        try container.encodeIfPresent(person.sameAs, forKey: .sameAs)
+        try container.encodeIfPresent(person.contactPoint, forKey: .contactPoint)
+        try container.encodeIfPresent(person.knowsLanguage, forKey: .knowsLanguage)
+        try container.encodeIfPresent(person.spouse, forKey: .spouse)
+        try container.encodeIfPresent(person.children, forKey: .children)
+        try container.encodeIfPresent(person.siblings, forKey: .siblings)
+        try container.encodeIfPresent(person.parents, forKey: .parents)
+        try container.encodeIfPresent(person.relatedTo, forKey: .relatedTo)
+        try container.encode(phoneNumbers, forKey: .phoneNumbers)
+    }
+}
+
 /// Contact discovery, separated from the MCP interface that exposes it.
 ///
 /// The operation answers only "which contacts match these criteria". It does not decide
@@ -112,7 +166,7 @@ enum ContactSearchError: LocalizedError, Equatable, Sendable {
 /// `contacts_search` tool returns, so a later composite reader cannot reason from richer
 /// hidden contact data than a client could obtain by calling that tool itself.
 protocol ContactSearching: Sendable {
-    func search(_ query: ContactSearchQuery) async throws -> [Person]
+    func search(_ query: ContactSearchQuery) async throws -> [ContactRecord]
 }
 
 /// Production contact search backed by the user's Contacts database.
@@ -122,9 +176,17 @@ protocol ContactSearching: Sendable {
 /// provides.
 struct CNContactStoreSearch: ContactSearching, @unchecked Sendable {
     private let store: CNContactStore
+    private let phoneNumberNormalizer: any PhoneNumberNormalizing
+    private let effectiveRegion: any EffectiveRegionProviding
 
-    init(store: CNContactStore = CNContactStore()) {
+    init(
+        store: CNContactStore = CNContactStore(),
+        phoneNumberNormalizer: any PhoneNumberNormalizing = PhoneNumberKitNormalizer.shared,
+        effectiveRegion: any EffectiveRegionProviding = SystemEffectiveRegionProvider()
+    ) {
         self.store = store
+        self.phoneNumberNormalizer = phoneNumberNormalizer
+        self.effectiveRegion = effectiveRegion
     }
 
     /// Builds the predicate for a query, or reports that no usable criterion was supplied.
@@ -165,13 +227,48 @@ struct CNContactStoreSearch: ContactSearching, @unchecked Sendable {
             : NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
     }
 
-    func search(_ query: ContactSearchQuery) async throws -> [Person] {
+    func search(_ query: ContactSearchQuery) async throws -> [ContactRecord] {
         let predicate = try Self.predicate(for: query)
         let store = self.store
         let contacts = try await Task(priority: .utility) {
             try store.unifiedContacts(matching: predicate, keysToFetch: contactKeys)
         }.value
-        return contacts.compactMap { Person($0) }
+
+        // Read the effective region once per search, not once per phone number, so every
+        // value in this result is interpreted under the same region even if the system
+        // region or the override changes mid-iteration.
+        let region = effectiveRegion.regionCode
+
+        return contacts.compactMap { contact in
+            guard let person = Person(contact) else { return nil }
+            let phoneNumbers = contact.phoneNumbers.map { labeled in
+                Self.phoneNumber(from: labeled, region: region, normalizer: phoneNumberNormalizer)
+            }
+            return ContactRecord(person: person, phoneNumbers: phoneNumbers)
+        }
+    }
+
+    /// Builds one additive phone fact from a stored labeled value.
+    ///
+    /// The raw value is read exactly as `Person.telephone` reads it, so the two stay in
+    /// step. The label is Contacts' own localized description of a standard label, or the
+    /// contact's own text for a custom one; a missing label safely becomes `nil` rather
+    /// than a crash or a logged value.
+    static func phoneNumber(
+        from labeled: CNLabeledValue<CNPhoneNumber>,
+        region: String?,
+        normalizer: any PhoneNumberNormalizing
+    ) -> ContactPhoneNumber {
+        let rawValue = labeled.value.stringValue
+        let label = labeled.label.flatMap { label -> String? in
+            let localized = CNLabeledValue<NSString>.localizedString(forLabel: label)
+            return localized.isEmpty ? nil : localized
+        }
+        return ContactPhoneNumber(
+            value: rawValue,
+            label: label,
+            e164: normalizer.e164(for: rawValue, region: region)
+        )
     }
 }
 
@@ -269,7 +366,7 @@ final class ContactsService: Service {
         Tool(
             name: "contacts_search",
             description:
-                "Search contacts by name, phone number, and/or email",
+                "Search contacts by name, phone number, and/or email. Each result's phoneNumbers additively pairs every stored phone value with its optional label and, when it parses and validates under the effective region, its normalized E.164 identity; the raw telephone values are unchanged.",
             inputSchema: .object(
                 properties: [
                     "name": .string(
@@ -300,7 +397,7 @@ final class ContactsService: Service {
         Tool(
             name: "contacts_find_conversations",
             description:
-                "Search contacts and return, for each matching contact, the existing Messages conversations that contact's own exact phone and email identities appear in. It uses the same reusable contact-search and Messages conversation-search semantics as the primitive tools, then joins those facts mechanically without adding interpretation. A client reproducing the same facts through messages_find_conversations may need to batch more than 20 exact identities across multiple calls. It selects no person, ranks nobody, scores nothing, chooses no contact method, conversation, or destination, and sends nothing. A stored contact value that is not already a strict E.164 phone number or a valid email address is skipped rather than rewritten, no country code is ever inferred, and a contact whose values are all unusable comes back with an empty identities list. Read each identity's lookupCompleteness before concluding it has no conversations. A null metadataAvailability means no contact had an exact identity, so Messages was never consulted; it never means a lookup came back empty. Requires both the Contacts and Messages services to be enabled.",
+                "Search contacts and return, for each matching contact, the existing Messages conversations that contact's own exact phone and email identities appear in. It uses the same reusable contact-search and Messages conversation-search semantics as the primitive tools, then joins those facts mechanically without adding interpretation. A client reproducing the same facts through messages_find_conversations may need to batch more than 20 exact identities across multiple calls. It selects no person, ranks nobody, scores nothing, chooses no contact method, conversation, or destination, and sends nothing. Each contact's phone identity comes from Contacts' own normalized E.164 value, produced under one effective region (an explicit Settings override, otherwise the current system region); a phone value that cannot be parsed and validated under that one region contributes no identity, and no other region is ever tried. A stored email address that is not syntactically valid is skipped. A contact whose values are all unusable comes back with an empty identities list. Read each identity's lookupCompleteness before concluding it has no conversations. A null metadataAvailability means no contact had an exact identity, so Messages was never consulted; it never means a lookup came back empty. Requires both the Contacts and Messages services to be enabled.",
             inputSchema: .object(
                 properties: [
                     "name": .string(

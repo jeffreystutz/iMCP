@@ -243,6 +243,16 @@ amp mcp add iMCP -- /Applications/iMCP.app/Contents/MacOS/imcp-server
 
 ## Technical Details
 
+### Contact phone identities
+
+Contact search keeps each stored `telephone` value unchanged and adds a
+`phoneNumbers` fact containing the raw value, optional Contacts label, and an
+E.164 identity when PhoneNumberKit can validate it. Local-format values use the
+region selected in General Settings (the live system region by default); invalid
+or unsupported values are skipped. This normalization happens only on the
+Contacts side. Messages discovery and sending remain exact-only and never infer
+a country or rewrite a destination.
+
 ### App & CLI
 
 iMCP is a macOS app that bundles a command-line executable, `imcp-server`.

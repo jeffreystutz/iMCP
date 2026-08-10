@@ -84,7 +84,7 @@ final class ContactConversationSearchTests: XCTestCase {
             ("above range", Value.int(26)),
             ("not an integer", Value.string("10")),
         ] {
-            let searcher = StubContactSearcher(result: [person(name: "Synthetic Person")])
+            let searcher = StubContactSearcher(result: [contactRecord(name: "Synthetic Person")])
             let lookup = StubConversationLookup()
             let tool = try compositeTool(searcher: searcher, lookup: lookup)
 
@@ -104,7 +104,7 @@ final class ContactConversationSearchTests: XCTestCase {
     }
 
     func testAdapterPassesTheRequestedAndDefaultPerIdentityLimit() async throws {
-        let people = [person(name: "Synthetic One", telephone: ["+15550100001"])]
+        let people = [contactRecord(name: "Synthetic One", telephone: ["+15550100001"])]
 
         let requested = StubConversationLookup()
         _ = try await compositeTool(
@@ -130,7 +130,7 @@ final class ContactConversationSearchTests: XCTestCase {
     // MARK: - Identity extraction
 
     func testPhoneIdentitiesPrecedeEmailIdentitiesInStoredOrder() {
-        let contact = person(
+        let contact = contactRecord(
             name: "Synthetic One",
             telephone: ["+15550100002", "+15550100001"],
             email: ["second@example.invalid", "first@example.invalid"]
@@ -148,7 +148,7 @@ final class ContactConversationSearchTests: XCTestCase {
     }
 
     func testIdentitiesAreNormalizedAndDeduplicatedByFirstOccurrence() {
-        let contact = person(
+        let contact = contactRecord(
             name: "Synthetic One",
             telephone: ["+15550100001", " +15550100001 ", "+15550100002"],
             email: ["Person@Example.invalid", "person@example.invalid"]
@@ -161,7 +161,7 @@ final class ContactConversationSearchTests: XCTestCase {
     }
 
     func testUnusableStoredValuesAreSkippedRatherThanInferred() {
-        let contact = person(
+        let contact = contactRecord(
             name: "Synthetic One",
             telephone: ["(555) 010-0001", "555-0100", "5550100001", "+1 555 010 0001", ""],
             email: ["person@invalid", "not an email", "", "@example.invalid"]
@@ -171,16 +171,54 @@ final class ContactConversationSearchTests: XCTestCase {
     }
 
     func testAContactWithNoStoredValuesYieldsNoIdentities() {
-        XCTAssertEqual(ContactConversationSearch.identities(of: person(name: "Synthetic One")), [])
+        XCTAssertEqual(
+            ContactConversationSearch.identities(of: contactRecord(name: "Synthetic One")),
+            []
+        )
+    }
+
+    func testTheCompositeNeverFallsBackToRawTelephoneWhenNoE164WasPublished() {
+        // The raw value looks perfectly valid, but the additive fact says Contacts could not
+        // normalize it (as if the effective region rejected it). The composite must trust
+        // that and not repeat normalization against the raw value itself.
+        let contact = ContactRecord(
+            person: {
+                var person = Person(name: "Synthetic One")
+                person.telephone = ["+15550100001"]
+                return person
+            }(),
+            phoneNumbers: [ContactPhoneNumber(value: "+15550100001", label: nil, e164: nil)]
+        )
+
+        XCTAssertEqual(ContactConversationSearch.identities(of: contact), [])
+    }
+
+    func testPhoneIdentityComesFromTheAdditiveFactEvenWhenItDiffersFromTheRawValue() {
+        // A synthetic stand-in for what real Contacts-side normalization does: the raw
+        // stored value is a local format, and the additive fact carries the E.164 result a
+        // region-aware normalizer produced for it. The composite must use that result
+        // rather than reading or reinterpreting the raw value.
+        let contact = ContactRecord(
+            person: {
+                var person = Person(name: "Synthetic One")
+                person.telephone = ["(202) 555-0123"]
+                return person
+            }(),
+            phoneNumbers: [
+                ContactPhoneNumber(value: "(202) 555-0123", label: "mobile", e164: "+12025550123")
+            ]
+        )
+
+        XCTAssertEqual(ContactConversationSearch.identities(of: contact), ["+12025550123"])
     }
 
     // MARK: - Mechanical join
 
     func testContactsAreReturnedUnchangedAndInOrder() async throws {
         let people = [
-            person(name: "Synthetic One", telephone: ["+15550100001"]),
-            person(name: "Synthetic Two", email: ["two@example.invalid"]),
-            person(name: "Synthetic Three"),
+            contactRecord(name: "Synthetic One", telephone: ["+15550100001"]),
+            contactRecord(name: "Synthetic Two", email: ["two@example.invalid"]),
+            contactRecord(name: "Synthetic Three"),
         ]
         let lookup = StubConversationLookup()
 
@@ -191,13 +229,13 @@ final class ContactConversationSearchTests: XCTestCase {
 
     func testOneConversationLookupCoversEveryContactAndIdentity() async throws {
         let people = [
-            person(
+            contactRecord(
                 name: "Synthetic One",
                 telephone: ["+15550100001", "+15550100002"],
                 email: ["one@example.invalid"]
             ),
-            person(name: "Synthetic Two", telephone: ["+15550100003"]),
-            person(name: "Synthetic Three", email: ["three@example.invalid"]),
+            contactRecord(name: "Synthetic Two", telephone: ["+15550100003"]),
+            contactRecord(name: "Synthetic Three", email: ["three@example.invalid"]),
         ]
         let lookup = StubConversationLookup()
 
@@ -219,8 +257,8 @@ final class ContactConversationSearchTests: XCTestCase {
     func testASharedIdentityIsLookedUpOnceAndReportedUnderEveryContact() async throws {
         let shared = "+15550100001"
         let people = [
-            person(name: "Synthetic One", telephone: [shared, "+15550100002"]),
-            person(name: "Synthetic Two", telephone: [shared]),
+            contactRecord(name: "Synthetic One", telephone: [shared, "+15550100002"]),
+            contactRecord(name: "Synthetic Two", telephone: [shared]),
         ]
         let lookup = StubConversationLookup(
             result: MessagesConversationSearchResult(
@@ -275,7 +313,7 @@ final class ContactConversationSearchTests: XCTestCase {
 
         let result = try await search(
             people: [
-                person(
+                contactRecord(
                     name: "Synthetic One",
                     telephone: ["+15550100001"],
                     email: ["one@example.invalid"]
@@ -300,8 +338,8 @@ final class ContactConversationSearchTests: XCTestCase {
 
     func testContactsWithoutExactIdentitiesSkipMessagesEntirely() async throws {
         let people = [
-            person(name: "Synthetic One", telephone: ["(555) 010-0001"]),
-            person(name: "Synthetic Two", email: ["person@invalid"]),
+            contactRecord(name: "Synthetic One", telephone: ["(555) 010-0001"]),
+            contactRecord(name: "Synthetic Two", email: ["person@invalid"]),
         ]
         let lookup = StubConversationLookup()
 
@@ -338,7 +376,7 @@ final class ContactConversationSearchTests: XCTestCase {
 
         do {
             _ = try await search(
-                people: [person(name: "Synthetic One", telephone: ["+15550100001"])],
+                people: [contactRecord(name: "Synthetic One", telephone: ["+15550100001"])],
                 lookup: lookup
             )
             XCTFail("A Messages failure should have propagated")
@@ -360,7 +398,7 @@ final class ContactConversationSearchTests: XCTestCase {
         do {
             _ = try await search(
                 people: [
-                    person(
+                    contactRecord(
                         name: "Synthetic One",
                         telephone: ["+15550100001"],
                         email: ["one@example.invalid"]
@@ -421,7 +459,7 @@ final class ContactConversationSearchTests: XCTestCase {
         )
         let tool = try compositeTool(
             searcher: StubContactSearcher(
-                result: [person(name: "Synthetic One", telephone: ["+15550100001"])]
+                result: [contactRecord(name: "Synthetic One", telephone: ["+15550100001"])]
             ),
             lookup: lookup
         )
@@ -436,7 +474,15 @@ final class ContactConversationSearchTests: XCTestCase {
         let results = try XCTUnwrap(root["results"]?.arrayValue)
         let entry = try XCTUnwrap(results[0].objectValue)
         XCTAssertEqual(Set(entry.keys), Set(["contact", "identities"]))
-        XCTAssertEqual(entry["contact"]?.objectValue?["givenName"]?.stringValue, "Synthetic")
+        let contact = try XCTUnwrap(entry["contact"]?.objectValue)
+        XCTAssertNil(contact["person"])
+        XCTAssertEqual(contact["@type"]?.stringValue, "Person")
+        XCTAssertEqual(contact["givenName"]?.stringValue, "Synthetic")
+        XCTAssertEqual(
+            contact["telephone"]?.arrayValue?.map(\.stringValue),
+            ["+15550100001"]
+        )
+        XCTAssertNotNil(contact["phoneNumbers"])
 
         let identity = try XCTUnwrap(entry["identities"]?.arrayValue?.first?.objectValue)
         XCTAssertEqual(
@@ -462,7 +508,7 @@ final class ContactConversationSearchTests: XCTestCase {
 
     func testAnAbsentLookupIsAnExplicitNullRatherThanAMissingKey() async throws {
         let tool = try compositeTool(
-            searcher: StubContactSearcher(result: [person(name: "Synthetic One")]),
+            searcher: StubContactSearcher(result: [contactRecord(name: "Synthetic One")]),
             lookup: StubConversationLookup()
         )
 
@@ -490,7 +536,7 @@ final class ContactConversationSearchTests: XCTestCase {
         let tool = try compositeTool(
             searcher: StubContactSearcher(
                 result: [
-                    person(
+                    contactRecord(
                         name: "Synthetic One",
                         telephone: ["+15550100001", "(555) 010-0009"],
                         email: ["person@example.invalid"]
@@ -558,7 +604,7 @@ final class ContactConversationSearchTests: XCTestCase {
 
     func testCompositeCannotBeCalledWhileEitherDependencyIsDisabled() async throws {
         let searcher = StubContactSearcher(
-            result: [person(name: "Synthetic One", telephone: ["+15550100001"])]
+            result: [contactRecord(name: "Synthetic One", telephone: ["+15550100001"])]
         )
         let lookup = StubConversationLookup()
         let contacts = compositeService(searcher: searcher, lookup: lookup)
@@ -609,7 +655,7 @@ final class ContactConversationSearchTests: XCTestCase {
     }
 
     func testDisablingMessagesLeavesEveryOtherContactsToolCallable() async throws {
-        let searcher = StubContactSearcher(result: [person(name: "Synthetic One")])
+        let searcher = StubContactSearcher(result: [contactRecord(name: "Synthetic One")])
         let contacts = compositeService(searcher: searcher, lookup: StubConversationLookup())
 
         let value = try await contacts.call(
@@ -639,9 +685,8 @@ final class ContactConversationSearchTests: XCTestCase {
         let contactSearch = try XCTUnwrap(tools.first { $0.name == "contacts_search" })
         XCTAssertEqual(contactSearch.annotations.title, "Search Contacts")
         XCTAssertEqual(contactSearch.annotations.readOnlyHint, true)
-        XCTAssertEqual(
-            contactSearch.description,
-            "Search contacts by name, phone number, and/or email"
+        XCTAssertTrue(
+            contactSearch.description.hasPrefix("Search contacts by name, phone number, and/or email")
         )
 
         let findConversations = try XCTUnwrap(
@@ -674,7 +719,7 @@ final class ContactConversationSearchTests: XCTestCase {
         let contacts = ContactsService(
             contactSearch: StubContactSearcher(
                 result: [
-                    person(
+                    contactRecord(
                         name: "Synthetic Person",
                         telephone: ["+15550100001"],
                         email: ["person@example.invalid"]
@@ -743,7 +788,7 @@ final class ContactConversationSearchTests: XCTestCase {
     // MARK: - Helpers
 
     private func search(
-        people: [Person],
+        people: [ContactRecord],
         lookup: StubConversationLookup,
         limitPerIdentity: Int = 10
     ) async throws -> ContactConversationSearchResult {
@@ -786,15 +831,33 @@ final class ContactConversationSearchTests: XCTestCase {
         ]
     }
 
-    private func person(
+    /// Builds a synthetic contact record. `telephone` values become additive phone facts
+    /// automatically: a value that is already strict E.164 gets that same value as its
+    /// `e164`, matching what a real region-aware normalizer would produce for a number
+    /// already in that form; anything else gets `e164: nil`, standing in for a value the
+    /// effective region could not parse and validate. Pass `phoneNumbers` explicitly
+    /// instead when a test needs a label or an E.164 result that does not match the raw
+    /// value verbatim.
+    private func contactRecord(
         name: String,
         telephone: [String]? = nil,
-        email: [String]? = nil
-    ) -> Person {
+        email: [String]? = nil,
+        phoneNumbers: [ContactPhoneNumber]? = nil
+    ) -> ContactRecord {
         var person = Person(name: name)
         person.telephone = telephone
         person.email = email
-        return person
+        let numbers =
+            phoneNumbers
+            ?? (telephone ?? []).map { value in
+                ContactPhoneNumber(
+                    value: value,
+                    label: nil,
+                    e164: messagesHandleIsE164(value.trimmingCharacters(in: .whitespacesAndNewlines))
+                        ? value : nil
+                )
+            }
+        return ContactRecord(person: person, phoneNumbers: numbers)
     }
 
     private func handleConversations(
@@ -843,17 +906,17 @@ private struct SyntheticSourceFailure: Error {}
 private final class StubContactSearcher: ContactSearching, @unchecked Sendable {
     private let lock = NSLock()
     private var storedQueries: [ContactSearchQuery] = []
-    private let result: [Person]
+    private let result: [ContactRecord]
     private let failure: (any Error)?
 
-    init(result: [Person] = [], failure: (any Error)? = nil) {
+    init(result: [ContactRecord] = [], failure: (any Error)? = nil) {
         self.result = result
         self.failure = failure
     }
 
     var queries: [ContactSearchQuery] { lock.withLock { storedQueries } }
 
-    func search(_ query: ContactSearchQuery) async throws -> [Person] {
+    func search(_ query: ContactSearchQuery) async throws -> [ContactRecord] {
         // The production operation rejects a criterion-free query before reaching
         // Contacts; the stub reproduces that so the composite observes the same behavior.
         _ = try CNContactStoreSearch.predicate(for: query)

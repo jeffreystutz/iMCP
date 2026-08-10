@@ -401,15 +401,23 @@ Each operation exposes exactly the facts its own tool returns. See
 ADR 0007 for the input, output, completeness, ordering, truncation, query-shape,
 and privacy semantics.
 
-`contacts_search` behavior is unchanged by that extraction: same inputs, same
-normalization, same AND combination, same empty-input rejection, same `[Person]`
-result, same authorization model. It still drops Contacts labels and emits phone
-values as stored rather than guaranteed E.164, which stays a separate
-Contacts-side question and is not a reason to infer country codes in Messages.
+`contacts_search` behavior is unchanged by that extraction for its inputs,
+normalization, AND combination, empty-input rejection, and authorization
+model. Its result shape gained one additive fact (ADR 0008): each returned
+record remains a flat `Person` object with `phoneNumbers` added as a sibling.
+The existing `telephone` field stays exactly the stored values, for backward
+compatibility, while `phoneNumbers` pairs each raw value with its Contacts label
+and, when it parses and validates under one effective region (an explicit
+Settings override, otherwise the live system region), its E.164 identity. A
+value that does not normalize contributes no `e164`. This stays a Contacts-side
+concern: Messages gains no country inference from it, and
+`MessagesHandleNormalization` and every Messages send/discovery path remain
+exact-only.
 
 `contacts_find_conversations` is the read-only convenience interface that
 literally composes the two reusable operations: contact search, extract the
-returned exact communication identities, one underlying Messages conversation
+returned exact communication identities from each contact's public
+`phoneNumbers[].e164` and `email` facts, one underlying Messages conversation
 lookup across them, and a mechanical join. A client reproducing the same
 primitive facts through public `messages_find_conversations` may need to batch
 more than 20 exact identities across multiple calls. The composite calls the

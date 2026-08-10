@@ -51,7 +51,10 @@ final class ContactSearchTests: XCTestCase {
 
     func testToolReturnsTheOperationsPeopleUnchanged() async throws {
         let searcher = RecordingContactSearcher(
-            result: [Person(name: "Synthetic Person"), Person(name: "Second Person")]
+            result: [
+                contactRecord(name: "Synthetic Person"),
+                contactRecord(name: "Second Person"),
+            ]
         )
         let tool = try searchTool(searcher: searcher)
 
@@ -60,10 +63,55 @@ final class ContactSearchTests: XCTestCase {
             context: ToolCallContext(elicitation: UnsupportedContactElicitation())
         )
 
-        let people = try XCTUnwrap(value.arrayValue)
-        XCTAssertEqual(people.count, 2)
-        XCTAssertEqual(people[0].objectValue?["givenName"]?.stringValue, "Synthetic")
-        XCTAssertEqual(people[1].objectValue?["familyName"]?.stringValue, "Person")
+        let records = try XCTUnwrap(value.arrayValue)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records[0].objectValue?["givenName"]?.stringValue, "Synthetic")
+        XCTAssertEqual(records[1].objectValue?["familyName"]?.stringValue, "Person")
+        XCTAssertNil(records[0].objectValue?["person"])
+    }
+
+    func testToolExposesTheAdditivePhoneFactAlongsideUnchangedRawTelephone() async throws {
+        // The raw stored value survives unchanged in `telephone`, and the additive
+        // `phoneNumbers` fact carries the same raw value plus its label and, only when the
+        // effective region parsed and validated it, its E.164 identity.
+        let record = ContactRecord(
+            person: {
+                var person = Person(name: "Synthetic Person")
+                person.telephone = ["(555) 010-0001", "+15550100002"]
+                return person
+            }(),
+            phoneNumbers: [
+                ContactPhoneNumber(value: "(555) 010-0001", label: "mobile", e164: nil),
+                ContactPhoneNumber(value: "+15550100002", label: nil, e164: "+15550100002"),
+            ]
+        )
+        let searcher = RecordingContactSearcher(result: [record])
+        let tool = try searchTool(searcher: searcher)
+
+        let value = try await tool(
+            ["name": .string("Synthetic")],
+            context: ToolCallContext(elicitation: UnsupportedContactElicitation())
+        )
+
+        let entry = try XCTUnwrap(value.arrayValue?.first?.objectValue)
+        XCTAssertNil(entry["person"])
+        XCTAssertEqual(entry["@type"]?.stringValue, "Person")
+        XCTAssertEqual(entry["givenName"]?.stringValue, "Synthetic")
+        XCTAssertNotNil(entry["phoneNumbers"])
+        XCTAssertEqual(
+            entry["telephone"]?.arrayValue?.map(\.stringValue),
+            ["(555) 010-0001", "+15550100002"]
+        )
+
+        let phoneNumbers = try XCTUnwrap(entry["phoneNumbers"]?.arrayValue)
+        XCTAssertEqual(phoneNumbers.count, 2)
+        XCTAssertEqual(phoneNumbers[0].objectValue?["value"]?.stringValue, "(555) 010-0001")
+        XCTAssertEqual(phoneNumbers[0].objectValue?["label"]?.stringValue, "mobile")
+        // A value that did not normalize omits `e164` entirely rather than a misleading key.
+        XCTAssertNil(phoneNumbers[0].objectValue?["e164"])
+        XCTAssertEqual(phoneNumbers[1].objectValue?["value"]?.stringValue, "+15550100002")
+        XCTAssertNil(phoneNumbers[1].objectValue?["label"])
+        XCTAssertEqual(phoneNumbers[1].objectValue?["e164"]?.stringValue, "+15550100002")
     }
 
     func testToolSurfacesTheOperationsFailure() async throws {
@@ -128,9 +176,9 @@ final class ContactSearchTests: XCTestCase {
     }
 
     func testTheOperationCanBeFakedWithoutTouchingContacts() async throws {
-        let searcher = RecordingContactSearcher(result: [Person(name: "Synthetic Person")])
-        let people = try await searcher.search(ContactSearchQuery(name: "Synthetic"))
-        XCTAssertEqual(people.count, 1)
+        let searcher = RecordingContactSearcher(result: [contactRecord(name: "Synthetic Person")])
+        let records = try await searcher.search(ContactSearchQuery(name: "Synthetic"))
+        XCTAssertEqual(records.count, 1)
         XCTAssertEqual(searcher.queries, [ContactSearchQuery(name: "Synthetic")])
     }
 
@@ -151,7 +199,7 @@ final class ContactSearchTests: XCTestCase {
         XCTAssertEqual(search.annotations.title, "Search Contacts")
         XCTAssertEqual(search.annotations.readOnlyHint, true)
         XCTAssertEqual(search.annotations.openWorldHint, false)
-        XCTAssertEqual(search.description, "Search contacts by name, phone number, and/or email")
+        XCTAssertTrue(search.description.hasPrefix("Search contacts by name, phone number, and/or email"))
 
         let schema = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: JSONEncoder().encode(search.inputSchema))
@@ -178,6 +226,12 @@ final class ContactSearchTests: XCTestCase {
             conversationSearchLog: { _ in }
         )
     }
+
+    /// A contact record with no phone values, for tests that only care about the unchanged
+    /// `Person` fields.
+    private func contactRecord(name: String) -> ContactRecord {
+        ContactRecord(person: Person(name: name), phoneNumbers: [])
+    }
 }
 
 private struct UnconsultedConversationLookup: MessagesConversationLookup {
@@ -193,13 +247,13 @@ private struct UnconsultedConversationLookup: MessagesConversationLookup {
 private final class RecordingContactSearcher: ContactSearching, @unchecked Sendable {
     private let lock = NSLock()
     private var storedQueries: [ContactSearchQuery] = []
-    private let result: [Person]
+    private let result: [ContactRecord]
 
-    init(result: [Person] = []) { self.result = result }
+    init(result: [ContactRecord] = []) { self.result = result }
 
     var queries: [ContactSearchQuery] { lock.withLock { storedQueries } }
 
-    func search(_ query: ContactSearchQuery) async throws -> [Person] {
+    func search(_ query: ContactSearchQuery) async throws -> [ContactRecord] {
         // The production operation rejects a criterion-free query before reaching Contacts;
         // the fake reproduces that so adapter tests observe the same behavior.
         _ = try CNContactStoreSearch.predicate(for: query)
