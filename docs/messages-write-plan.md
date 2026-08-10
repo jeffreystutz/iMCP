@@ -408,12 +408,16 @@ values as stored rather than guaranteed E.164, which stays a separate
 Contacts-side question and is not a reason to infer country codes in Messages.
 
 `contacts_find_conversations` is the read-only convenience interface that
-literally composes the two operations: contact search, extract the returned exact
-communication identities, one conversation search across them, and a mechanical
-join. It calls the operations directly rather than invoking MCP tools, and adds
-no person selection, contact-method selection, ranking, confidence, or send
-behavior. A contact with no exact identity means no lookup runs, and a failing or
-incomplete lookup fails the call rather than becoming an empty conversation list.
+literally composes the two reusable operations: contact search, extract the
+returned exact communication identities, one underlying Messages conversation
+lookup across them, and a mechanical join. A client reproducing the same
+primitive facts through public `messages_find_conversations` may need to batch
+more than 20 exact identities across multiple calls. The composite calls the
+operations directly rather than invoking MCP tools, and adds no person selection,
+contact-method selection, ranking, confidence, or send behavior. A contact with
+no exact identity means no lookup runs. A Messages source failure, or a lookup
+that omits a requested identity result, fails the call;
+`lookupCompleteness: incomplete` is valid and returned unchanged.
 
 Because it reads two independently enabled services, a tool may now name extra
 services it depends on. The server advertises and runs a tool only while every
