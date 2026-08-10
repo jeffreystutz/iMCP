@@ -46,17 +46,23 @@ and email identities the returned contacts already publish, calls the
 conversation lookup once across the distinct identities, and joins the answers
 back to every contact that carried each one.
 
-Its invariant is that it adds packaging, not interpretation: the same facts come
-back from calling both primitive tools and joining them outside the server. It
+Its invariant is that it adds packaging, not interpretation: the same primitive
+facts can be reproduced through the public tools and joined outside the server.
+Because `messages_find_conversations` accepts at most 20 handles per call, a
+client may need to batch identities across multiple calls to reproduce a wide
+composite result. It
 adds no rank, confidence, recommended person, contact-method selection,
 conversation selection, destination, or send behavior; it forwards the three
 contact criteria unchanged; and it skips a stored value that is not already an
 exact Messages input rather than inferring a country code or rewriting digits.
 
 A contact with no exact identity means no lookup runs at all: the contact comes
-back with an empty identity list and `metadataAvailability` is `null`. A failing
-or incomplete lookup fails the call. Neither is ever rendered as
-`conversations: []`, which would read as verified absence.
+back with an empty identity list and `metadataAvailability` is `null`. A Messages
+source failure, or a lookup that does not return a per-handle result for every
+requested identity, fails the call. A returned identity with
+`lookupCompleteness: incomplete` is valid and preserved unchanged. Unavailable
+evidence is never rendered as `conversations: []`, which would read as verified
+absence.
 
 The Messages seam the composite depends on, `MessagesConversationLookup`, is the
 service's complete lookup including its directory-scoped database access, not the
