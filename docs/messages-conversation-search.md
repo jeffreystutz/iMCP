@@ -49,7 +49,9 @@ duplicating Contacts predicates, or opening the Messages database a second way:
 
 Each operation exposes exactly the facts its public tool returns, so a composite
 built on them can never reason from richer hidden data than a client could
-obtain by calling the two tools itself. Every seam accepts fakes, so tests
+obtain through the public tools; a client may need multiple
+`messages_find_conversations` calls when more than 20 identities are involved.
+Every seam accepts fakes, so tests
 exercise them without a real `CNContactStore` or a real Messages database.
 
 `MessagesConversationSearching` searches a database path its caller already
@@ -180,10 +182,10 @@ partial answer.
 `contacts_find_conversations` is the one read-only convenience tool over the two
 primitives. It is literal by construction:
 
-> The composite returns the same facts you would get by calling
+> The composite returns the same primitive facts you would get by calling
 > `contacts_search`, taking the exact identities those contacts already publish,
-> calling `messages_find_conversations` once over them, and joining the two
-> results yourself.
+> calling `messages_find_conversations` over them in batches when necessary, and
+> joining the results yourself.
 
 It calls the reusable operations directly. It never invokes an MCP tool, never
 keeps a second set of Contacts predicates or Messages matching rules, and never
