@@ -50,8 +50,9 @@ Its invariant is that it adds packaging, not interpretation: the same primitive
 facts can be reproduced through the public tools and joined outside the server.
 Because `messages_find_conversations` accepts at most 20 handles per call, a
 client may need to batch identities across multiple calls to reproduce a wide
-composite result. It
-adds no rank, confidence, recommended person, contact-method selection,
+composite result.
+
+It adds no rank, confidence, recommended person, contact-method selection,
 conversation selection, destination, or send behavior; it forwards the three
 contact criteria unchanged; and it skips a stored value that is not already an
 exact Messages input rather than inferring a country code or rewriting digits.
