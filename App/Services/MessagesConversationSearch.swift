@@ -84,3 +84,17 @@ protocol MessagesConversationSearching: Sendable {
         databasePath: String
     ) throws -> MessagesConversationSearchResult
 }
+
+/// Conversation discovery including the Messages service's own read-only database access.
+///
+/// `MessagesConversationSearching` searches a database path its caller already resolved.
+/// This is the complete lookup, and it is what a cross-service reader depends on: it
+/// resolves the directory-scoped bookmark exactly as the Messages tools do and then runs
+/// that same search, so no second reader ever opens the Messages database its own way or
+/// acquires access the Messages service would not have acquired itself.
+protocol MessagesConversationLookup {
+    func findConversations(
+        handles: [String],
+        limitPerHandle: Int
+    ) async throws -> MessagesConversationSearchResult
+}

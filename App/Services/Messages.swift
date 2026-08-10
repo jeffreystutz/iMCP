@@ -22,8 +22,10 @@ private let maximumChatLimit = 100
 /// The per-handle bound applies independently to each supplied handle, so one very active
 /// candidate cannot consume another candidate's result budget.
 private let maximumConversationSearchHandles = 20
-private let defaultConversationsPerHandle = 10
-private let maximumConversationsPerHandle = 25
+/// Shared with the cross-service composite, which applies the same per-identity bound to
+/// the same operation.
+let defaultConversationsPerHandle = 10
+let maximumConversationsPerHandle = 25
 
 enum MessagesChatListingError: LocalizedError, Equatable, Sendable {
     case invalidLimit
@@ -69,7 +71,9 @@ enum MessagesConversationSearchError: LocalizedError, Equatable, Sendable {
     }
 }
 
-final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
+final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
+    MessagesConversationLookup
+{
     static let shared = MessageService()
 
     /// Options for persisting user-selected Messages locations across launches.
@@ -710,7 +714,13 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate {
         }
     }
 
-    private func findConversations(
+    /// The Messages service's complete conversation lookup, satisfying
+    /// `MessagesConversationLookup`.
+    ///
+    /// The `messages_find_conversations` adapter and the cross-service composite both come
+    /// through here, so both get the same database access, the same search, and the same
+    /// failures. Handles must already be normalized: this rewrites nothing.
+    func findConversations(
         handles: [String],
         limitPerHandle: Int
     ) async throws -> MessagesConversationSearchResult {

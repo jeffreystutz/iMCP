@@ -135,10 +135,16 @@ final class ContactSearchTests: XCTestCase {
     }
 
     func testContactsToolSurfaceIsUnchanged() throws {
-        let service = ContactsService(contactSearch: RecordingContactSearcher())
+        let service = contactsService(searcher: RecordingContactSearcher())
         XCTAssertEqual(
             service.tools.map(\.name),
-            ["contacts_me", "contacts_search", "contacts_update", "contacts_create"]
+            [
+                "contacts_me",
+                "contacts_search",
+                "contacts_find_conversations",
+                "contacts_update",
+                "contacts_create",
+            ]
         )
 
         let search = try XCTUnwrap(service.tools.first { $0.name == "contacts_search" })
@@ -159,8 +165,28 @@ final class ContactSearchTests: XCTestCase {
     }
 
     private func searchTool(searcher: any ContactSearching) throws -> iMCP.Tool {
-        let service = ContactsService(contactSearch: searcher)
+        let service = contactsService(searcher: searcher)
         return try XCTUnwrap(service.tools.first { $0.name == "contacts_search" })
+    }
+
+    /// A Contacts service whose Messages seam fails the test if anything reaches it, so
+    /// these tests also assert that `contacts_search` never consults Messages.
+    private func contactsService(searcher: any ContactSearching) -> ContactsService {
+        ContactsService(
+            contactSearch: searcher,
+            conversationLookup: UnconsultedConversationLookup(),
+            conversationSearchLog: { _ in }
+        )
+    }
+}
+
+private struct UnconsultedConversationLookup: MessagesConversationLookup {
+    func findConversations(
+        handles: [String],
+        limitPerHandle: Int
+    ) async throws -> MessagesConversationSearchResult {
+        XCTFail("Contact search must not look up conversations")
+        return MessagesConversationSearchResult(metadataAvailability: [:], results: [])
     }
 }
 

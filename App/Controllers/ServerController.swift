@@ -38,7 +38,7 @@ struct ServiceConfig: Identifiable {
         service: any Service,
         binding: Binding<Bool>
     ) {
-        self.id = String(describing: type(of: service))
+        self.id = service.serviceID
         self.name = name
         self.iconName = iconName
         self.color = color
@@ -148,6 +148,20 @@ enum ServiceRegistry {
             )
         #endif
         return configs
+    }
+
+    /// The tools a client may see, given which services are enabled.
+    ///
+    /// A service contributes its tools only while it is enabled, and a tool that also
+    /// reads another service's data appears only while that service is enabled too.
+    static func advertisedTools(
+        from services: [any Service],
+        enabled: EnabledServices
+    ) -> [Tool] {
+        services
+            .filter { enabled.contains($0.serviceID) }
+            .flatMap(\.tools)
+            .filter(enabled.allows)
     }
 }
 
@@ -665,6 +679,13 @@ actor ServerNetworkManager {
     private let services = ServiceRegistry.services
     private var serviceBindings: [String: Binding<Bool>] = [:]
 
+    /// The services the user currently has enabled, read on the actor for consistency.
+    private var enabledServices: EnabledServices {
+        EnabledServices(
+            Set(services.map(\.serviceID).filter { serviceBindings[$0]?.wrappedValue == true })
+        )
+    }
+
     init() {
         do {
             self.discoveryManager = try NetworkDiscoveryManager(
@@ -904,25 +925,20 @@ actor ServerNetworkManager {
 
             var tools: [MCP.Tool] = []
             if await self.isEnabledState {
-                for service in await self.services {
-                    let serviceId = String(describing: type(of: service))
-
-                    // Read binding on the actor for consistency.
-                    if let isServiceEnabled = await self.serviceBindings[serviceId]?.wrappedValue,
-                        isServiceEnabled
-                    {
-                        for tool in service.tools {
-                            log.debug("Adding tool: \(tool.name)")
-                            tools.append(
-                                .init(
-                                    name: tool.name,
-                                    description: tool.description,
-                                    inputSchema: try Value(tool.inputSchema),
-                                    annotations: tool.annotations
-                                )
-                            )
-                        }
-                    }
+                let advertised = ServiceRegistry.advertisedTools(
+                    from: await self.services,
+                    enabled: await self.enabledServices
+                )
+                for tool in advertised {
+                    log.debug("Adding tool: \(tool.name)")
+                    tools.append(
+                        .init(
+                            name: tool.name,
+                            description: tool.description,
+                            inputSchema: try Value(tool.inputSchema),
+                            annotations: tool.annotations
+                        )
+                    )
                 }
             }
 
@@ -954,19 +970,17 @@ actor ServerNetworkManager {
                 )
             }
 
+            // Read bindings on the actor for consistency.
+            let enabledServices = await self.enabledServices
             for service in await self.services {
-                let serviceId = String(describing: type(of: service))
-
-                // Read binding on the actor for consistency.
-                if let isServiceEnabled = await self.serviceBindings[serviceId]?.wrappedValue,
-                    isServiceEnabled
-                {
+                if enabledServices.contains(service.serviceID) {
                     do {
                         guard
                             let value = try await service.call(
                                 tool: params.name,
                                 with: params.arguments ?? [:],
-                                context: context
+                                context: context,
+                                enabledServices: enabledServices
                             )
                         else {
                             continue

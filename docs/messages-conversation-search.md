@@ -8,6 +8,10 @@
 It never reads message bodies or attachment names, never invokes Apple Events,
 never requests Contacts or Automation authority, and never sends anything.
 
+`contacts_find_conversations` is the read-only convenience tool over it and
+`contacts_search`, described in [Contact conversation
+composition](#contact-conversation-composition) below.
+
 ## Where it sits
 
 Four responsibilities stay separate:
@@ -40,11 +44,19 @@ duplicating Contacts predicates, or opening the Messages database a second way:
 | --- | --- | --- |
 | `ContactSearching` | `CNContactStoreSearch` | `contacts_search` |
 | `MessagesConversationSearching` | `SQLiteMessagesChatRepository` | `messages_find_conversations` |
+| `MessagesConversationLookup` | `MessageService` | — |
+| `ContactConversationSearch` | `ContactSearching` + `MessagesConversationLookup` | `contacts_find_conversations` |
 
 Each operation exposes exactly the facts its public tool returns, so a composite
 built on them can never reason from richer hidden data than a client could
-obtain by calling the two tools itself. Both seams accept fakes, so tests
+obtain by calling the two tools itself. Every seam accepts fakes, so tests
 exercise them without a real `CNContactStore` or a real Messages database.
+
+`MessagesConversationSearching` searches a database path its caller already
+resolved. `MessagesConversationLookup` is the complete lookup — resolve the
+directory-scoped bookmark, then run that same search — and it is what the
+composite depends on, so no second reader opens the Messages database its own
+way or acquires access the Messages service would not have acquired itself.
 
 ## Input
 
@@ -163,12 +175,102 @@ handle's lookup `incomplete`. The five-second query deadline and cancellation
 remain the global bound, and a timeout fails the call rather than returning a
 partial answer.
 
+## Contact conversation composition
+
+`contacts_find_conversations` is the one read-only convenience tool over the two
+primitives. It is literal by construction:
+
+> The composite returns the same facts you would get by calling
+> `contacts_search`, taking the exact identities those contacts already publish,
+> calling `messages_find_conversations` once over them, and joining the two
+> results yourself.
+
+It calls the reusable operations directly. It never invokes an MCP tool, never
+keeps a second set of Contacts predicates or Messages matching rules, and never
+reads richer contact data than `contacts_search` returns.
+
+### Input
+
+- `name`, `phone`, `email`: the same optional raw criteria as `contacts_search`,
+  forwarded unchanged. None is required by the schema; the contact-search
+  operation still rejects a query with no usable criterion, with the same
+  message it has always used.
+- `limit`: optional integer from 1 through 25, default 10, applied **per exact
+  identity** — it is the per-handle limit of the conversation search.
+
+The limit is the one input this adapter owns, and it is validated before either
+source is touched, so a malformed request never becomes a contact query or a
+database read.
+
+### Composition
+
+1. Call the contact-search operation once.
+2. Keep every returned contact unchanged and in the order the operation returned
+   it. The composite selects no person.
+3. For each contact, read only the public `telephone` values followed by the
+   public `email` values, in their stored order, and normalize each with the same
+   rule `messages_find_conversations` applies. Values that are not already exact
+   Messages inputs are skipped, never repaired: no country code is inferred, no
+   local number is rewritten, no Contacts label is consulted. Repeats collapse to
+   their first occurrence.
+4. Build one distinct handle list in contact order, then identity order.
+5. If that list is non-empty, call the conversation lookup exactly **once**, and
+   join each per-handle answer back to every contact that carried the identity.
+   An identity two contacts share is looked up once and reported under both;
+   contacts are never collapsed and one is never chosen over another.
+
+### Result
+
+- `metadataAvailability`: the conversation search's own dictionary, or `null`
+  when no contact published an exact identity, so Messages was never consulted.
+  `null` means no lookup ran; it never means a lookup came back empty.
+- `results`: one entry per returned contact, in contact order, each carrying the
+  unchanged `contact` record and its `identities`.
+- Each identity entry is the unchanged per-handle fact set described above:
+  `handle`, `lookupCompleteness`, `truncated`, and `conversations`.
+
+There is no rank, score, confidence, recommended person, chosen contact method,
+chosen conversation, destination, transport, send state, or authorization state.
+A contact whose stored values are all unusable comes back with an empty
+`identities` list, which says the contact publishes no exact identity — not that
+it has no conversations.
+
+If the conversation lookup fails, or answers for fewer identities than it was
+given, the whole call fails. Unavailable conversation evidence is never rendered
+as `conversations: []`, because that reads as verified absence.
+
+The lookup is bounded only by the number of exact identities the matching
+contacts publish. `messages_find_conversations` caps a client-supplied request at
+20 handles; the composite's list comes from the user's own contacts rather than
+from the client, and the underlying query count follows the size of the
+conversation index rather than the number of handles.
+
+## Service enablement
+
+The composite reads two independently enabled services, so it is advertised and
+callable only while **both** Contacts and Messages are enabled.
+
+The server gates each tool by its owning service. A tool may additionally name
+services it depends on through `requiredServiceIDs`, and the server requires
+every one of them before advertising or running it. `contacts_find_conversations`
+belongs to Contacts and names Messages, so enabling Contacts never becomes a way
+around a disabled Messages setting, and disabling Messages hides and disables the
+composite without affecting any other Contacts tool. Every other tool declares no
+dependency and is gated exactly as before.
+
+Disabling a dependency also stops a client that still holds an earlier tool
+listing: the call returns the same "tool not found or service not enabled"
+answer it would get for a tool whose own service is off, and nothing runs.
+
 ## Privacy
 
-The tool uses the existing read-only, directory-scoped Messages database access
-and adds no permission, entitlement, or TCC authority.
+Both tools use the existing read-only, directory-scoped Messages database access
+and add no permission, entitlement, or TCC authority.
 
-Production logging records only the number of requested handles, the number of
-returned conversations, elapsed time, stable stage names, and numeric SQLite
-codes. Handles, participants, chat identifiers, conversation names, and result
-objects are never logged, and no error message carries a private value.
+Production logging records only counts, elapsed time, stable stage names, and
+numeric SQLite codes: the number of requested handles and returned conversations
+for `messages_find_conversations`, and the number of contacts, identities, and
+conversations plus whether Messages was consulted for
+`contacts_find_conversations`. Names, stored contact values, handles,
+participants, chat identifiers, conversation names, and result objects are never
+logged, and no error message carries a private value.

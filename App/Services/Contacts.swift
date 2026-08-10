@@ -178,11 +178,24 @@ struct CNContactStoreSearch: ContactSearching, @unchecked Sendable {
 final class ContactsService: Service {
     private let contactStore = CNContactStore()
     private let contactSearch: any ContactSearching
+    private let conversationLookup: any MessagesConversationLookup
+    private let conversationSearchLog: @Sendable (ContactConversationSearchTelemetry) -> Void
 
     static let shared = ContactsService()
 
-    init(contactSearch: any ContactSearching = CNContactStoreSearch()) {
+    init(
+        contactSearch: any ContactSearching = CNContactStoreSearch(),
+        conversationLookup: any MessagesConversationLookup = MessageService.shared,
+        conversationSearchLog: @escaping @Sendable (ContactConversationSearchTelemetry) -> Void = {
+            facts in
+            log.notice(
+                "Joined contact conversations contacts=\(facts.contacts, privacy: .public) identities=\(facts.identities, privacy: .public) conversations=\(facts.conversations, privacy: .public) searchedMessages=\(facts.searchedMessages, privacy: .public)"
+            )
+        }
+    ) {
         self.contactSearch = contactSearch
+        self.conversationLookup = conversationLookup
+        self.conversationSearchLog = conversationSearchLog
     }
 
     private func runContactStore<T>(_ operation: @escaping () throws -> T) async throws -> T {
@@ -282,6 +295,66 @@ final class ContactsService: Service {
             if case let .string(phone) = arguments["phone"] { query.phone = phone }
             if case let .string(email) = arguments["email"] { query.email = email }
             return try await self.contactSearch.search(query)
+        }
+
+        Tool(
+            name: "contacts_find_conversations",
+            description:
+                "Search contacts and return, for each matching contact, the existing Messages conversations that contact's own exact phone and email identities appear in. This is exactly contacts_search followed by one messages_find_conversations call over the identities those contacts already publish, joined mechanically, so it returns the same facts you would get by calling both tools yourself. It selects no person, ranks nobody, scores nothing, chooses no contact method, conversation, or destination, and sends nothing. A stored contact value that is not already a strict E.164 phone number or a valid email address is skipped rather than rewritten, no country code is ever inferred, and a contact whose values are all unusable comes back with an empty identities list. Read each identity's lookupCompleteness before concluding it has no conversations. A null metadataAvailability means no contact had an exact identity, so Messages was never consulted; it never means a lookup came back empty. Requires both the Contacts and Messages services to be enabled.",
+            inputSchema: .object(
+                properties: [
+                    "name": .string(
+                        description: "Name to search for"
+                    ),
+                    "phone": .string(
+                        description: "Phone number to search for"
+                    ),
+                    "email": .string(
+                        description: "Email address to search for"
+                    ),
+                    "limit": .integer(
+                        description:
+                            "Maximum conversations returned for each exact contact identity, applied independently per identity",
+                        default: .int(defaultConversationsPerHandle),
+                        minimum: 1,
+                        maximum: maximumConversationsPerHandle
+                    ),
+                ],
+                additionalProperties: false
+            ),
+            annotations: .init(
+                title: "Find Contact Conversations",
+                readOnlyHint: true,
+                openWorldHint: false
+            ),
+            requiredServiceIDs: [MessageService.serviceID]
+        ) { arguments in
+            // The only input this adapter owns is checked before either source is touched,
+            // so a malformed request never becomes a contact query or a database read.
+            let limit: Int
+            if let value = arguments["limit"] {
+                guard let requestedLimit = value.intValue,
+                    (1 ... maximumConversationsPerHandle).contains(requestedLimit)
+                else { throw MessagesConversationSearchError.invalidLimit }
+                limit = requestedLimit
+            } else {
+                limit = defaultConversationsPerHandle
+            }
+
+            // The three criteria are read exactly as contacts_search reads them, so both
+            // tools resolve the same words to the same contacts. The search operation
+            // still rejects a query with no usable criterion.
+            var query = ContactSearchQuery()
+            if case let .string(name) = arguments["name"] { query.name = name }
+            if case let .string(phone) = arguments["phone"] { query.phone = phone }
+            if case let .string(email) = arguments["email"] { query.email = email }
+
+            let result = try await ContactConversationSearch(
+                contactSearch: self.contactSearch,
+                conversationLookup: self.conversationLookup
+            ).search(query, limitPerIdentity: limit)
+            self.conversationSearchLog(result.telemetry)
+            return result
         }
 
         Tool(

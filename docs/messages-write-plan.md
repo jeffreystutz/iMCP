@@ -15,8 +15,9 @@ same complete bounded-page scan.
 
 Contact search and conversation search now sit behind reusable domain operations
 with thin MCP adapters, and `messages_find_conversations` returns per-handle
-conversation evidence. The cross-service composite over those operations is
-designed but not implemented.
+conversation evidence. The literal cross-service composite over those operations,
+`contacts_find_conversations`, is implemented and is advertised and callable only
+while both the Contacts and Messages services are enabled.
 
 ## Verified baseline
 
@@ -406,12 +407,21 @@ result, same authorization model. It still drops Contacts labels and emits phone
 values as stored rather than guaranteed E.164, which stays a separate
 Contacts-side question and is not a reason to infer country codes in Messages.
 
-The remaining step is a read-only convenience interface that literally composes
-the two operations: contact search, extract the returned exact communication
-identities, one conversation search across them, and a mechanical join. It must
-call the operations directly rather than invoking MCP tools, and must add no
-person selection, contact-method selection, ranking, confidence, or send
-behavior. It is not implemented yet.
+`contacts_find_conversations` is the read-only convenience interface that
+literally composes the two operations: contact search, extract the returned exact
+communication identities, one conversation search across them, and a mechanical
+join. It calls the operations directly rather than invoking MCP tools, and adds
+no person selection, contact-method selection, ranking, confidence, or send
+behavior. A contact with no exact identity means no lookup runs, and a failing or
+incomplete lookup fails the call rather than becoming an empty conversation list.
+
+Because it reads two independently enabled services, a tool may now name extra
+services it depends on. The server advertises and runs a tool only while every
+service it reads is enabled, so enabling Contacts is not a way around a disabled
+Messages setting. Every other tool declares no dependency and is gated exactly as
+before.
+
+The remaining discovery question is the separate Contacts-side one below.
 
 ## Reference implementation
 
