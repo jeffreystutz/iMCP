@@ -50,7 +50,8 @@ duplicating Contacts predicates, or opening the Messages database a second way:
 Each operation exposes exactly the facts its public tool returns, so a composite
 built on them can never reason from richer hidden data than a client could
 obtain through the public tools; a client may need multiple
-`messages_find_conversations` calls when more than 20 identities are involved. Every seam accepts fakes, so tests
+`messages_find_conversations` calls when more than 20 identities are involved.
+Every seam accepts fakes, so tests
 exercise them without a real `CNContactStore` or a real Messages database.
 
 `MessagesConversationSearching` searches a database path its caller already
