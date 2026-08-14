@@ -167,8 +167,8 @@ private struct MenuButton: View {
                     isPressed = false
                 }
 
-                action()
                 isMenuPresented = false
+                action()
             }
         }
         .frame(height: 18)
