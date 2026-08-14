@@ -101,6 +101,7 @@ struct ContentView: View {
                 Divider()
 
                 MenuButton("Settings...", isMenuPresented: $isMenuPresented) {
+                    NSApp.keyWindow?.close()
                     openSettings()
                     NSApp.activate(ignoringOtherApps: true)
                 }
