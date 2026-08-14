@@ -14,19 +14,19 @@ struct ServiceToggleView: View {
     private let imagePadding: CGFloat = 5
 
     var body: some View {
-        HStack {
-            Button(action: {
-                config.binding.wrappedValue.toggle()
-                if config.binding.wrappedValue && !isServiceActivated {
-                    Task {
-                        do {
-                            try await config.service.activate()
-                        } catch {
-                            config.binding.wrappedValue = false
-                        }
+        Button(action: {
+            config.binding.wrappedValue.toggle()
+            if config.binding.wrappedValue && !isServiceActivated {
+                Task {
+                    do {
+                        try await config.service.activate()
+                    } catch {
+                        config.binding.wrappedValue = false
                     }
                 }
-            }) {
+            }
+        }) {
+            HStack {
                 Circle()
                     .fill(buttonBackgroundColor)
                     .overlay(
@@ -37,16 +37,17 @@ struct ServiceToggleView: View {
                             .padding(imagePadding)
                     )
                     .animation(.snappy, value: config.binding.wrappedValue || isEnabled)
-            }
-            .buttonStyle(PlainButtonStyle())
-            .disabled(!isEnabled)
-            .frame(width: buttonSize, height: buttonSize)
+                    .frame(width: buttonSize, height: buttonSize)
 
-            Text(config.name)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .foregroundColor(isEnabled ? Color.primary : .primary.opacity(0.5))
+                Text(config.name)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .foregroundColor(isEnabled ? Color.primary : .primary.opacity(0.5))
+            }
+            .frame(height: buttonSize)
+            .contentShape(Rectangle())
         }
-        .frame(height: buttonSize)
+        .buttonStyle(PlainButtonStyle())
+        .disabled(!isEnabled)
         .padding(.horizontal, 14)
         .task {
             isServiceActivated = await config.isActivated
