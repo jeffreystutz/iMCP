@@ -92,6 +92,8 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
     private let chatRepository: any MessagesChatListing
     private let conversationSearch: any MessagesConversationSearching
     private let sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting
+    private let attachmentSelector: any MessagesAttachmentSelecting
+    private let attachmentValidator: any MessagesAttachmentValidating
     private let chatDatabasePathOverride: String?
     private let chatListingLog: @Sendable (Int) -> Void
 
@@ -102,6 +104,10 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         conversationSearch: any MessagesConversationSearching = SQLiteMessagesChatRepository(),
         sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting =
             MessagesFinalSendConfirmationRequester(),
+        attachmentSelector: any MessagesAttachmentSelecting =
+            OpenPanelMessagesAttachmentSelector(),
+        attachmentValidator: any MessagesAttachmentValidating =
+            FileManagerMessagesAttachmentValidator(),
         chatDatabasePathOverride: String? = nil,
         chatListingLog: @escaping @Sendable (Int) -> Void = { count in
             log.notice("Listed \(count) Messages conversations")
@@ -112,6 +118,8 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         self.chatRepository = chatRepository
         self.conversationSearch = conversationSearch
         self.sendConfirmationRequester = sendConfirmationRequester
+        self.attachmentSelector = attachmentSelector
+        self.attachmentValidator = attachmentValidator
         self.chatDatabasePathOverride = chatDatabasePathOverride
         self.chatListingLog = chatListingLog
         super.init()
@@ -510,48 +518,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                 throw MessageSendError.emptyBody
             }
 
-            let preparedDestination: PreparedSendDestination
-            switch input.destination {
-            case .recipient(let recipient):
-                let participants = Set([MessagesHandleNormalization.normalize(recipient)!])
-                switch try await self.matchSendConversation(participants, kind: .direct) {
-                case .none:
-                    // Only a verified absence of any matching conversation reaches
-                    // system-owned composition. Unresolved membership is not evidence of
-                    // absence, and no failure of another route ever arrives here.
-                    preparedDestination = .newRecipient(recipient)
-                case .incomplete:
-                    throw MessageSendError.incompleteDirectMembership
-                case .ambiguous:
-                    throw MessageSendError.ambiguousDirectConversation
-                case .unique(let publicChatID, let destination):
-                    preparedDestination = .matched(
-                        publicChatID: publicChatID,
-                        expectedParticipants: participants,
-                        initial: destination
-                    )
-                }
-            case .recipients(let participants):
-                switch try await self.matchSendConversation(participants, kind: .group) {
-                case .none:
-                    throw MessageSendError.groupConversationNotFound
-                case .incomplete:
-                    throw MessageSendError.incompleteGroupMembership
-                case .ambiguous:
-                    throw MessageSendError.ambiguousGroupConversation
-                case .unique(let publicChatID, let destination):
-                    preparedDestination = .matched(
-                        publicChatID: publicChatID,
-                        expectedParticipants: participants,
-                        initial: destination
-                    )
-                }
-            case .chat(let chatID):
-                preparedDestination = .explicitChat(
-                    publicChatID: chatID,
-                    initial: try await self.resolveSendChat(chatID)
-                )
-            }
+            let preparedDestination = try await self.prepareDestination(input.destination)
 
             // A recipient with no existing conversation is composed, not submitted.
             // Authorization for this mode is the human's own review and Send action in
@@ -570,28 +537,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                 return MessageSendResult.userCompletedComposition
             }
 
-            // Messages exposes only a bounded, recency-biased subset of its
-            // conversations to automation, so a valid database conversation can be
-            // temporarily unaddressable. Establishing that before confirmation spares
-            // the user from authorizing a send that could not be dispatched. The probe
-            // is an Apple Event, so it runs only where it cannot cause a permission
-            // prompt: no TCC prompt may ever precede the final confirmation.
-            if let initialChat = preparedDestination.initialChat {
-                switch await self.sender.automationAuthorization() {
-                case .denied:
-                    throw MessageSendError.automationDenied
-                case .authorized:
-                    guard
-                        try await self.sender.isChatAddressable(chatGUID: initialChat.chatGuid)
-                    else {
-                        throw MessageSendError.chatUnavailableInAutomation
-                    }
-                case .consentRequired, .unknown:
-                    // Probing now could prompt. Addressability is verified after the
-                    // user authorizes the send instead.
-                    break
-                }
-            }
+            try await self.preflightAddressabilityIfAuthorized(preparedDestination)
 
             // Every existing-conversation form requires its own final confirmation. The
             // production router always selects exactly one real presenter; no mode
@@ -614,43 +560,272 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             )
 
             try Task.checkCancellation()
-            switch preparedDestination {
-            case .newRecipient:
-                // Already returned above; composition never reaches the send router.
-                throw MessageSendError.invalidDestination
-            case .explicitChat(let publicChatID, let initialChat):
-                let revalidatedChat = try await self.resolveSendChat(publicChatID)
-                guard revalidatedChat == initialChat else {
-                    throw MessageSendError.staleChatIdentifier
-                }
-                try Task.checkCancellation()
-                try await self.authorizeAndVerifyAddressability(revalidatedChat.chatGuid)
-                try await self.sender.submit(
-                    chatGUID: revalidatedChat.chatGuid,
-                    body: input.body
-                )
-                log.notice(
-                    "Messages accepted one submission destination=chat kind=\(revalidatedChat.kind.rawValue, privacy: .public)"
-                )
-                return MessageSendResult.submitted(service: "Messages")
-            case .matched(let publicChatID, let expectedParticipants, let initial):
-                let match = try await self.matchSendConversation(
-                    expectedParticipants,
-                    kind: initial.kind
-                )
-                guard case .unique(let revalidatedID, let revalidatedChat) = match,
-                    revalidatedID == publicChatID,
-                    revalidatedChat == initial
-                else { throw MessageSendError.staleMatchedConversation }
-                try Task.checkCancellation()
-                try await self.authorizeAndVerifyAddressability(revalidatedChat.chatGuid)
-                try await self.sender.submit(chatGUID: revalidatedChat.chatGuid, body: input.body)
-                log.notice(
-                    "Messages accepted one submission destination=\(initial.kind == .group ? "recipients" : "recipient", privacy: .public) resolution=unique path=existing-chat kind=\(initial.kind.rawValue, privacy: .public)"
-                )
-                return MessageSendResult.submitted(service: "Messages")
-            }
+            let revalidatedChat = try await self.revalidateDestination(preparedDestination)
+            try Task.checkCancellation()
+            try await self.authorizeAndVerifyAddressability(revalidatedChat.chatGuid)
+            try await self.sender.submit(
+                chatGUID: revalidatedChat.chatGuid,
+                body: input.body
+            )
+            log.notice(
+                "Messages accepted one submission \(preparedDestination.submissionLogFields, privacy: .public)"
+            )
+            return MessageSendResult.submitted(service: "Messages")
         }
+
+        Tool(
+            name: "messages_send_attachment",
+            description:
+                "Submit exactly one file as an attachment to one existing Messages conversation that you identify by recipient, recipients, or chat_id. This tool takes no file path, no file name, and no file contents: after the destination resolves, iMCP opens a native file picker on the user's Mac and the user chooses the file there, then confirms the exact conversation together with the file's name, type, and size. It sends no message text, so it cannot carry a caption or a body; send any accompanying text as its own messages_send call. The file must be one ordinary image, video or audio, PDF, or plain-text file of at most 25 MiB. Unlike messages_send, a recipient with no existing conversation fails instead of opening a compose window, and no new conversation or group is ever created. Cancelling the picker or the confirmation sends nothing. Success means Messages accepted one attachment submission, never that it was delivered.",
+            inputSchema: .object(
+                properties: [
+                    "recipient": .string(
+                        description:
+                            "One exact E.164 phone number or email address that must already have exactly one existing direct conversation. A recipient with no existing conversation, or an ambiguous or unresolvable match, fails without opening the picker and without sending."
+                    ),
+                    "recipients": .array(
+                        description:
+                            "The complete set of remote participants in an existing group conversation. This does not create a new group. The set must exactly match one existing group, or the call fails without sending.",
+                        items: .string(
+                            description: "One exact E.164 phone number or email address"
+                        ),
+                        minItems: 2
+                    ),
+                    "chat_id": .string(
+                        description:
+                            "Opaque chat ID returned by messages_list_chats that explicitly selects an existing direct or group conversation; preferred when the intended conversation is already known. Do not supply a database or scripting identifier.",
+                        minLength: 1
+                    ),
+                ],
+                additionalProperties: false
+            ),
+            annotations: .init(
+                title: "Send Messages Attachment",
+                readOnlyHint: false,
+                destructiveHint: false,
+                idempotentHint: false,
+                openWorldHint: true
+            )
+        ) { arguments, context in
+            // 1. The destination is resolved to one exact existing conversation before a
+            //    picker is ever presented. Nothing about the file is known yet, so a bad
+            //    destination costs the user no file selection.
+            let destination = try self.resolveAttachmentDestination(arguments)
+            let preparedDestination = try await self.prepareDestination(destination)
+
+            // A verified-new recipient is out of scope for attachments. It fails here,
+            // categorically, without reaching system composition: the sharing service
+            // cannot address a chosen existing conversation, so using it would silently
+            // change what the caller asked for.
+            if case .newRecipient = preparedDestination {
+                throw MessageSendError.attachmentRequiresExistingConversation
+            }
+
+            // 2. Same non-prompting preflight as a text submission. No TCC prompt may
+            //    precede the final confirmation.
+            try await self.preflightAddressabilityIfAuthorized(preparedDestination)
+            guard let initialChat = preparedDestination.initialChat else {
+                throw MessageSendError.invalidDestination
+            }
+
+            // 3. Only now is the picker presented, and the selection is validated against
+            //    the bounded file policy before the user is asked to authorize anything.
+            try Task.checkCancellation()
+            let selectedURL = try await self.attachmentSelector.selectAttachment()
+            // Read access is held from validation through the synchronous submission, so
+            // the facts that were authorized are the facts the Apple Event carries.
+            let access = MessagesAttachmentAccess(url: selectedURL)
+            defer { access.release() }
+            let facts = try self.attachmentValidator.validate(selectedURL)
+
+            // 4. One immutable confirmation naming the exact conversation and the file's
+            //    display name, public type, and size. Never its path or its contents.
+            try await self.sendConfirmationRequester.requestConfirmation(
+                MessagesSendConfirmationPresentation(
+                    title: "Confirm existing-chat attachment submission",
+                    message: self.attachmentConfirmationMessage(
+                        initialChat,
+                        attachment: facts,
+                        matchedFromParticipants: preparedDestination.isMatchedGroup
+                    )
+                ),
+                elicitation: context.elicitation
+            )
+
+            // 5. The destination must still be exactly the conversation that was shown.
+            try Task.checkCancellation()
+            let revalidatedChat = try await self.revalidateDestination(preparedDestination)
+
+            // 6. The file must still be the same file with the same bounded properties. A
+            //    file that was removed, replaced, modified, enlarged, or has become an
+            //    unsupported type fails here, with zero dispatch.
+            let revalidatedFacts = try self.attachmentValidator.validate(selectedURL)
+            guard revalidatedFacts == facts else {
+                throw MessagesAttachmentError.attachmentChanged
+            }
+
+            // 7. Automation authority is requested only now, after authorization, and
+            //    addressability is rechecked immediately before dispatch.
+            try Task.checkCancellation()
+            try await self.authorizeAndVerifyAddressability(revalidatedChat.chatGuid)
+
+            // 8. Exactly one dispatch. There is no retry, queue, alternate conversation,
+            //    sharing-service fallback, or second submission on any outcome.
+            try await self.sender.submitChatAttachment(
+                chatGUID: revalidatedChat.chatGuid,
+                attachmentFile: revalidatedFacts.url
+            )
+            log.notice(
+                "Messages accepted one attachment submission \(preparedDestination.submissionLogFields, privacy: .public)"
+            )
+            return MessageSendResult.attachmentSubmitted(service: "Messages")
+        }
+    }
+
+    /// Resolves one exact existing conversation, or the verified absence of one.
+    ///
+    /// Both send tools share this so that "which conversation is this" is answered
+    /// identically for text and for an attachment. Only the treatment of a verified-new
+    /// recipient differs, and that decision belongs to each tool.
+    private func prepareDestination(
+        _ destination: SendDestination
+    ) async throws -> PreparedSendDestination {
+        switch destination {
+        case .recipient(let recipient):
+            let participants = Set([MessagesHandleNormalization.normalize(recipient)!])
+            switch try await matchSendConversation(participants, kind: .direct) {
+            case .none:
+                // Only a verified absence of any matching conversation is reported as a
+                // new recipient. Unresolved membership is not evidence of absence, and no
+                // failure of another route ever arrives here.
+                return .newRecipient(recipient)
+            case .incomplete:
+                throw MessageSendError.incompleteDirectMembership
+            case .ambiguous:
+                throw MessageSendError.ambiguousDirectConversation
+            case .unique(let publicChatID, let destination):
+                return .matched(
+                    publicChatID: publicChatID,
+                    expectedParticipants: participants,
+                    initial: destination
+                )
+            }
+        case .recipients(let participants):
+            switch try await matchSendConversation(participants, kind: .group) {
+            case .none:
+                throw MessageSendError.groupConversationNotFound
+            case .incomplete:
+                throw MessageSendError.incompleteGroupMembership
+            case .ambiguous:
+                throw MessageSendError.ambiguousGroupConversation
+            case .unique(let publicChatID, let destination):
+                return .matched(
+                    publicChatID: publicChatID,
+                    expectedParticipants: participants,
+                    initial: destination
+                )
+            }
+        case .chat(let chatID):
+            return .explicitChat(
+                publicChatID: chatID,
+                initial: try await resolveSendChat(chatID)
+            )
+        }
+    }
+
+    /// Messages exposes only a bounded, recency-biased subset of its conversations to
+    /// automation, so a valid database conversation can be temporarily unaddressable.
+    /// Establishing that before confirmation spares the user from authorizing a
+    /// submission that could not be dispatched.
+    ///
+    /// The probe is an Apple Event, so it runs only where it cannot cause a permission
+    /// prompt: no TCC prompt may ever precede the final confirmation.
+    private func preflightAddressabilityIfAuthorized(
+        _ preparedDestination: PreparedSendDestination
+    ) async throws {
+        guard let initialChat = preparedDestination.initialChat else { return }
+        switch await sender.automationAuthorization() {
+        case .denied:
+            throw MessageSendError.automationDenied
+        case .authorized:
+            guard try await sender.isChatAddressable(chatGUID: initialChat.chatGuid) else {
+                throw MessageSendError.chatUnavailableInAutomation
+            }
+        case .consentRequired, .unknown:
+            // Probing now could prompt. Addressability is verified after the user
+            // authorizes the submission instead.
+            break
+        }
+    }
+
+    /// Re-resolves the confirmed destination and requires exact equality with what was
+    /// authorized. Anything else fails closed, before any permission request or dispatch.
+    private func revalidateDestination(
+        _ preparedDestination: PreparedSendDestination
+    ) async throws -> MessagesResolvedChatDestination {
+        switch preparedDestination {
+        case .newRecipient:
+            // Composition never reaches a dispatch router, and an attachment refuses this
+            // destination outright.
+            throw MessageSendError.invalidDestination
+        case .explicitChat(let publicChatID, let initialChat):
+            let revalidatedChat = try await resolveSendChat(publicChatID)
+            guard revalidatedChat == initialChat else {
+                throw MessageSendError.staleChatIdentifier
+            }
+            return revalidatedChat
+        case .matched(let publicChatID, let expectedParticipants, let initial):
+            let match = try await matchSendConversation(expectedParticipants, kind: initial.kind)
+            guard case .unique(let revalidatedID, let revalidatedChat) = match,
+                revalidatedID == publicChatID,
+                revalidatedChat == initial
+            else { throw MessageSendError.staleMatchedConversation }
+            return revalidatedChat
+        }
+    }
+
+    /// Validates the attachment tool's destination selectors.
+    ///
+    /// It accepts exactly the same mutually exclusive selectors as `messages_send`, and
+    /// deliberately accepts nothing else: there is no path, URL, file name, byte, body, or
+    /// attachment identifier in this tool's arguments.
+    private func resolveAttachmentDestination(
+        _ arguments: [String: Value]
+    ) throws -> SendDestination {
+        let recipient = arguments["recipient"]?.stringValue
+        let recipientsValue = arguments["recipients"]
+        let chatID = arguments["chat_id"]?.stringValue
+        let suppliedDestinationCount = [recipient != nil, recipientsValue != nil, chatID != nil]
+            .filter { $0 }.count
+        guard suppliedDestinationCount == 1 else {
+            throw MessageSendError.invalidDestination
+        }
+
+        if let recipient {
+            guard recipient.isExactMessageHandle else {
+                throw MessageSendError.invalidRecipient
+            }
+            return .recipient(recipient)
+        }
+        if let recipientsValue {
+            guard case .array(let values) = recipientsValue else {
+                throw MessageSendError.insufficientGroupParticipants
+            }
+            let handles = values.compactMap(\.stringValue)
+            guard handles.count == values.count else { throw MessageSendError.invalidRecipient }
+            let normalized = handles.compactMap(MessagesHandleNormalization.normalize)
+            guard normalized.count == handles.count else { throw MessageSendError.invalidRecipient }
+            let distinct = Set(normalized)
+            guard distinct.count >= 2 else {
+                throw MessageSendError.insufficientGroupParticipants
+            }
+            return .recipients(distinct)
+        }
+        guard let chatID else { throw MessageSendError.invalidDestination }
+        guard !chatID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw MessageSendError.invalidChatIdentifier
+        }
+        return .chat(chatID)
     }
 
     /// Runs one read-only conversation-database operation under the directory-scoped
@@ -760,6 +935,23 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                 return nil
             case .explicitChat(_, let initial), .matched(_, _, let initial):
                 return initial
+            }
+        }
+
+        /// Categorical fields describing how one accepted submission was addressed.
+        ///
+        /// Every component is a fixed keyword or an enumeration case. No handle,
+        /// participant set, chat identifier, body, or attachment fact appears here.
+        var submissionLogFields: String {
+            switch self {
+            case .newRecipient:
+                return "destination=none"
+            case .explicitChat(_, let initial):
+                return "destination=chat kind=\(initial.kind.rawValue)"
+            case .matched(_, _, let initial):
+                let selector = initial.kind == .group ? "recipients" : "recipient"
+                return
+                    "destination=\(selector) resolution=unique path=existing-chat kind=\(initial.kind.rawValue)"
             }
         }
     }
@@ -922,12 +1114,47 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         body: String,
         matchedFromParticipants: Bool = false
     ) -> String {
+        var lines = ["Submit this message to the existing Messages conversation?"]
+        lines.append(
+            contentsOf: destinationLines(chat, matchedFromParticipants: matchedFromParticipants)
+        )
+        lines.append("Message:")
+        lines.append(body)
+        return lines.joined(separator: "\n")
+    }
+
+    /// Builds the final authorization prompt for one attachment submission.
+    ///
+    /// It authorizes an attachment, not a message body, and says so: this call cannot
+    /// carry text. It shows the file's display name, public type description, and
+    /// formatted size, because those are what the user is authorizing. It never shows the
+    /// file's path or any of its contents, and none of these facts may reach a log,
+    /// diagnostic, error, or tool result.
+    private func attachmentConfirmationMessage(
+        _ chat: MessagesResolvedChatDestination,
+        attachment: MessagesAttachmentFacts,
+        matchedFromParticipants: Bool = false
+    ) -> String {
+        var lines = ["Submit this attachment to the existing Messages conversation?"]
+        lines.append(
+            contentsOf: destinationLines(chat, matchedFromParticipants: matchedFromParticipants)
+        )
+        lines.append("Attachment: \(attachment.displayName)")
+        lines.append("File type: \(attachment.typeDescription)")
+        lines.append("Size: \(attachment.formattedSize)")
+        lines.append("One file will be submitted as an attachment.")
+        lines.append("No message text will be sent with it.")
+        return lines.joined(separator: "\n")
+    }
+
+    /// The exact destination shown on every existing-conversation authorization surface.
+    private func destinationLines(
+        _ chat: MessagesResolvedChatDestination,
+        matchedFromParticipants: Bool
+    ) -> [String] {
         let fallback = chat.participantHandles.first ?? "Unnamed conversation"
         let name = chat.displayName ?? (chat.kind == .direct ? fallback : "Unnamed group")
-        var lines = [
-            "Submit this message to the existing Messages conversation?",
-            "Conversation: \(name)",
-        ]
+        var lines = ["Conversation: \(name)"]
         if let roomName = chat.roomName, roomName != name {
             lines.append("Room: \(roomName)")
         }
@@ -943,9 +1170,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         } else {
             lines.append("An existing conversation will be used.")
         }
-        lines.append("Message:")
-        lines.append(body)
-        return lines.joined(separator: "\n")
+        return lines
     }
 
     private var canAccessDatabaseAtDefaultPath: Bool {
@@ -1204,6 +1429,14 @@ private struct MessageSendResult: Encodable {
     /// Messages accepted one submission. This is never a delivery claim.
     static func submitted(service: String) -> MessageSendResult {
         MessageSendResult(status: "submitted", service: service, mode: nil)
+    }
+
+    /// Messages accepted one attachment submission.
+    ///
+    /// The mode names what was submitted, not what was in it: this carries no file name,
+    /// path, type, size, or contents, and no more of a delivery claim than `submitted`.
+    static func attachmentSubmitted(service: String) -> MessageSendResult {
+        MessageSendResult(status: "submitted", service: service, mode: "attachment")
     }
 
     /// The human completed the system Messages composition flow.

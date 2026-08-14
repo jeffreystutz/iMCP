@@ -594,7 +594,10 @@ final class ContactConversationSearchTests: XCTestCase {
         XCTAssertFalse(messagesOnly.map(\.name).contains("contacts_find_conversations"))
         XCTAssertEqual(
             messagesOnly.map(\.name),
-            ["messages_list_chats", "messages_find_conversations", "messages_fetch", "messages_send"]
+            [
+                "messages_list_chats", "messages_find_conversations", "messages_fetch",
+                "messages_send", "messages_send_attachment",
+            ]
         )
 
         XCTAssertTrue(
@@ -1009,6 +1012,10 @@ private struct NonSendingCompositeStub: MessagesSending {
 
     func submit(chatGUID: String, body: String) throws {
         XCTFail("Contact conversation discovery must not dispatch a message")
+    }
+
+    func submitChatAttachment(chatGUID: String, attachmentFile: URL) throws {
+        XCTFail("Contact conversation discovery must not dispatch an attachment")
     }
 }
 

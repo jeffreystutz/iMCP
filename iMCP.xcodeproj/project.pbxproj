@@ -15,6 +15,7 @@
 		H10400000000000000000001 /* ContactSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = H10200000000000000000001 /* ContactSearchTests.swift */; };
 		I10400000000000000000001 /* ContactConversationSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = I10200000000000000000001 /* ContactConversationSearchTests.swift */; };
 		62C8059CFE626C8EF604855A /* PhoneNumberNormalizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF205044804A2A6A872A6ABC /* PhoneNumberNormalizationTests.swift */; };
+		A1FA00000000000000000002 /* MessageAttachmentSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FA00000000000000000001 /* MessageAttachmentSendTests.swift */; };
 		D10400000000000000000001 /* MessagesBookmarkAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10200000000000000000001 /* MessagesBookmarkAccessTests.swift */; };
 		76F80A6E3EDBFB02048A6ED8 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0E66768348853754D32208C /* Cocoa.framework */; };
 		826C0834A5B647F8A918E54D /* ServiceLifecycle in Frameworks */ = {isa = PBXBuildFile; productRef = DCE061F8A68D0CD546D919E2 /* ServiceLifecycle */; };
@@ -80,6 +81,7 @@
 		H10200000000000000000001 /* ContactSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactSearchTests.swift; sourceTree = "<group>"; };
 		I10200000000000000000001 /* ContactConversationSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContactConversationSearchTests.swift; sourceTree = "<group>"; };
 		BF205044804A2A6A872A6ABC /* PhoneNumberNormalizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneNumberNormalizationTests.swift; sourceTree = "<group>"; };
+		A1FA00000000000000000001 /* MessageAttachmentSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageAttachmentSendTests.swift; sourceTree = "<group>"; };
 		D10200000000000000000001 /* MessagesBookmarkAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagesBookmarkAccessTests.swift; sourceTree = "<group>"; };
 		6A5CFBBEC66BC8CDA9D65496 /* imcp-serverTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "imcp-serverTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		75E148EAC5AC8B3263C5AA13 /* ServiceGroupConfigurationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ServiceGroupConfigurationTests.swift; sourceTree = "<group>"; };
@@ -185,6 +187,7 @@
 				H10200000000000000000001 /* ContactSearchTests.swift */,
 				I10200000000000000000001 /* ContactConversationSearchTests.swift */,
 				BF205044804A2A6A872A6ABC /* PhoneNumberNormalizationTests.swift */,
+				A1FA00000000000000000001 /* MessageAttachmentSendTests.swift */,
 			);
 			path = AppTests;
 			sourceTree = "<group>";
@@ -385,6 +388,7 @@
 				H10400000000000000000001 /* ContactSearchTests.swift in Sources */,
 				I10400000000000000000001 /* ContactConversationSearchTests.swift in Sources */,
 				62C8059CFE626C8EF604855A /* PhoneNumberNormalizationTests.swift in Sources */,
+				A1FA00000000000000000002 /* MessageAttachmentSendTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

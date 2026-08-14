@@ -661,6 +661,10 @@ private struct NonSendingStub: MessagesSending {
     func submit(chatGUID: String, body: String) throws {
         XCTFail("Conversation discovery must not dispatch a message")
     }
+
+    func submitChatAttachment(chatGUID: String, attachmentFile: URL) throws {
+        XCTFail("Conversation discovery must not dispatch an attachment")
+    }
 }
 
 private struct UnsupportedSearchElicitation: ElicitationRequester {

@@ -13,6 +13,10 @@ semantics over `MessagesHandleIdentity`: every requested identity must be presen
 additional conversation participants are allowed, and `kind` composes with the
 same complete bounded-page scan.
 
+Attachment submission to an existing conversation is implemented as the separate
+`messages_send_attachment` tool, with a native file picker instead of any
+path-bearing argument.
+
 Contact search and conversation search now sit behind reusable domain operations
 with thin MCP adapters, and `messages_find_conversations` returns per-handle
 conversation evidence. The literal cross-service composite over those operations,
@@ -434,6 +438,69 @@ Messages setting. Every other tool declares no dependency and is gated exactly a
 before.
 
 The remaining discovery question is the separate Contacts-side one below.
+
+## Attachment submission
+
+`messages_send_attachment` submits exactly one file to one exact **existing**
+conversation. It is a separate tool from `messages_send`, not an option on it.
+See Proposed ADR 0009 for the full decision.
+
+The separation is forced by the platform. The installed
+`/System/Applications/Messages.app/Contents/Resources/Messages.sdef` documents
+`send` with a single direct parameter typed as either `file` or `text`, so a file
+plus a caption would be two dispatches for one approval and would break the
+one-dispatch invariant. A caption is therefore its own `messages_send` call with
+its own confirmation.
+
+Scope of this slice:
+
+- exactly one attachment, no caption or body, no multiple files;
+- existing conversations only, addressed by `recipient`, `recipients`, or
+  `chat_id` — the same mutually exclusive selectors, resolution, ambiguity,
+  staleness, and addressability semantics as `messages_send`, sharing the same
+  code rather than a parallel implementation;
+- a recipient *verified* to have no existing conversation fails categorically; it
+  does not fall through to `NSSharingService`, which cannot address a chosen
+  existing chat. Verified-new-recipient attachment composition stays deferred.
+
+The tool accepts **no path, URL, filename, bytes, body, or attachment
+identifier**. After the destination resolves, iMCP presents a native single-file
+open panel; the human's selection there is what grants sandbox read access, so
+the private path never enters the MCP request, logs, errors, or results. The
+picker and validator sit behind `MessagesAttachmentSelecting` and
+`MessagesAttachmentValidating` and are injected into `MessageService`, so tests
+present no UI.
+
+File policy: exactly one ordinary, nonempty regular file of at most 25 MiB
+(26,214,400 bytes, inclusive), classified by public Uniform Type Identifier as
+image, audiovisual content, PDF, or plain text. Directories, packages, bundles,
+symbolic links, aliases, executables, unknown generic data, archives, disk
+images, and applications are rejected. Only in-memory facts are kept — URL,
+display name, byte size, content type, resource identifier, modification date —
+and **no attachment bookmark is persisted**. Security-scoped access is held from
+validation through the synchronous Apple Event and then released.
+
+Ordering is destination resolution, non-prompting addressability preflight only
+when Automation is already authorized, picker, validation, one immutable final
+confirmation, destination re-resolution requiring exact equality, file re-read
+requiring the same identity and unchanged bounded properties, Automation request
+and addressability recheck, then exactly one dispatch. A removed, replaced,
+modified, enlarged, or newly unsupported file fails with zero dispatch. Because
+`URL` caches resource values, the validator drops that cache before every read;
+otherwise the second read would replay the first one's answers and miss a swapped
+file entirely.
+
+The fixed script gains `submitChatAttachment(chatGUID, attachmentFile)`, which
+repeats the same zero/one/many exact-chat checks and issues one
+`send attachmentFile to item 1 of targetChats`. The chat GUID stays a string
+descriptor and the file is a typed `NSAppleEventDescriptor(fileURL:)`, never a
+path string; Apple Event arguments are now typed descriptors throughout.
+
+The confirmation shows the exact conversation plus the attachment's display name,
+public type description, and formatted size, and says that no message text is
+sent. It never shows the path or the contents. The result reuses the redacted
+submission status with `mode: attachment` and carries no file facts. Success means
+Messages accepted one attachment submission, never that it was delivered.
 
 ## Reference implementation
 

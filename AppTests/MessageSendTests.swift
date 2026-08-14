@@ -2198,6 +2198,13 @@ private actor RecordingMessagesSender: MessagesSending {
         eventLog?.record("chat-submit")
         if let error { throw error }
     }
+
+    /// A trap: `messages_send` submits text, so no plain-text send in this suite may
+    /// ever reach the attachment handler.
+    func submitChatAttachment(chatGUID: String, attachmentFile: URL) throws {
+        eventLog?.record("attachment-submit")
+        XCTFail("A plain-text send must never dispatch an attachment")
+    }
 }
 
 private actor RecordingMessagesComposer: MessagesNewRecipientComposing {

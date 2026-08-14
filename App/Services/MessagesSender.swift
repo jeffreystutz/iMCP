@@ -38,6 +38,14 @@ protocol MessagesSending: Sendable {
     func isChatAddressable(chatGUID: String) async throws -> Bool
 
     func submit(chatGUID: String, body: String) async throws
+
+    /// Submits one attachment to this exact chat.
+    ///
+    /// Messages accepts one direct parameter that is either a file or text, so an
+    /// attachment is its own submission rather than a file carried alongside a body.
+    /// The file travels as a typed file-URL Apple Event descriptor, never as a path
+    /// string and never as script source.
+    func submitChatAttachment(chatGUID: String, attachmentFile: URL) async throws
 }
 
 enum MessageSendError: LocalizedError, Sendable {
@@ -66,6 +74,7 @@ enum MessageSendError: LocalizedError, Sendable {
     case automationFailed
     case messagesUnavailable
     case ambiguousSubmission
+    case attachmentRequiresExistingConversation
 
     var errorDescription: String? {
         switch self {
@@ -121,6 +130,9 @@ enum MessageSendError: LocalizedError, Sendable {
             return "Messages is unavailable."
         case .ambiguousSubmission:
             return "Messages returned an uncertain result. The submission may have occurred."
+        case .attachmentRequiresExistingConversation:
+            return
+                "An attachment can only be submitted to an existing Messages conversation, and this recipient has none. Nothing was sent, and no compose window was opened. Send a message first, or select an existing conversation with chat_id."
         }
     }
 }
@@ -148,6 +160,15 @@ struct AppleScriptMessagesSender: MessagesSending {
                 send messageBody to item 1 of targetChats
             end tell
         end submitChatMessage
+
+        on submitChatAttachment(chatGUID, attachmentFile)
+            tell application id "com.apple.MobileSMS"
+                set targetChats to every chat whose id = chatGUID
+                if (count of targetChats) is 0 then error "Chat unavailable" number -10001
+                if (count of targetChats) is not 1 then error "Chat ambiguous" number -10002
+                send attachmentFile to item 1 of targetChats
+            end tell
+        end submitChatAttachment
         """
 
     @MainActor
@@ -185,7 +206,7 @@ struct AppleScriptMessagesSender: MessagesSending {
         }
         let result = try execute(
             handler: "chatIsAddressable",
-            arguments: [chatGUID],
+            arguments: [Self.textDescriptor(chatGUID)],
             isChatSend: false
         )
         return result.booleanValue
@@ -199,9 +220,36 @@ struct AppleScriptMessagesSender: MessagesSending {
         }
         _ = try execute(
             handler: "submitChatMessage",
-            arguments: [chatGUID, body],
+            arguments: [Self.textDescriptor(chatGUID), Self.textDescriptor(body)],
             isChatSend: true
         )
+    }
+
+    @MainActor
+    func submitChatAttachment(chatGUID: String, attachmentFile: URL) throws {
+        try Task.checkCancellation()
+        guard Self.determinePermission(askUserIfNeeded: true) == noErr else {
+            throw MessageSendError.automationDenied
+        }
+        _ = try execute(
+            handler: "submitChatAttachment",
+            arguments: [Self.textDescriptor(chatGUID), Self.fileDescriptor(attachmentFile)],
+            isChatSend: true
+        )
+    }
+
+    /// The chat GUID stays a plain text descriptor, exactly as the message path sends it.
+    static func textDescriptor(_ value: String) -> NSAppleEventDescriptor {
+        NSAppleEventDescriptor(string: value)
+    }
+
+    /// The attachment travels as a typed file-URL descriptor.
+    ///
+    /// Messages resolves the `file` direct parameter from the descriptor's own type. A
+    /// path handed over as text would be a string the script had to interpret, which is
+    /// precisely the class of input this architecture keeps out of AppleScript.
+    static func fileDescriptor(_ url: URL) -> NSAppleEventDescriptor {
+        NSAppleEventDescriptor(fileURL: url)
     }
 
     @MainActor
@@ -219,7 +267,7 @@ struct AppleScriptMessagesSender: MessagesSending {
     @discardableResult
     private func execute(
         handler: String,
-        arguments: [String],
+        arguments: [NSAppleEventDescriptor],
         isChatSend: Bool
     ) throws -> NSAppleEventDescriptor {
         var compilationError: NSDictionary?
@@ -242,7 +290,7 @@ struct AppleScriptMessagesSender: MessagesSending {
         )
         let parameters = NSAppleEventDescriptor.list()
         for (offset, argument) in arguments.enumerated() {
-            parameters.insert(NSAppleEventDescriptor(string: argument), at: offset + 1)
+            parameters.insert(argument, at: offset + 1)
         }
         event.setParam(parameters, forKeyword: AEKeyword(keyDirectObject))
 
