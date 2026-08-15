@@ -33,3 +33,6 @@ playground.xcworkspace
 
 # Release artifacts
 dist/
+
+# Local coding-agent session logs (see AGENTS.md)
+.codex-log/

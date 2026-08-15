@@ -353,7 +353,12 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
 
         Tool(
             name: "messages_fetch",
-            description: "Fetch messages from the Messages app",
+            description: """
+                Fetch existing messages from the Messages app. Read-only: this tool never sends, \
+                composes, or modifies anything. Optionally filter by participant handles (phone \
+                or email), a date range, and/or a content search term. Results are bounded by \
+                `limit` (default \(defaultLimit)) and returned newest-first.
+                """,
             inputSchema: .object(
                 properties: [
                     "participants": .array(
@@ -387,7 +392,9 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                 openWorldHint: false
             )
         ) { arguments in
-            log.debug("Starting message fetch with arguments: \(arguments)")
+            log.debug(
+                "Starting message fetch hasParticipants=\(arguments["participants"] != nil, privacy: .public) hasDateRange=\(arguments["start"] != nil && arguments["end"] != nil, privacy: .public) hasQuery=\(arguments["query"] != nil, privacy: .public)"
+            )
             try await self.activate()
 
             let participants =
@@ -424,11 +431,11 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             let db = try self.createDatabaseConnection()
             var messages: [[String: Value]] = []
 
-            log.debug("Fetching handles for participants: \(participants)")
+            log.debug("Fetching handles for participants=\(participants.count, privacy: .public)")
             let handles = try db.fetchParticipant(matching: participants)
 
             log.debug(
-                "Fetching messages with date range: \(String(describing: dateRange)), limit: \(limit ?? -1)"
+                "Fetching messages hasDateRange=\(dateRange != nil, privacy: .public) limit=\(limit ?? -1, privacy: .public)"
             )
             for message in try db.fetchMessages(
                 with: Set(handles),
