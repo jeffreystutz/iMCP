@@ -45,7 +45,7 @@ and a [growing list of clients][mcp-clients] that support the
       <img src="Assets/messages.svg" width="48" height="48" alt="" role="presentation"/>
     </th>
     <td><strong>Messages</strong></td>
-    <td>Access message history with specific participants within customizable date ranges, and send text or a single attachment to an existing conversation. Every send requires your explicit confirmation of the exact destination and content.</td>
+    <td>Access message history with specific participants within customizable date ranges. Submit text or a single attachment to an existing conversation after you confirm the exact destination and content, or open a Messages compose window for a new recipient that you review and send yourself.</td>
   </tr>
   <tr>
     <th>
@@ -304,21 +304,29 @@ and [blog post about reverse-engineering `typedstream`][typedstream-blog-post].
 
 ### Sending Messages
 
-iMCP can send a text message or a single attachment to an **existing**
-conversation, and can compose a new message to a recipient you don't already
-have a conversation with (which opens a Messages compose window instead of
-sending automatically). Sending uses Messages automation
-([Apple Events][apple-events]), so the first time you send you'll see a system
-prompt asking you to allow iMCP to control Messages.
+iMCP can send messages in two different ways, depending on whether you
+already have a conversation with the recipient.
 
-Every send — regardless of which tool triggered it — requires your explicit,
-one-time confirmation of the exact destination and exact content immediately
-before it's submitted. There is no setting or flag that bypasses this. iMCP
-reports messages as *submitted* to Messages, not as *delivered*.
+**To an existing conversation**, iMCP can submit a text message, or a single
+attachment, to a conversation you already have. Before anything is sent, you
+review an immutable confirmation showing the exact destination and — for
+text — the exact message body, or — for an attachment — the file's name,
+type, and size (never its path or contents). Only after you confirm does
+iMCP submit it, using Messages automation ([Apple Events][apple-events]); the
+first time this happens you'll see a system prompt asking you to allow iMCP
+to control Messages. There is no setting that bypasses this confirmation.
+iMCP reports messages as *submitted*, not as *delivered*.
 
-The following are not currently supported: creating new group chats, adding
-attachments when composing to a new recipient, reactions/tapbacks, inline
-replies, editing or unsending messages, and changing group membership.
+**To a recipient you don't already have a conversation with**, iMCP opens
+the system Messages compose window, seeded with the recipient and your
+message, for you to review, edit, and send yourself. Because you can still
+change what's sent there, iMCP does not — and cannot truthfully — confirm
+this route the way it confirms an existing conversation, and it does not use
+Apple Events automation for it. Attachments aren't supported on this route.
+
+The following are not currently supported: creating new group chats,
+reactions/tapbacks, inline replies, editing or unsending messages, and
+changing group membership.
 
 ### JSON-LD for Tool Results
 
