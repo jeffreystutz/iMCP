@@ -45,7 +45,7 @@ and a [growing list of clients][mcp-clients] that support the
       <img src="Assets/messages.svg" width="48" height="48" alt="" role="presentation"/>
     </th>
     <td><strong>Messages</strong></td>
-    <td>Access message history with specific participants within customizable date ranges. Submit text or a single attachment to an existing conversation after you confirm the exact destination and content, or open a Messages compose window for a new recipient that you review and send yourself.</td>
+    <td>Access message history with specific participants within customizable date ranges. Submit text or a single attachment to an existing conversation after you confirm the exact destination and either the message body or the file's details, or open a Messages compose window for a new recipient that you review and send yourself.</td>
   </tr>
   <tr>
     <th>
