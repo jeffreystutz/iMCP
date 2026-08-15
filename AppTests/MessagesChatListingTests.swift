@@ -1180,6 +1180,40 @@ final class MessagesChatListingTests: XCTestCase {
         XCTAssertEqual(sendSchema["required"] as? [String], ["body"])
     }
 
+    func testMessagesFetchLimitIsBoundedAndInvalidValuesAreRejected() throws {
+        let service = MessageService(
+            sender: NonDispatchingSender(),
+            chatRepository: RecordingChatRepository(),
+            chatDatabasePathOverride: "/synthetic/chat.db"
+        )
+        let fetch = try XCTUnwrap(service.tools.first { $0.name == "messages_fetch" })
+
+        let encoder = JSONEncoder()
+        let fetchSchema = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: encoder.encode(fetch.inputSchema)) as? [String: Any]
+        )
+        let properties = try XCTUnwrap(fetchSchema["properties"] as? [String: Any])
+        let limitSchema = try XCTUnwrap(properties["limit"] as? [String: Any])
+        let defaultValue = try XCTUnwrap(limitSchema["default"] as? Int)
+        let minimumValue = try XCTUnwrap(limitSchema["minimum"] as? Int)
+        let maximumValue = try XCTUnwrap(limitSchema["maximum"] as? Int)
+
+        // The database fetch always scans exactly this many rows, so a request cannot
+        // force an unbounded scan by asking for a larger limit than the schema allows.
+        XCTAssertEqual(maximumValue, 1024)
+
+        XCTAssertEqual(try resolveMessagesFetchLimit(nil), defaultValue)
+        XCTAssertEqual(try resolveMessagesFetchLimit(.int(minimumValue)), minimumValue)
+        XCTAssertEqual(try resolveMessagesFetchLimit(.int(maximumValue)), maximumValue)
+
+        for invalid in [0, -1, maximumValue + 1] {
+            do {
+                _ = try resolveMessagesFetchLimit(.int(invalid))
+                XCTFail("Expected messages_fetch limit \(invalid) to be rejected")
+            } catch MessagesFetchError.invalidLimit {}
+        }
+    }
+
     private func repository(
         timeout: TimeInterval = 5,
         filterPageSize: Int = SQLiteMessagesChatRepository.defaultFilterPageSize,

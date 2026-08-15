@@ -15,6 +15,11 @@ private let messagesDirectoryAccessUpgradeVersionKey: String =
 private let currentMessagesDirectoryAccessUpgradeVersion = 1
 private let defaultLimit = 30
 private let maximumChatLimit = 100
+/// Finite scan/result budget for `messages_fetch`. The database fetch always scans up
+/// to this many rows regardless of the requested limit, so the content-text filter has
+/// a fixed, bounded pool of candidates to search — this must stay a hard ceiling, not
+/// just a default, or a large requested limit could force an unbounded database scan.
+private let maximumFetchLimit = 1024
 /// Bounds for conversation discovery.
 ///
 /// The handle bound is sized for the fan-out of one contact search — a handful of candidate
@@ -45,6 +50,32 @@ enum MessagesChatListingError: LocalizedError, Equatable, Sendable {
             return "The participant filter must contain at least one usable participant identity."
         }
     }
+}
+
+enum MessagesFetchError: LocalizedError, Equatable, Sendable {
+    case invalidLimit
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidLimit:
+            return "The message limit must be an integer from 1 through \(maximumFetchLimit)."
+        }
+    }
+}
+
+/// Validates and resolves the `messages_fetch` `limit` argument.
+///
+/// Extracted from the tool closure so the bound can be exercised directly in tests
+/// without triggering Messages database activation, and so a malformed request is
+/// rejected before it can ever reach the database.
+func resolveMessagesFetchLimit(_ value: Value?) throws -> Int {
+    guard let value else { return defaultLimit }
+    guard let requestedLimit = value.intValue,
+        (1 ... maximumFetchLimit).contains(requestedLimit)
+    else {
+        throw MessagesFetchError.invalidLimit
+    }
+    return requestedLimit
 }
 
 /// Input failures for conversation discovery.
@@ -357,7 +388,8 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                 Fetch existing messages from the Messages app. Read-only: this tool never sends, \
                 composes, or modifies anything. Optionally filter by participant handles (phone \
                 or email), a date range, and/or a content search term. Results are bounded by \
-                `limit` (default \(defaultLimit)) and returned newest-first.
+                `limit` (default \(defaultLimit), maximum \(maximumFetchLimit)) and returned \
+                newest-first.
                 """,
             inputSchema: .object(
                 properties: [
@@ -381,7 +413,9 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                     ),
                     "limit": .integer(
                         description: "Maximum messages to return",
-                        default: .int(defaultLimit)
+                        default: .int(defaultLimit),
+                        minimum: 1,
+                        maximum: maximumFetchLimit
                     ),
                 ],
                 additionalProperties: false
@@ -395,6 +429,11 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             log.debug(
                 "Starting message fetch hasParticipants=\(arguments["participants"] != nil, privacy: .public) hasDateRange=\(arguments["start"] != nil && arguments["end"] != nil, privacy: .public) hasQuery=\(arguments["query"] != nil, privacy: .public)"
             )
+
+            // Every input is validated before the database is opened, so a malformed
+            // request never becomes a query.
+            let limit = try resolveMessagesFetchLimit(arguments["limit"])
+
             try await self.activate()
 
             let participants =
@@ -426,7 +465,6 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             }
 
             let searchTerm = arguments["query"]?.stringValue
-            let limit = arguments["limit"]?.intValue
 
             let db = try self.createDatabaseConnection()
             var messages: [[String: Value]] = []
@@ -435,14 +473,14 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             let handles = try db.fetchParticipant(matching: participants)
 
             log.debug(
-                "Fetching messages hasDateRange=\(dateRange != nil, privacy: .public) limit=\(limit ?? -1, privacy: .public)"
+                "Fetching messages hasDateRange=\(dateRange != nil, privacy: .public) limit=\(limit, privacy: .public)"
             )
             for message in try db.fetchMessages(
                 with: Set(handles),
                 in: dateRange,
-                limit: max(limit ?? defaultLimit, 1024)
+                limit: maximumFetchLimit
             ) {
-                guard messages.count < (limit ?? defaultLimit) else { break }
+                guard messages.count < limit else { break }
                 guard !message.text.isEmpty else { continue }
 
                 let sender: String
@@ -1274,7 +1312,10 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                 FileManager.default.isReadableFile(atPath: url.path)
             }
         } catch {
-            log.error("Error accessing database with bookmark: \(error.localizedDescription)")
+            let nsError = error as NSError
+            log.error(
+                "Error accessing database with bookmark domain=\(nsError.domain, privacy: .public) code=\(nsError.code, privacy: .public)"
+            )
             return false
         }
     }
@@ -1412,17 +1453,16 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             UserDefaults.standard.set(bookmarkData, forKey: messagesDatabaseBookmarkKey)
             log.debug("Successfully created and stored bookmark")
         } catch {
-            log.error("Failed to create bookmark: \(error.localizedDescription)")
+            let nsError = error as NSError
+            log.error(
+                "Failed to create bookmark domain=\(nsError.domain, privacy: .public) code=\(nsError.code, privacy: .public)"
+            )
         }
     }
 
     // NSOpenSavePanelDelegate method to constrain file selection
     func panel(_ sender: Any, shouldEnable url: URL) -> Bool {
-        let shouldEnable = url.lastPathComponent == "chat.db"
-        log.debug(
-            "File selection panel: \(shouldEnable ? "enabling" : "disabling") URL: \(url.path)"
-        )
-        return shouldEnable
+        url.lastPathComponent == "chat.db"
     }
 }
 
