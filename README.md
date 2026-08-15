@@ -45,7 +45,7 @@ and a [growing list of clients][mcp-clients] that support the
       <img src="Assets/messages.svg" width="48" height="48" alt="" role="presentation"/>
     </th>
     <td><strong>Messages</strong></td>
-    <td>Access message history with specific participants within customizable date ranges.</td>
+    <td>Access message history with specific participants within customizable date ranges, and send text or a single attachment to an existing conversation. Every send requires your explicit confirmation of the exact destination and content.</td>
   </tr>
   <tr>
     <th>
@@ -302,6 +302,24 @@ It includes a Swift implementation for decoding Apple's `typedstream` format,
 adapted from Christopher Sardegna's [imessage-exporter] project
 and [blog post about reverse-engineering `typedstream`][typedstream-blog-post].
 
+### Sending Messages
+
+iMCP can send a text message or a single attachment to an **existing**
+conversation, and can compose a new message to a recipient you don't already
+have a conversation with (which opens a Messages compose window instead of
+sending automatically). Sending uses Messages automation
+([Apple Events][apple-events]), so the first time you send you'll see a system
+prompt asking you to allow iMCP to control Messages.
+
+Every send — regardless of which tool triggered it — requires your explicit,
+one-time confirmation of the exact destination and exact content immediately
+before it's submitted. There is no setting or flag that bypasses this. iMCP
+reports messages as *submitted* to Messages, not as *delivered*.
+
+The following are not currently supported: creating new group chats, adding
+attachments when composing to a new recipient, reactions/tapbacks, inline
+replies, editing or unsending messages, and changing group membership.
+
 ### JSON-LD for Tool Results
 
 The tools provided by iMCP return results as
@@ -405,6 +423,7 @@ iMessage® is a registered trademark of Apple Inc.
 This project is not affiliated with, endorsed, or sponsored by Apple Inc.
 
 [amp]: https://ampcode.com
+[apple-events]: https://developer.apple.com/documentation/security/app-sandbox#Handle-app-communication-with-Apple-events
 [app-sandbox]: https://developer.apple.com/documentation/security/app-sandbox
 [bonjour]: https://developer.apple.com/bonjour/
 [claude-app]: https://claude.ai/download

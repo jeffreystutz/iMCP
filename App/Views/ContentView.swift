@@ -101,6 +101,11 @@ struct ContentView: View {
                 Divider()
 
                 MenuButton("Settings...", isMenuPresented: $isMenuPresented) {
+                    // Closing the key window directly (rather than only clearing
+                    // `isMenuPresented`) is required because MenuBarExtraAccess 1.2.1
+                    // reconciles `isMenuPresented` through a Scene-level `.onChange`,
+                    // which doesn't dismiss the panel synchronously. Re-verify this
+                    // dismissal manually if MenuBarExtraAccess is ever upgraded.
                     NSApp.keyWindow?.close()
                     openSettings()
                     NSApp.activate(ignoringOtherApps: true)
