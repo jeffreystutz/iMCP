@@ -2,10 +2,17 @@
 
 - Starting implementation SHA: `1822a44b3f40dbda7246ad2753978113aa235de3`
 - Final implementation SHA (four-category model, later rejected): `d6dc2ad`
-- Correction SHA (Settings copy + rationale, no behavior change): `5dd68a6` (actual pushed hash `7329f5e`, see note below)
-- Redesign implementation SHA (binary Sending mode, replacing the four-category model): `968b703`
-- Redesign documentation SHA (this update): `22486fa`
+- Correction commit (Settings copy + rationale, no behavior change): "fix: align automatic-send Settings copy and decision rationale"
+- Redesign implementation commit (binary Sending mode, replacing the four-category model): "checkpoint: simplify automatic sending settings"
+- Redesign documentation commit (this update): "docs: describe binary Sending mode redesign in plan and report"
 - Branch: `feat/messages-write-foundation`
+
+A commit's own hash cannot be embedded accurately in that same commit's
+content — amending to fill it in changes the hash again. Later revisions of
+this report therefore identify each commit by title rather than by a hash
+that would go stale the moment it was written; run
+`git log --oneline -- docs/project-reports/global-send-authorization-settings-2026-08-16.md`
+for the exact SHA of each revision.
 
 Between the start of this task and its push, `origin/feat/messages-write-foundation`
 advanced by one non-conflicting, docs-only commit

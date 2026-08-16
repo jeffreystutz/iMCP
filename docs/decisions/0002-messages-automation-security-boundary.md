@@ -17,9 +17,27 @@ user TCC consent.
 Message submission is externally visible and cannot safely be retried after an
 ambiguous result.
 
+**Amended by ADR 0010 (accepted).** This record's "confirmation for every
+submission, no opt-out" language was written before the product added an
+app-owned global Sending mode. ADR 0010 narrowly amends only that one claim:
+for existing-conversation submissions, an explicit user opt-in
+(**Send Automatically**) may bypass the final confirmation step described
+here, replacing it with the user's own persistent Settings choice as the
+authorization. Every other boundary this record establishes — the fixed
+in-process AppleScript handler, descriptor-only untrusted input, exact
+destination resolution and pre-dispatch revalidation, TCC/Automation
+authorization, one-dispatch/no-retry, privacy redaction, and
+submitted-not-delivered truthfulness — is unchanged and still fully in force
+in both modes. This ADR is not superseded; only the absolute-confirmation
+claim below is narrowed, and only for the operation class ADR 0010 covers.
+
 ## Decision drivers
 
-- Require explicit user confirmation for every submission, with no opt-out.
+- Require explicit user confirmation for every submission by default, with no
+  *caller-controlled* opt-out. (Amended by ADR 0010: an app-owned, user-set
+  Settings opt-in — never a caller-supplied argument, prompt, or elicitation
+  response — may replace this requirement for existing-conversation
+  submissions.)
 - Show the exact destination and exact body in that confirmation.
 - Keep Apple Events authority in the signed app rather than the CLI proxy.
 - Prevent script injection and duplicate sends.
@@ -48,10 +66,20 @@ not be appropriate upstream.
 
 Use an actor-serialized, in-process fixed AppleScript handler. Require one
 explicit affirmative final confirmation before every submission, on every
-destination form. There is no setting, build flag, debug path, environment
-variable, or injectable Boolean that can bypass it. Missing-input elicitation
-gathers values only and is never treated as authorization; a separate final
-confirmation always follows.
+destination form, by default. There is no *caller*-reachable setting, build
+flag, debug path, environment variable, or injectable Boolean that can bypass
+it — no MCP argument, prompt, or elicitation response can ever disable
+confirmation for an individual call. Missing-input elicitation gathers values
+only and is never treated as authorization; when confirmation is required, a
+separate final confirmation always follows.
+
+For existing-conversation submissions only, ADR 0010's accepted app-owned
+`MessagesSendingMode` — set exclusively through Settings, never through any
+MCP-reachable surface — may replace this per-send confirmation with the
+user's own persistent Send Automatically choice. Every other invariant in
+this record (fixed script, descriptor-only input, revalidation, TCC,
+one-dispatch, privacy, truthful result) still applies unconditionally in that
+mode.
 
 Final confirmation has one persisted presentation mode: Automatic, MCP form,
 or iMCP app. Missing, unknown, or corrupt values decode as Automatic; no mode
@@ -177,8 +205,12 @@ Descriptor arguments avoid interpolating user-controlled content into source.
 ### Risks and mitigations
 
 - Duplicate sends: issue one event and prohibit automatic retry.
-- Confirmation bypass: no bypass exists. A regression test asserts the removed
-  preference key, settings UI, and injectable predicate have not returned.
+- Confirmation bypass: no *caller-controlled* bypass exists. A regression test
+  asserts the specific removed preference key, settings UI, and injectable
+  predicate have not returned. ADR 0010 later added a distinct, narrower,
+  app-owned bypass (Send Automatically) that a user sets only through
+  Settings; it is a deliberate product decision, not a reintroduction of the
+  removed mechanism, and it never accepts a caller-supplied value.
 - Double prompting: choose one presenter before authorization and never catch an
   MCP failure into native fallback.
 - Privacy leakage: exclude recipient and body from logs, errors, and results.
@@ -242,3 +274,5 @@ custom trust setting was added.
 - Apple Events automation entitlement and TCC documentation
 - MCP form elicitation specification
 - AppKit `NSAlert` and application activation APIs
+- ADR 0010, for the accepted app-owned exception to the per-submission
+  confirmation default described here

@@ -755,6 +755,29 @@ final class MessageAttachmentSendTests: XCTestCase {
         }
     }
 
+    /// Attachment sending is not wired to the global Sending mode in this slice: it must
+    /// keep requesting its final confirmation even while Send Automatically is selected
+    /// for text sends, and must not dispatch without it.
+    func testSendAutomaticallyDoesNotBypassAttachmentConfirmation() async throws {
+        let url = try makeFile("Still Confirmed.pdf", byteCount: 1_024)
+        let harness = Harness(
+            matches: [uniqueDirectMatch, uniqueDirectMatch],
+            selection: .success(url),
+            sendingMode: { .sendAutomatically }
+        )
+        let result = try await harness.call(["recipient": .string("recipient@example.invalid")])
+
+        XCTAssertEqual(
+            harness.elicitation.requestCount,
+            1,
+            "attachment sends must still confirm even when the global mode is Send Automatically"
+        )
+        let dispatches = await harness.sender.attachmentSubmissionCount
+        XCTAssertEqual(dispatches, 1)
+        XCTAssertEqual(result.objectValue?["status"]?.stringValue, "submitted")
+        XCTAssertEqual(result.objectValue?["mode"]?.stringValue, "attachment")
+    }
+
     func testExplicitChatAndGroupDestinationsDispatchExactlyOnce() async throws {
         let chatHarness = Harness(
             results: [.success(directChat), .success(directChat)],
@@ -1063,7 +1086,8 @@ private struct Harness {
         ),
         confirmationRequester: (any MessagesFinalSendConfirmationRequesting)? = nil,
         onConfirmation: (@Sendable () -> Void)? = nil,
-        eventLog: AttachmentEventLog? = nil
+        eventLog: AttachmentEventLog? = nil,
+        sendingMode: @escaping @Sendable () -> MessagesSendingMode = { .askBeforeSending }
     ) {
         self.sender = RecordingAttachmentSender(
             authorization: authorization,
@@ -1090,7 +1114,8 @@ private struct Harness {
                 ?? MessagesFinalSendConfirmationRequester(mode: { .mcpForm }),
             attachmentSelector: selector,
             attachmentValidator: FileManagerMessagesAttachmentValidator(),
-            chatDatabasePathOverride: "/synthetic/chat.db"
+            chatDatabasePathOverride: "/synthetic/chat.db",
+            sendingMode: sendingMode
         )
         self.tool = service.tools.first { $0.name == "messages_send_attachment" }!
     }

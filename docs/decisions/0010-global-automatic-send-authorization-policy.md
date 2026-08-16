@@ -1,10 +1,18 @@
 # ADR 0010: Global Messages automatic-send authorization policy
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-16
 - Deciders: iMCP maintainers
 - Supersedes:
 - Superseded by:
+
+Accepted on 2026-08-16 after the user's manual Settings UX acceptance of the
+binary `MessagesSendingMode` model (Ask Before Sending / Send Automatically)
+described below. Runtime wiring for existing-conversation plain-text
+`messages_send` now honors this policy; see the "Runtime wiring" section
+near the end of this record. Attachment submission remains
+confirmation-required regardless of the selected mode until its own separate
+slice is designed and accepted.
 
 ## Context
 
@@ -241,13 +249,44 @@ persist across Settings reopen and app relaunch, and switching back to Ask
 Before Sending requires no warning and restores the Confirmation method control.
 No message is sent during this checkpoint.
 
+## Runtime wiring
+
+Manual acceptance of the Settings-only slice above unblocked the next slice:
+existing-conversation plain-text `messages_send` now reads `MessagesSendingMode`
+for each call. `MessageService` gained an injected
+`sendingMode: @Sendable () -> MessagesSendingMode` closure, defaulting to
+`MessagesSendingMode.load()` evaluated fresh at call time (not snapshotted at
+service construction), so a Settings change takes effect on the next call
+without restarting the service.
+
+The authorization branch sits immediately around the existing final-confirmation
+request and nowhere else: in `.askBeforeSending`, the unchanged confirmation
+flow runs; in `.sendAutomatically`, that one step is skipped. Every step before
+it (destination preparation, non-prompting addressability preflight) and every
+step after it (cancellation checks, destination revalidation, Automation
+authorization and addressability reverification, the single `sender.submit`
+dispatch, categorical logging, and the redacted result) is identical, shared
+code for both modes — there is no second dispatch path. Verified-new-recipient
+composition and `messages_send_attachment` are both unaffected: composition
+returns before the mode is ever consulted, and the attachment tool does not
+read `sendingMode` at all, so it keeps requiring its own confirmation
+regardless of the global mode until attachment automation gets its own
+accepted design.
+
+`messages_send`'s public description and its `recipient` parameter description
+were updated so they no longer promise confirmation for every existing-chat
+send; they now state that whether confirmation happens follows the user's
+Sending mode setting, which no caller can choose or override, and that the
+new-recipient compose route is unaffected by that setting.
+
 ## References
 
-- ADR 0002, for the confirmation-required default this mode will eventually be
-  permitted to bypass for eligible existing-conversation sends
+- ADR 0002, for the confirmation-required default this mode is now accepted to
+  bypass for eligible existing-conversation sends, reconciled there to reflect
+  this acceptance
 - ADR 0006, for the human-completed new-recipient path this mode does not cover
-- ADR 0009, for the existing-conversation attachment path this mode will
-  eventually apply to
+- ADR 0009, for the existing-conversation attachment path this mode does not
+  yet apply to
 - `App/Services/MessagesSendConfirmation.swift`, for the independent
   presentation-mode setting this mode does not replace, and for the `automatic`
   case whose UI label this correction changed to "Best available" without

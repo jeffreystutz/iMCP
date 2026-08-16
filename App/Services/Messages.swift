@@ -127,6 +127,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
     private let attachmentValidator: any MessagesAttachmentValidating
     private let chatDatabasePathOverride: String?
     private let chatListingLog: @Sendable (Int) -> Void
+    private let sendingMode: @Sendable () -> MessagesSendingMode
 
     init(
         sender: any MessagesSending = AppleScriptMessagesSender(),
@@ -142,6 +143,9 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         chatDatabasePathOverride: String? = nil,
         chatListingLog: @escaping @Sendable (Int) -> Void = { count in
             log.notice("Listed \(count) Messages conversations")
+        },
+        sendingMode: @escaping @Sendable () -> MessagesSendingMode = {
+            MessagesSendingMode.load()
         }
     ) {
         self.sender = sender
@@ -153,6 +157,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         self.attachmentValidator = attachmentValidator
         self.chatDatabasePathOverride = chatDatabasePathOverride
         self.chatListingLog = chatListingLog
+        self.sendingMode = sendingMode
         super.init()
     }
 
@@ -519,12 +524,12 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         Tool(
             name: "messages_send",
             description:
-                "Send one plain-text message to exactly one destination, by one of two routes that never fall back to each other. A recipient that uniquely matches one existing direct conversation, or an explicit chat_id, is submitted to that existing conversation after a required confirmation showing the exact destination and body. A recipient verified to have no existing conversation instead opens a Messages compose window, seeded with that recipient and body, which you review and send yourself; because you can edit it there, iMCP does not confirm it first and cannot report what was ultimately sent. Ambiguous or unresolvable matching fails without sending. Recipients can address only an existing group conversation: iMCP cannot create a new group from a list, and the complete participant set must exactly match one existing group or the call fails without sending. When multiple groups have the same participant set, use chat_id; chat_id is preferred when the intended group is already known. Messages chooses iMessage, SMS, or RCS; this tool never selects it.",
+                "Send one plain-text message to exactly one destination, by one of two routes that never fall back to each other. A recipient that uniquely matches one existing direct conversation, or an explicit chat_id, is submitted to that existing conversation, showing the exact destination and body. Whether that submission requires the user's confirmation first, or submits directly, follows the user's Sending mode setting in iMCP; there is no way for a caller to choose or override it. A recipient verified to have no existing conversation instead opens a Messages compose window, seeded with that recipient and body, which you review and send yourself; because you can edit it there, iMCP does not confirm it first and cannot report what was ultimately sent, and this route is unaffected by the Sending mode setting. Ambiguous or unresolvable matching fails without sending. Recipients can address only an existing group conversation: iMCP cannot create a new group from a list, and the complete participant set must exactly match one existing group or the call fails without sending. When multiple groups have the same participant set, use chat_id; chat_id is preferred when the intended group is already known. Messages chooses iMessage, SMS, or RCS; this tool never selects it.",
             inputSchema: .object(
                 properties: [
                     "recipient": .string(
                         description:
-                            "One exact E.164 phone number or email address. A unique existing direct conversation is submitted to after confirmation. A recipient verified to have no existing conversation instead opens a user-controlled Messages compose window seeded with this recipient and body, which the user reviews, may edit, and sends personally. Ambiguous or unresolvable matching fails without sending."
+                            "One exact E.164 phone number or email address. A unique existing direct conversation is submitted to, subject to the user's Sending mode setting. A recipient verified to have no existing conversation instead opens a user-controlled Messages compose window seeded with this recipient and body, which the user reviews, may edit, and sends personally. Ambiguous or unresolvable matching fails without sending."
                     ),
                     "recipients": .array(
                         description:
@@ -584,25 +589,33 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
 
             try await self.preflightAddressabilityIfAuthorized(preparedDestination)
 
-            // Every existing-conversation form requires its own final confirmation. The
-            // production router always selects exactly one real presenter; no mode
-            // bypasses authorization. Composition already returned above, so anything
-            // reaching here resolved to an existing conversation.
+            // Every existing-conversation form must be authorized before it proceeds:
+            // either the required final confirmation in Ask Before Sending mode, or the
+            // user's persisted app-owned Send Automatically setting. Composition already
+            // returned above, so anything reaching here resolved to an existing
+            // conversation. Automatic mode bypasses only this authorization step; every
+            // step after it — cancellation, revalidation, Automation/addressability,
+            // dispatch, logging, and result — is identical for both modes.
             guard let initialChat = preparedDestination.initialChat else {
                 throw MessageSendError.invalidDestination
             }
-            let confirmationPresentation = MessagesSendConfirmationPresentation(
-                title: "Confirm existing-chat submission",
-                message: self.chatConfirmationMessage(
-                    initialChat,
-                    body: input.body,
-                    matchedFromParticipants: preparedDestination.isMatchedGroup
+            switch self.sendingMode() {
+            case .askBeforeSending:
+                let confirmationPresentation = MessagesSendConfirmationPresentation(
+                    title: "Confirm existing-chat submission",
+                    message: self.chatConfirmationMessage(
+                        initialChat,
+                        body: input.body,
+                        matchedFromParticipants: preparedDestination.isMatchedGroup
+                    )
                 )
-            )
-            try await self.sendConfirmationRequester.requestConfirmation(
-                confirmationPresentation,
-                elicitation: context.elicitation
-            )
+                try await self.sendConfirmationRequester.requestConfirmation(
+                    confirmationPresentation,
+                    elicitation: context.elicitation
+                )
+            case .sendAutomatically:
+                break
+            }
 
             try Task.checkCancellation()
             let revalidatedChat = try await self.revalidateDestination(preparedDestination)

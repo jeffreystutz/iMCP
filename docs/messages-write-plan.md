@@ -24,12 +24,11 @@ conversation evidence. The literal cross-service composite over those operations
 while both the Contacts and Messages services are enabled.
 
 A global, binary Messages sending mode (Ask Before Sending / Send Automatically)
-and its Settings UI are implemented (ADR 0010), replacing an earlier
-four-category design that failed manual UX acceptance. This first slice
-persists the mode and lets a user view/change it; no send path consults it yet,
-so confirmation-required behavior for every existing send is unchanged. See
-"Automatic-send authorization
-policy" below.
+and its Settings UI are implemented and manually accepted (ADR 0010, now
+Accepted), replacing an earlier four-category design that failed manual UX
+acceptance. Existing-conversation plain-text `messages_send` now honors this
+mode; `messages_send_attachment` and verified-new-recipient composition do
+not yet. See "Automatic-send authorization policy" below.
 
 ## Verified baseline
 
@@ -569,11 +568,40 @@ Sending never warns, since that can only make behavior safer. No MCP tool reads
 or writes this mode's storage key, so no tool argument, prompt, or elicitation
 response can change it — only Settings-owned code can.
 
-This slice deliberately does not wire the mode into `messages_send` or
-`messages_send_attachment`. Changing this setting currently has zero effect on
-send behavior; every existing send path is unchanged and its full test suite
-passes unmodified. Consuming the mode from the send paths is a separate, later
-slice with its own manual checkpoint.
+This Settings-only slice was manually accepted by the user on 2026-08-16.
+ADR 0010 is now `Accepted`.
+
+### Runtime wiring for existing-conversation text sends
+
+Following manual acceptance, existing-conversation plain-text `messages_send`
+now honors `MessagesSendingMode`. `MessageService` gained an injected
+`sendingMode: @Sendable () -> MessagesSendingMode` closure defaulting to
+`MessagesSendingMode.load()`, evaluated fresh on every call rather than
+snapshotted at service construction, so a Settings change takes effect on the
+very next call without restarting the app.
+
+The authorization branch sits immediately around the existing final-confirmation
+request: in Ask Before Sending, the unchanged confirmation flow runs; in Send
+Automatically, that one step is skipped and execution rejoins the same shared
+code — cancellation checks, destination revalidation, Automation/addressability
+verification, the single dispatch, categorical logging, and the redacted
+result — unconditionally, for both modes. There is no second dispatch path.
+Verified-new-recipient composition returns before the mode is ever consulted,
+so it is unaffected. `messages_send_attachment` does not read `sendingMode` at
+all in this slice, so attachment submission still always requires its own
+confirmation regardless of the global mode; wiring attachments to the mode is
+a separate, later slice with its own design and acceptance.
+
+`messages_send`'s public description and its `recipient` parameter description
+were updated to stop promising confirmation for every existing-chat send; they
+now explain that whether confirmation happens follows the user's Sending mode
+setting, which no caller can choose or override. The tool's input schema is
+unchanged — no mode/automatic/confirmation-bypass argument was added.
+
+ADR 0002's "confirmation for every submission, no opt-out" language is
+reconciled in place (not superseded wholesale) to describe this accepted
+exception; every other invariant it establishes remains in force in both
+modes. See ADR 0002 and ADR 0010 for the full record.
 
 ## Reference implementation
 

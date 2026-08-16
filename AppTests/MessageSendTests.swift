@@ -1879,6 +1879,276 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(chatSubmissions, 0)
     }
 
+    // MARK: - Global Sending mode: Send Automatically
+
+    func testAskBeforeSendingIsTheDefaultAndRequestsExactlyOneFinalConfirmation() async throws {
+        let sender = RecordingMessagesSender()
+        let repository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(directChat),
+        ])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        // No sendingMode argument: the default must behave exactly like the explicit
+        // .askBeforeSending case below.
+        _ = try await sendTool(sender: sender, chatRepository: repository)(
+            ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+            context: ToolCallContext(elicitation: requester)
+        )
+
+        XCTAssertEqual(requester.requestCount, 1)
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(chatSubmissions, 1)
+    }
+
+    func testAutomaticModeDirectSendSkipsConfirmationButPreservesEveryOtherStep() async throws {
+        let log = SendEventLog()
+        let sender = RecordingMessagesSender(eventLog: log)
+        let repository = matchedDirectRepository()
+        let requester = StubElicitationRequester(result: confirmedResult, eventLog: log)
+
+        let result = try await sendTool(
+            sender: sender,
+            chatRepository: repository,
+            sendingMode: { .sendAutomatically }
+        )(
+            ["recipient": .string("recipient@example.invalid"), "body": .string("test-body")],
+            context: ToolCallContext(elicitation: requester)
+        )
+
+        XCTAssertEqual(
+            requester.requestCount,
+            0,
+            "Send Automatically must request zero final confirmations"
+        )
+        // Cancellation, revalidation, TCC, and addressability still run in the same
+        // order as Ask Before Sending, only without the elicitation step.
+        XCTAssertEqual(log.events, ["automation-status", "automation-request", "addressability", "chat-submit"])
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(chatSubmissions, 1)
+        XCTAssertEqual(result.objectValue?["status"]?.stringValue, "submitted")
+        XCTAssertEqual(result.objectValue?["service"]?.stringValue, "Messages")
+    }
+
+    func testAutomaticModeGroupSendSkipsConfirmationAndDispatchesOnceToTheExactResolvedChat()
+        async throws
+    {
+        let sender = RecordingMessagesSender()
+        let match = MessagesConversationMatch.unique(
+            publicChatID: "imcp-chat-v1_synthetic",
+            destination: groupChat
+        )
+        let repository = RecordingSendChatRepository(results: [], matches: [match, match])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        _ = try await sendTool(
+            sender: sender,
+            chatRepository: repository,
+            sendingMode: { .sendAutomatically }
+        )(
+            [
+                "recipients": .array([
+                    .string("first@example.invalid"), .string("second@example.invalid"),
+                ]),
+                "body": .string("test-body"),
+            ],
+            context: ToolCallContext(elicitation: requester)
+        )
+
+        XCTAssertEqual(requester.requestCount, 0)
+        XCTAssertEqual(repository.matchCount, 2, "the exact group is still revalidated")
+        let chatSubmissions = await sender.chatSubmissionCount
+        let rawSubmissions = await sender.submissionCount
+        XCTAssertEqual(chatSubmissions, 1)
+        XCTAssertEqual(rawSubmissions, 0, "no new group is ever created")
+    }
+
+    func testLiveModeChangesAreObservedWithoutReinitializingTheService() async throws {
+        final class SendingModeBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storedMode: MessagesSendingMode = .askBeforeSending
+            var mode: MessagesSendingMode {
+                get { lock.withLock { storedMode } }
+                set { lock.withLock { storedMode = newValue } }
+            }
+        }
+        let box = SendingModeBox()
+        let sender = RecordingMessagesSender()
+        let repository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(directChat),
+            .success(directChat), .success(directChat),
+        ])
+        let tool = try sendTool(
+            sender: sender,
+            chatRepository: repository,
+            sendingMode: { box.mode }
+        )
+
+        let firstRequester = StubElicitationRequester(result: confirmedResult)
+        _ = try await tool(
+            ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+            context: ToolCallContext(elicitation: firstRequester)
+        )
+        XCTAssertEqual(
+            firstRequester.requestCount,
+            1,
+            "Ask Before Sending must request confirmation"
+        )
+
+        box.mode = .sendAutomatically
+
+        let secondRequester = StubElicitationRequester(result: confirmedResult)
+        _ = try await tool(
+            ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+            context: ToolCallContext(elicitation: secondRequester)
+        )
+        XCTAssertEqual(
+            secondRequester.requestCount,
+            0,
+            "Send Automatically must take effect on the very next call, same service instance, without restarting"
+        )
+
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(chatSubmissions, 2)
+    }
+
+    func testAutomaticModeStillFailsClosedOnAStaleDestinationWithZeroDispatch() async {
+        let changed = MessagesResolvedChatDestination(
+            chatGuid: directChat.chatGuid,
+            displayName: directChat.displayName,
+            roomName: directChat.roomName,
+            kind: directChat.kind,
+            participantCount: 2,
+            participantHandles: directChat.participantHandles + ["changed@example.invalid"],
+            service: directChat.service
+        )
+        let sender = RecordingMessagesSender(authorization: .authorized)
+        let repository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(changed),
+        ])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        await assertSendError(.staleChatIdentifier) {
+            _ = try await self.sendTool(
+                sender: sender,
+                chatRepository: repository,
+                sendingMode: { .sendAutomatically }
+            )(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+
+        XCTAssertEqual(requester.requestCount, 0, "confirmation was correctly skipped")
+        let authorizationRequests = await sender.authorizationRequestCount
+        let chatSubmissions = await sender.chatSubmissionCount
+        XCTAssertEqual(
+            authorizationRequests,
+            0,
+            "skipping confirmation must not weaken the stale-destination defense"
+        )
+        XCTAssertEqual(chatSubmissions, 0)
+    }
+
+    func testAutomaticModeAutomationDenialOrUnavailabilityStillFailsClosedWithZeroDispatch()
+        async
+    {
+        // Denied at the non-prompting preflight, which runs unconditionally before the
+        // mode branch.
+        let deniedSender = RecordingMessagesSender(authorization: .denied)
+        let deniedRepository = RecordingSendChatRepository(results: [.success(directChat)])
+        await assertSendError(.automationDenied) {
+            _ = try await self.sendTool(
+                sender: deniedSender,
+                chatRepository: deniedRepository,
+                sendingMode: { .sendAutomatically }
+            )(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: StubElicitationRequester(result: confirmedResult))
+            )
+        }
+        let deniedSubmissions = await deniedSender.chatSubmissionCount
+        XCTAssertEqual(deniedSubmissions, 0)
+
+        // Unavailable at the post-authorization addressability check, which still runs
+        // after the skipped confirmation.
+        let unavailableSender = RecordingMessagesSender(
+            authorization: .consentRequired,
+            addressability: [false]
+        )
+        let unavailableRepository = RecordingSendChatRepository(results: [
+            .success(directChat), .success(directChat),
+        ])
+        await assertSendError(.chatUnavailableInAutomation) {
+            _ = try await self.sendTool(
+                sender: unavailableSender,
+                chatRepository: unavailableRepository,
+                sendingMode: { .sendAutomatically }
+            )(
+                ["chat_id": .string("imcp-chat-v1_synthetic"), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: StubElicitationRequester(result: confirmedResult))
+            )
+        }
+        let unavailableSubmissions = await unavailableSender.chatSubmissionCount
+        XCTAssertEqual(unavailableSubmissions, 0)
+    }
+
+    func testVerifiedNewRecipientRemainsHumanCompletedCompositionInAutomaticMode() async throws {
+        let sender = RecordingMessagesSender()
+        let composer = RecordingMessagesComposer()
+        let repository = RecordingSendChatRepository(results: [], matches: [.none])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        let result = try await sendTool(
+            sender: sender,
+            composer: composer,
+            chatRepository: repository,
+            sendingMode: { .sendAutomatically }
+        )(
+            [
+                "recipient": .string("brand-new@example.invalid"),
+                "body": .string("exact-seed-body"),
+            ],
+            context: ToolCallContext(elicitation: requester)
+        )
+
+        XCTAssertEqual(
+            requester.requestCount,
+            0,
+            "the system compose panel is the authorization surface here regardless of mode"
+        )
+        let compositions = await composer.compositionCount
+        XCTAssertEqual(compositions, 1)
+        let chatSubmissions = await sender.chatSubmissionCount
+        let rawSubmissions = await sender.submissionCount
+        XCTAssertEqual(
+            chatSubmissions,
+            0,
+            "a verified-new recipient must never route through sender.submit"
+        )
+        XCTAssertEqual(rawSubmissions, 0)
+        XCTAssertEqual(
+            result.objectValue?["status"]?.stringValue,
+            "user_completed_composition"
+        )
+    }
+
+    func testToolSchemaHasNoModeOrConfirmationBypassInput() throws {
+        let tool = try XCTUnwrap(
+            MessageService(sender: RecordingMessagesSender()).tools.first {
+                $0.name == "messages_send"
+            }
+        )
+        guard
+            case .object(_, _, _, _, _, _, let properties, let required, let additionalProperties) =
+                tool.inputSchema
+        else {
+            return XCTFail("expected an object schema")
+        }
+        XCTAssertEqual(Set(properties.keys), ["recipient", "recipients", "chat_id", "body"])
+        XCTAssertEqual(required, ["body"])
+        XCTAssertEqual(additionalProperties, .boolean(false))
+    }
+
     func testAddressabilityIsIndependentOfChatServiceType() async throws {
         // Recent iMessage, SMS, and RCS conversations all resolve through the same
         // public `chat` abstraction, so no branch may key on service.
@@ -2091,7 +2361,8 @@ final class MessageSendTests: XCTestCase {
         composer: RecordingMessagesComposer? = nil,
         chatRepository: (any MessagesChatListing)? = nil,
         sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting =
-            MessagesFinalSendConfirmationRequester(mode: { .mcpForm })
+            MessagesFinalSendConfirmationRequester(mode: { .mcpForm }),
+        sendingMode: @escaping @Sendable () -> MessagesSendingMode = { .askBeforeSending }
     ) throws -> iMCP.Tool {
         let repository = chatRepository ?? RecordingSendChatRepository(results: [])
         return try XCTUnwrap(
@@ -2100,7 +2371,8 @@ final class MessageSendTests: XCTestCase {
                 composer: composer ?? RecordingMessagesComposer(),
                 chatRepository: repository,
                 sendConfirmationRequester: sendConfirmationRequester,
-                chatDatabasePathOverride: "/synthetic/chat.db"
+                chatDatabasePathOverride: "/synthetic/chat.db",
+                sendingMode: sendingMode
             ).tools.first { $0.name == "messages_send" }
         )
     }
