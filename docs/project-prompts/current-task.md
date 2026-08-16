@@ -2,7 +2,7 @@
 
 **Status:** active correction
 
-**Recommended session:** continue the current Claude Code session if it still has the completed slice in context; otherwise use a fresh session  
+**Recommended session:** continue the current Claude Code session if it still has the automatic-send Settings work in context; otherwise use a fresh session  
 **Recommended model:** Sonnet  
 **Effort:** high
 
@@ -12,7 +12,7 @@ Before doing anything else, run a normal fast-forward pull of `origin/feat/messa
 
 ---
 
-You are making a small additive review correction to the global automatic-send Settings slice in the iMCP macOS project.
+You are correcting the global automatic-send Settings slice in the iMCP macOS project after its human manual UX checkpoint failed.
 
 ## Repository and exact review state
 
@@ -20,139 +20,273 @@ Repository:
 - `jeffreystutz/iMCP`
 - branch: `feat/messages-write-foundation`
 
-Latest fully accepted production implementation baseline:
+Latest previously accepted production implementation baseline before this milestone:
 - `1822a44b3f40dbda7246ad2753978113aa235de3`
 
-Prompt-only trajectory commit before the implementation:
-- `5636e6a8392fab773b017cfb505355cdc75f908b`
+Current supervising code-reviewed milestone head before this correction:
+- `7329f5ecfd252ef41a4e3ebfc0482ff9e2567b4f`
 
-Implementation commit under review:
-- `d6dc2adbf9df77d8dfc6f1dbeb8f7ca67b348ddf`
+That head contains the Settings-only automatic-send policy implementation plus additive documentation corrections. It is code-reviewed but **not manually accepted** because the human Settings checkpoint rejected the UX as too complex.
 
-Tracked implementation report commit under review:
-- `cab286f2caa6be4060c6bd09e59b62047baa3a1e`
-
-The supervising review found the implementation architecture and tests generally sound, but identified two documentation/UX-copy issues that must be corrected before manual Settings acceptance.
-
-Do **not** amend, rebase, squash, or rewrite any of the reviewed commits. Corrections must be additive commits on the active branch.
+The branch may be one prompt-only trajectory commit ahead of `7329f5e` when you start. That prompt commit changes only this file and is not production implementation.
 
 Before editing:
 1. `git pull --ff-only origin feat/messages-write-foundation`
-2. verify local HEAD equals origin;
-3. verify the reviewed commit chain above is present;
-4. verify the worktree is clean.
+2. verify repository and branch;
+3. verify local HEAD equals origin;
+4. inspect commits after `7329f5ecfd252ef41a4e3ebfc0482ff9e2567b4f` and confirm any intervening commit is prompt/report trajectory only;
+5. verify the worktree is clean.
 
-If the branch contains unexpected production changes after `cab286f2caa6be4060c6bd09e59b62047baa3a1e`, stop and report instead of continuing.
+If unexpected production source/test changes exist after `7329f5e`, stop and report the exact state instead of continuing.
 
-## Settled product decision that documentation must represent accurately
+Do not amend, squash, rebase, or rewrite reviewed history. This correction must be additive.
 
-The user explicitly chose **one global set of Messages automatic-send authorization controls that applies to all connected MCP clients**.
+## Why this correction exists
 
-The reason for that product choice is primarily **product simplicity**: client-specific approval controls are not worth the additional UX, configuration, pairing/authentication, and implementation complexity for this project.
+The first Settings implementation exposed:
 
-A prior investigation also established that `clientInfo.name` is caller-supplied/spoofable and therefore should not be described as an authenticated client identity. That is useful supporting context and a reason not to build a fake security boundary on the existing name string, but it was **not the user's decisive reason for choosing the global product model**.
+- an existing `Send confirmation` presentation control;
+- four separate automatic-send toggles for direct/group × text/attachment;
+- `Allow Everything Automatically`;
+- `Require Confirmation for Everything`.
 
-Do not rewrite the user's product decision as though per-client controls were rejected because durable client authentication was technically impossible or mandatory. Per-client authentication work was considered and explicitly rejected as unnecessary complexity.
+The supervising code review passed, but the human manual checkpoint did not. The user stopped the test because the control surface itself felt too complex.
 
-The pre-existing `trustedClients` name-spoofing issue remains separate and is not a blocker for the global automatic-send policy.
+The user explicitly approved a simpler replacement model. This is a settled product decision, not an implementation suggestion.
 
-## Correction 1 — contradictory Settings copy
+## Settled simplified product model
 
-In `App/Views/SettingsView.swift`, the existing Message Sending explanatory copy currently ends with:
+There is one global **Sending mode** for all connected MCP clients:
 
-> A confirmation is always required.
+1. **Ask before sending** — factory default.
+2. **Send automatically** — explicit user opt-in.
 
-That is now contradictory to the adjacent Automatic Sending policy and would become false once the already-planned execution wiring is added.
+This mode applies to every currently eligible **existing-conversation programmatic send**. Do not expose different automatic-send authorization for:
 
-Revise this existing confirmation-presentation help text so it truthfully expresses the distinction:
+- direct vs. group conversations;
+- text vs. attachments.
 
-- `MessagesSendConfirmationMode` controls **how confirmation is presented when confirmation is required**;
-- the new global automatic-send policy controls **whether confirmation is required for an eligible operation class**.
+Those four authorization categories are rejected product design, not advanced settings to preserve.
 
-Use concise, native Settings copy consistent with the surrounding prose. Do not imply that the new stored policy already changes send behavior in this Settings-only slice.
+Verified-new-recipient sends remain separate: they use the current human-completed `NSSharingService` Messages compose flow. Selecting `Send automatically` must not make that route unattended.
 
-Preserve the existing statement that new-recipient composition is separate and human-completed.
+### Confirmation method
 
-Do not otherwise redesign the Settings UI.
+The existing confirmation-presentation setting is still useful only while confirmation is required.
 
-## Correction 2 — product-decision rationale drift
+When **Ask before sending** is selected, show a subordinate **Confirmation method** control using the existing `MessagesSendConfirmationMode` capability.
 
-Correct the rationale in all task-owned repository documentation added/changed by the slice where it currently says or implies that the global policy was selected *because* there is no unspoofable client identity.
+User-facing choices should be:
 
-At minimum inspect and correct:
+- **Best available** — rename the existing presentation choice currently displayed as **Automatic**;
+- **MCP form**;
+- **iMCP app**.
 
-- `docs/decisions/0010-global-automatic-send-authorization-policy.md`
-- `docs/messages-write-plan.md`
-- `docs/project-reports/global-send-authorization-settings-2026-08-16.md`
+Preserve the existing stored/raw semantic value for the presentation mode where practical; this is primarily a user-facing label clarification, not a reason to break stored compatibility.
 
-Required meaning:
+When **Send automatically** is selected, the Confirmation method control is irrelevant. Prefer hiding it. Disabling it is acceptable only if hiding creates materially worse/native-inconsistent layout behavior. Do not present it as an equally important peer control while automatic mode is active.
 
-1. Per-client automation controls were considered.
-2. The user explicitly rejected them as unnecessary product complexity and chose one global policy.
-3. Separately, the investigation found `clientInfo.name` is spoofable; therefore the project also should not pretend that the existing declared name is an authenticated authorization identity.
-4. No client-profile/pairing/token project is required or planned for the global policy.
-5. The pre-existing `trustedClients` spoofing weakness may be hardened separately if desired, but it is not a prerequisite for this feature.
+### Warning
 
-Remove language such as “the product decision, made explicitly given that finding” or equivalent causal claims that substitute the supervising assistant's earlier security recommendation for the user's actual decision.
+Transition from **Ask before sending** to **Send automatically** must show one clear native warning before committing the setting.
 
-Do not reopen the settled global-policy decision and do not propose per-client authentication work.
+The warning should communicate that all connected MCP clients may submit eligible existing-conversation Messages sends without asking each time.
 
-### ADR status
+Cancel leaves the mode at Ask before sending.
 
-Keep ADR 0010 at its current review-stage status until the supervising reviewer and user complete the Settings manual acceptance checkpoint. Do not mark it Accepted in this correction task.
+Switching from Send automatically back to Ask before sending requires no warning.
 
-## Preserve the accepted implementation shape under review
+Do not add per-category warnings or an onboarding wizard.
 
-Do not alter the policy model merely because documentation is being corrected.
+## Goal of this correction
 
-The reviewed implementation should remain:
+Replace the rejected granular policy model and Settings UX with the settled binary Sending mode.
 
-- one global `MessagesAutomaticSendPolicy`;
-- four current categories: existing direct/group × text/attachment;
-- all automatic categories off by factory default;
-- one app-owned persisted policy value;
-- no new-recipient automatic category yet;
-- no per-client policy;
-- no client/profile token or pairing;
-- no MCP caller-controlled policy mutation;
-- no send-path consumption of the policy in this slice.
+This task includes:
 
-Do not change send execution.
+1. persisted global Sending mode model;
+2. simplified Settings UI;
+3. safe handling of the development-only persisted granular policy from the rejected intermediate implementation;
+4. focused tests;
+5. updates to task-owned docs/ADR/report so they describe the simplified product contract accurately.
+
+**Do not wire the Sending mode into any send execution path yet.**
+
+At the end of this task, every programmatic existing-chat text or attachment send must still require the same confirmation it requires at `7329f5e`, regardless of the selected new mode. The next milestone will wire execution only after this simpler Settings UX passes human acceptance.
+
+## Data model requirements
+
+Replace or simplify `MessagesAutomaticSendPolicy` / `MessagesAutomaticSendCategory` so the persisted product model directly represents the binary global state rather than retaining obsolete direct/group/text/attachment granularity.
+
+Use repository-native naming. A small enum/value type such as a send authorization/sending mode is appropriate; choose names consistent with existing code.
+
+Requirements:
+
+- factory/default mode: Ask before sending;
+- persistent across relaunch;
+- malformed, missing, unknown, or stale values fail safely to Ask before sending;
+- no MCP tool argument, prompt, elicitation response, or caller-controlled field can change the mode;
+- Settings/app-owned code is the only mutation path;
+- no per-client state;
+- no operation-class state;
+- no new-recipient automatic state.
+
+### Development-only migration from the rejected four-category model
+
+The prior granular model was never manually accepted or shipped as an accepted product state. Do not over-engineer compatibility for it.
+
+Safety requirement: an old granular persisted value must **never accidentally enable Send automatically** merely because one or more old categories were enabled during manual testing.
+
+The simplest acceptable behavior is to ignore/retire the old granular storage and default the new binary mode to Ask before sending unless the new mode has been explicitly set through the new Settings UI.
+
+If you choose a different migration, it must be equally fail-safe and must not infer broad automatic authorization from a partial old category set.
+
+Add a test covering this transition behavior.
+
+## Settings UX requirements
+
+Replace the current `Message Sending` + `Automatic Sending` conceptual split with one coherent sending section rather than two competing authorization sections.
+
+The exact native control can be a Picker, radio-style choice, or another repository-consistent two-state control. Optimize for clarity and compactness.
+
+The Settings surface should communicate, in concise native copy:
+
+- Ask before sending is the safe default;
+- Send automatically applies globally to all connected MCP clients for eligible existing-conversation sends;
+- new recipients still open Messages for human review/send;
+- destination resolution and other safety checks are unchanged by the mode.
+
+When Ask before sending is selected, expose the Confirmation method choice beneath it. Rename user-facing `Automatic` confirmation presentation to `Best available`.
+
+Remove the rejected UI:
+
+- four automatic-send category toggles;
+- `Allow Everything Automatically`;
+- `Require Confirmation for Everything`;
+- category-specific explanatory copy.
+
+Do not add attachment-specific automation controls.
+Do not add direct/group controls.
+Do not add per-client controls.
+Do not add advanced disclosure for the removed granularity.
+
+Keep Phone Number Region and Trusted Clients behavior/layout otherwise unchanged.
+
+## Preserve the meaning of confirmation presentation
+
+`MessagesSendConfirmationMode` still controls **how confirmation is presented when Ask before sending is active**.
+
+Its behavior should remain:
+
+- Best available: use MCP form when supported, otherwise native iMCP confirmation;
+- MCP form: explicitly use MCP form behavior, with existing fail-closed semantics;
+- iMCP app: explicitly use the native iMCP confirmation.
+
+This correction must not change those runtime presentation semantics. Only the user-facing label `Automatic` → `Best available` and conditional Settings visibility are intended here.
+
+## Send execution is explicitly out of scope
+
+Do not modify confirmation gating or dispatch behavior in:
+
+- `messages_send`;
+- `messages_send_attachment`;
+- `MessagesSender`;
+- attachment dispatch;
+- new-recipient composition.
+
+No send service should consult the new Sending mode in this task.
+
+If refactoring the policy type requires compile-time call-site changes, there should be no runtime send call sites yet; verify that assumption before editing. If repository reality contradicts it, stop and report rather than redesigning silently.
+
+## Tests
+
+Replace/update the prior granular policy tests with focused coverage for at least:
+
+- factory/default Sending mode is Ask before sending;
+- persistence round-trip for both modes;
+- absent/corrupt/unknown stored value fails to Ask before sending;
+- rejected old granular persisted state cannot accidentally enable Send automatically;
+- confirmation presentation setting remains independent and preserves its existing stored semantics;
+- user-facing confirmation presentation title for the former Automatic mode is now Best available;
+- no send behavior has changed from the reviewed pre-correction head.
+
+Use existing repository test seams. Do not invent GUI automation.
+
+## Documentation
+
+Update task-owned repository documentation so it no longer describes four global authorization categories as the intended product.
+
+At minimum inspect/update:
+
+- `docs/decisions/0010-global-automatic-send-authorization-policy.md`;
+- `docs/messages-write-plan.md`;
+- `docs/project-reports/global-send-authorization-settings-2026-08-16.md`.
+
+Required product record:
+
+- global rather than per-client was chosen for product simplicity;
+- the first four-category UX failed the manual Settings checkpoint;
+- the user explicitly chose one binary global Sending mode instead;
+- direct/group and text/attachment authorization granularity is removed;
+- confirmation presentation becomes subordinate to Ask before sending;
+- Automatic presentation is labeled Best available;
+- new-recipient composition remains human-completed;
+- send execution still ignores the new mode in this correction.
+
+Keep ADR 0010 at `Proposed` until this simplified Settings UX passes the next human checkpoint.
+
+Do not rewrite old Git history or old commit messages.
+
+Update the existing implementation report rather than creating another report unless repository conventions genuinely require a new one.
+
+## Privacy and safety
+
+- Do not send any real message.
+- Do not access or print private Messages or Contacts contents.
+- Do not log recipient handles, bodies, chat IDs, attachment paths/names/contents, or private data.
+- Do not weaken App Sandbox or entitlements.
+- Do not add Accessibility or private-framework behavior.
 
 ## Verification
 
-Because this is a small copy/documentation correction:
+Run the strongest applicable existing verification because this correction changes persisted model and SwiftUI behavior:
 
-- run `swift format lint --strict --recursive App AppTests` if Swift source was touched;
-- run `git diff --check`;
-- build the iMCP Debug app if Settings Swift source changed;
-- focused/full tests are optional only if no executable behavior changed beyond static Settings text; if you skip them, state why and retain the prior 260/260 evidence as belonging to `d6dc2ad`, not to the new correction SHA;
-- do not send any real message;
-- do not perform the manual Settings acceptance yourself.
+- `swift format lint --strict --recursive App AppTests`;
+- `git diff --check`;
+- focused tests for the simplified model;
+- full `imcp-serverTests` suite;
+- Debug iMCP build;
+- CLI/proxy build if shared compilation requires it;
+- do not spend time debugging the previously identified unrelated `CLITests/test_elicitation_proxy.py` `DYLD_FRAMEWORK_PATH` fragility unless this task changes that path or the failure materially changes;
+- regenerate the signed `.build/ManualVerification` app using the established process;
+- `codesign --verify --strict` the manual build and confirm entitlements are not weakened.
 
-The signed ManualVerification build may be regenerated if needed so the user's upcoming checkpoint reflects the corrected copy. If regenerated, verify its signature using the established procedure.
+Do not perform the human Settings checkpoint yourself.
 
-## Tracked report
+## Manual checkpoint to prepare
 
-Update the existing tracked report additively in the correction commit so it:
+The regenerated signed app should let the user verify only the simplified UX:
 
-- records the new correction SHA once known;
-- describes the two supervising corrections;
-- preserves the original implementation/verification evidence accurately;
-- states that send execution still ignores the policy;
-- uses the corrected product rationale;
-- leaves the same manual Settings checkpoint pending.
+1. Settings shows one clear Sending mode choice.
+2. Ask before sending is the default.
+3. Under Ask before sending, Confirmation method is visible with Best available / MCP form / iMCP app.
+4. Choosing Send automatically presents one warning; Cancel does not change the mode; accepting changes it.
+5. Under Send automatically, Confirmation method is hidden or clearly inactive.
+6. The mode persists across Settings reopen and app relaunch.
+7. Switching back to Ask before sending requires no warning and restores the Confirmation method control.
+8. New-recipient copy remains clear that Messages UI is human-completed.
+9. Phone Number Region and Trusted Clients remain normal.
 
-Do not create a second report for this tiny correction unless repository conventions force it.
+No message is sent during this checkpoint.
 
-Do not attempt to edit old Git commit messages merely because the report-only commit message may contain stale pre-rebase wording. Git history is immutable for this review; the current report file is the authoritative correction.
+## Git discipline and tracked handoff
 
-## Git discipline and handoff
+Use additive commits only. Do not amend/rebase/squash reviewed history.
 
-Use additive commit(s) only.
+Suggested implementation commit message:
+- `fix: simplify global Messages sending mode settings`
 
-Suggested correction commit message:
-- `fix: align automatic-send Settings copy and decision rationale`
+Update the existing tracked report with this manual-UX-driven redesign and new verification evidence. No raw session logs.
 
 Push normally to:
 - `origin/feat/messages-write-foundation`
@@ -162,22 +296,21 @@ Verify local HEAD equals origin.
 Do not open/merge a PR.
 Do not force-push.
 
-For this tiny immediate correction, no separate new report file is required beyond updating the existing implementation report.
-
 ## Stopping point
 
 STOP after:
 
-- correcting the Settings help text;
-- correcting the product rationale in task-owned docs/report;
-- running applicable verification;
-- regenerating the signed manual-verification build if needed;
+- replacing the granular policy with the binary persisted Sending mode;
+- simplifying Settings as specified;
+- updating tests and task-owned docs/report;
+- full applicable automated verification;
+- regenerating/verifying the signed ManualVerification build;
 - additive commit(s);
 - normal push;
 - verifying local HEAD equals origin.
 
-Do **not** wire automatic sending into `messages_send` or `messages_send_attachment`.
+Do **not** wire automatic sending into runtime send execution.
 
-The next gate is supervising review of the correction SHA followed by the user's manual Settings acceptance checklist.
+The next gate is supervising review of the exact pushed head followed by the user's simplified Settings manual checkpoint.
 
 The user should only need to say **“done”**; do not require copy/paste of the result.
