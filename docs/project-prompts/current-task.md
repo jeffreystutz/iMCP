@@ -4,218 +4,241 @@
 
 **Recommended session:** continue the current Claude Code session if available; otherwise a fresh session is fine  
 **Recommended model:** Sonnet  
-**Effort:** high — the code change is localized, but it crosses the Messages authorization boundary and must preserve exact fail-closed sequencing.
+**Effort:** high — the code change is localized, but it crosses the Messages authorization boundary and must preserve destination/file race defenses and one-dispatch semantics.
 
-This file is the canonical supervising prompt for the next bounded coding task.
+This is the canonical supervising prompt for the next bounded coding task.
 
 ## Repository and accepted state
 
 Repository: `jeffreystutz/iMCP`  
 Branch: `feat/messages-write-foundation`
 
-The simplified global Sending-mode Settings/model implementation is fully accepted after supervising code review and the user's manual Settings UX acceptance on 2026-08-16.
+The global binary Messages Sending mode and its existing-conversation plain-text runtime wiring are fully accepted.
 
-Accepted source implementation:
+Latest fully accepted production/review head:
 
-`968b703a901a1ec16056fc98ebab9f03c15c16e6` — `checkpoint: simplify automatic sending settings`
+`eb64ee2de11a50d63bc1d64362136d1251f0bdf4` — `feat: honor global Sending mode for existing text sends`
 
-Accepted reviewed branch head including documentation/verification:
+That head passed supervising code review and the user completed the real runtime checkpoint on 2026-08-16:
 
-`b2795b45cce861ffc6b8577d932ca8ab10ee2fef`
+- Ask Before Sending presented the existing text confirmation and cancel sent nothing;
+- without restarting iMCP, Send Automatically submitted one explicitly authorized existing-conversation text message without a final iMCP/MCP confirmation;
+- switching back to Ask Before Sending restored confirmation on the next call.
 
-A supervising governance commit after that accepted head is expected:
-
-`6b79f309c42ed5340912958a473102cab1b6dad7` — updates only `AGENTS.md` so the binding safety contract matches the accepted global Sending mode. It does not change production code.
-
-The branch will also contain the prompt-only commit that published this file. Prompt/governance commits are trajectory evidence, not production acceptance.
+The branch will also contain the prompt-only commit that published this file. Prompt/report/governance commits are trajectory evidence, not production acceptance.
 
 Before editing:
 
 1. `git pull --ff-only origin feat/messages-write-foundation`;
 2. retrieve and follow `imessage-mcp/coding-agent-bootstrap` from Hexa as required by `AGENTS.md`;
 3. verify repository, branch, remotes, local/origin HEAD equality, and clean worktree;
-4. verify `b2795b45cce861ffc6b8577d932ca8ab10ee2fef` is in history;
-5. inspect commits after `b2795b45...` and confirm they are only the expected supervising `AGENTS.md` reconciliation and this prompt file;
-6. inspect the current `messages_send` implementation, `MessagesSendingMode`, `MessageSendTests`, confirmation requester seam, and relevant ADRs before changing source.
+4. verify `eb64ee2de11a50d63bc1d64362136d1251f0bdf4` is in current history;
+5. inspect commits after `eb64ee2d...` and confirm they are only the expected prompt-only trajectory commit for this task;
+6. inspect the current `messages_send_attachment` implementation, `MessagesSendingMode`, the existing injected `sendingMode` seam on `MessageService`, `MessageAttachmentSendTests`, `MessageSendTests`, attachment validation/access code, and ADRs 0009/0010 before changing source.
 
-If unexpected production source/test changes exist after `b2795b45...`, stop and report the exact state rather than absorbing or redesigning around them.
+If unexpected production source/test changes exist after `eb64ee2d...`, stop and report the exact state rather than absorbing them.
 
 Do not amend, rebase, squash, reset, force-push, or rewrite reviewed history.
 
-## Settled product behavior
+## Concrete goal
 
-There is one app-owned global `MessagesSendingMode` for all connected MCP clients:
+Make **existing-conversation picker-based `messages_send_attachment`** honor the same accepted global app-owned `MessagesSendingMode` already used by existing-conversation text sends.
+
+There is one global mode for all eligible existing-conversation programmatic sends:
 
 - `askBeforeSending` — factory default;
 - `sendAutomatically` — explicit user opt-in in iMCP Settings.
 
-No MCP argument, prompt, elicitation response, client name, connection metadata, build flag, environment variable, debug path, or injected caller-controlled Boolean may enable, weaken, or override this mode.
+No MCP argument, prompt, elicitation response, client identity/name, connection metadata, build flag, environment variable, debug path, or caller-controlled Boolean may enable or override this mode.
 
-This task wires the accepted mode into **existing-conversation plain-text `messages_send` only**.
+This task does **not** add fully unattended attachment ingress. The existing native file picker remains mandatory because the MCP tool still supplies no file path or bytes.
 
-For an existing direct or group conversation:
+## Required attachment behavior
 
-- **Ask Before Sending:** preserve the current final confirmation behavior exactly, including the existing confirmation-presentation choice (Best available / MCP form / iMCP app).
-- **Send Automatically:** bypass only that final per-send confirmation, then continue through the same cancellation check, destination revalidation, Automation authorization/addressability verification, one dispatch, no retry, redacted result, and submitted-not-delivered semantics.
+The current accepted attachment flow is:
 
-The mode is global, so direct vs. group and recipient/recipients/chat_id selectors do not get separate authorization behavior.
+1. resolve one exact existing destination;
+2. reject verified-new recipients rather than composing or falling back;
+3. run the existing non-prompting addressability preflight when safe;
+4. present the native single-file picker;
+5. acquire security-scoped read access and validate the selected file against the existing bounded file policy;
+6. request immutable final confirmation naming the exact destination and file display name/type/size;
+7. cancellation check;
+8. revalidate the exact destination;
+9. revalidate the selected file and require unchanged identity/bounded properties;
+10. cancellation check;
+11. request/verify Messages Automation authority and exact chat addressability;
+12. perform exactly one attachment dispatch;
+13. return the existing redacted submitted result.
 
-### Explicitly unchanged in this slice
+After this task:
 
-- Verified-new-recipient sending remains the current human-completed `NSSharingService` Messages compose flow. It never becomes unattended here.
-- `messages_send_attachment` remains confirmation-required even when global Sending mode is Send Automatically. Attachment runtime wiring is the next separate slice.
-- Tool input schemas must not gain a sending-mode/confirmation-bypass argument.
-- Destination selection/matching behavior does not change.
-- AppleScript source and descriptor-based dispatch architecture do not change.
+### Ask Before Sending
 
-## Current text-send sequence to preserve
+Preserve the sequence above exactly. The existing attachment confirmation remains mandatory and uses the existing configured confirmation presentation mechanism.
 
-At the accepted head, an existing-conversation `messages_send` call follows this shape:
+### Send Automatically
 
-1. resolve/validate input;
-2. prepare one exact destination;
-3. if verified-new recipient, return through system Messages composition;
-4. non-prompting preflight addressability check when existing Automation authority makes that safe;
-5. build and request the final existing-chat confirmation;
-6. cancellation check;
-7. revalidate that the exact destination is still unchanged;
-8. cancellation check;
-9. request/verify Messages Automation authority and exact chat addressability;
-10. perform exactly one `sender.submit`;
-11. return the existing redacted submitted result.
+Preserve steps 1–5 exactly, then **skip only step 6, the final attachment confirmation**. Rejoin the exact same shared sequence at the existing cancellation check and continue through destination revalidation, file revalidation, Automation/addressability verification, exactly one dispatch, logging, and truthful result handling.
 
-The automatic-mode path should differ at only step 5: it skips the final confirmation. It must then rejoin the same post-authorization sequence before any permission prompt or dispatch.
+Do not create a second attachment dispatch path or duplicate revalidation logic.
 
-Do not create a second dispatch path that duplicates revalidation or send logic.
+The current global mode should be read at the authorization decision after file selection/validation, using the existing live `sendingMode` provider already on `MessageService`. Do not snapshot the mode only when the service is initialized. A later call on the same service instance must observe a Settings change without app restart.
+
+## Important product semantics
+
+In Send Automatically mode, the native picker is still shown. Selecting a file is **not** a substitute per-send authorization mechanism; the user's persistent app-owned Send Automatically choice is the authorization that permits the final-confirmation step to be skipped. The picker remains solely the trusted local file-selection/input mechanism for this slice.
+
+Therefore:
+
+- do not add a second warning or confirmation after the picker in automatic mode;
+- do not remove or bypass the picker;
+- do not turn picker selection into a new persisted permission;
+- do not expose the selected path to MCP;
+- do not claim this slice is fully unattended attachment automation.
+
+Persistent handoff-directory and serialized/base64 attachment ingress are separate later work.
+
+## Explicitly unchanged
+
+- `messages_send` text behavior at accepted head `eb64ee2d...`.
+- Verified-new-recipient text composition through human-controlled `NSSharingService`.
+- Verified-new-recipient attachment behavior remains unsupported and fails without composition or fallback.
+- The attachment tool accepts no path, file name, file bytes, body, caption, mode, or confirmation-bypass argument.
+- Destination matching/resolution semantics remain unchanged.
+- Existing file policy remains exactly one regular nonempty supported file, at most 25 MiB, with the existing type/package/symlink/executable restrictions.
+- Security-scoped access must remain active through validation/revalidation and synchronous dispatch, then be released.
+- AppleScript source and typed file-URL descriptor dispatch remain unchanged unless repository reality shows a necessary bug fix; if so, stop and report before broadening scope.
+- No new group creation, transport selection, retry, fallback, queue, or delivery claim.
 
 ## Implementation guidance
 
-Use the smallest repository-native seam that makes the mode deterministic in tests and live-updatable in production.
+Reuse the existing `MessageService.sendingMode` provider introduced and accepted in the text-send slice. Do not add another policy object or attachment-specific mode.
 
-The production authorization decision must read the current app-owned `MessagesSendingMode` for each send, not snapshot it only when `MessageService` is initialized. A Settings change must therefore affect a later call without restarting the service.
+Place the mode branch immediately around the existing attachment final-confirmation construction/request. In automatic mode, avoid constructing the confirmation presentation at all. Both modes must share all code before and after that branch.
 
-A small injected mode-provider closure/value source on `MessageService`, defaulting to `MessagesSendingMode.load()` at call time, is reasonable if it fits existing test conventions. Do not introduce a new configuration subsystem, client policy object, or generalized authorization framework for this slice.
+Keep the guard that proves an exact existing chat is present before the authorization branch. In Ask mode it supplies confirmation content; in automatic mode it still represents a fail-closed invariant that the destination is an existing resolvable conversation.
 
-Place the authorization branch immediately around the existing final-confirmation request so both modes share the same preparation, preflight, cancellation, revalidation, Automation, dispatch, logging, and result code.
+Update comments that currently assume final confirmation is always the authorization boundary. Under the accepted architecture, an attachment send is authorized either by Ask-mode final confirmation or by the user's persistent app-owned Send Automatically setting.
 
-Update comments/docstrings that currently equate "authorized" exclusively with an accepted per-send confirmation. Under the accepted architecture, an existing text send is authorized either by the required final confirmation in Ask Before Sending mode or by the user's persistent app-owned Send Automatically setting. This wording change must not weaken any other invariant.
+Do not add production logs containing destination, handles, chat IDs, file path, file name, file type, file size, file contents, or mode history. Prefer no new logging unless needed.
 
-Do not add new production logs merely to record message content, destination, mode history, or client identity. If any categorical mode logging is genuinely useful, it must contain no recipient, participant, chat ID, body, file, or other private value; prefer no new logging unless required.
+## Required focused tests
 
-## Required behavior and tests
-
-Extend existing repository test seams, primarily `AppTests/MessageSendTests.swift`, and add only focused support code needed for deterministic mode control.
+Extend `AppTests/MessageAttachmentSendTests.swift` using the existing deterministic `sendingMode` seam. Preserve all existing tests.
 
 At minimum prove:
 
-1. **Ask Before Sending preserves existing behavior**: an existing-conversation text send requests exactly one final confirmation before revalidation/Automation/dispatch.
-2. **Automatic direct send**: an existing direct conversation in Send Automatically mode requests zero final confirmations and still performs exactly one successful dispatch only after destination revalidation and Automation/addressability verification.
-3. **Automatic group send**: an existing group conversation gets the same global bypass behavior and still dispatches once to the exact resolved chat; no group is created or substituted.
-4. **Live mode changes are observed**: changing the mode between two calls on the same service instance changes whether confirmation is requested, without rebuilding/reinitializing the service.
-5. **Automatic mode does not weaken stale-destination defenses**: if the existing conversation changes/disappears between preparation and dispatch, the call fails closed with zero dispatch even though confirmation was skipped.
-6. **Automation denial/unavailability still fails with zero dispatch** in automatic mode.
-7. **Verified-new recipient remains human-completed composition** in automatic mode and does not route through `sender.submit`.
-8. **Attachments are not wired yet**: with Send Automatically selected, `messages_send_attachment` still reaches its existing final confirmation path. Add a focused regression test in the existing attachment test file if the current seams make this inexpensive.
-9. **Caller cannot request bypass**: tool schema remains unchanged, with no new mode/automatic/confirmation-bypass input. Existing `additionalProperties: false` behavior remains.
-10. Existing confirmation decline/cancel/malformed paths in Ask Before Sending remain terminal with zero dispatch.
-11. Existing result truthfulness is unchanged: success means Messages accepted one submission, never delivery.
+1. **Ask Before Sending remains unchanged:** an existing attachment send presents exactly one final confirmation before destination/file revalidation, Automation, and dispatch.
+2. **Automatic direct attachment:** picker still runs; selected file is validated; zero final confirmations are requested; exact destination and file are still revalidated; exactly one attachment dispatch occurs only after Automation/addressability verification.
+3. **Automatic group attachment:** same global bypass applies to an exact existing group, with the group still re-resolved/revalidated and exactly one dispatch to the exact resolved chat.
+4. **Live mode changes:** two attachment calls on the same `MessageService` instance observe Ask then Automatic (and, if inexpensive, Automatic then Ask) without rebuilding/reinitializing the service.
+5. **Picker cancellation in automatic mode:** cancellation dispatches nothing. Automatic mode must never bypass the picker.
+6. **Destination change/disappearance in automatic mode:** stale destination still fails closed with zero dispatch.
+7. **File change/replacement/modification/enlargement/disappearance in automatic mode:** existing file revalidation still fails closed with zero dispatch. One or more representative focused tests may reuse existing mutation seams; do not duplicate the entire file-policy test matrix if the common code is demonstrably shared.
+8. **Automation denial/unavailability in automatic mode:** still fails with zero dispatch.
+9. **Verified-new recipient remains unsupported:** automatic mode does not open a composer or dispatch an attachment.
+10. **Tool schema remains unchanged:** no file/path/bytes/mode/bypass input is added; `additionalProperties: false` remains.
+11. **Ask-mode decline/cancel/malformed confirmation paths remain terminal with zero dispatch.**
+12. **Result truthfulness remains unchanged:** success means Messages accepted one attachment submission, never delivery.
 
-Preserve or strengthen any existing ordering assertions around preflight, confirmation, revalidation, Automation permission, and dispatch. Do not weaken tests merely to accommodate the new branch.
+Preserve or strengthen existing event/order assertions around preflight, picker/validation, confirmation when applicable, destination/file revalidation, Automation permission, addressability, and dispatch. Do not weaken existing tests to accommodate the mode branch.
 
-## Security and privacy invariants
+## Security/privacy invariants
 
-Automatic mode bypasses only final confirmation for this accepted operation class.
+Automatic mode bypasses only the final attachment confirmation. It must not bypass or weaken:
 
-It must not bypass or weaken:
-
-- exact recipient/group/chat_id validation;
-- direct/group ambiguity failure;
-- incomplete membership failure;
-- exact matched-conversation equality;
-- explicit chat-id re-resolution;
-- destination revalidation immediately before dispatch;
+- exact destination selector validation;
+- direct/group ambiguity and incomplete-membership failure;
+- verified-new-recipient rejection;
 - non-prompting-only preflight rule before authorization;
+- mandatory native picker in this slice;
+- bounded file validation;
+- security-scoped file access lifetime;
+- destination revalidation before dispatch;
+- file identity/property revalidation before dispatch;
 - Messages Automation/TCC permission checks;
 - exact chat addressability verification;
 - cancellation before dispatch;
 - fixed AppleScript source;
-- Apple Event descriptor inputs for chat GUID/body;
-- one-dispatch/no-retry semantics;
+- typed file-URL Apple Event descriptor input;
+- one-dispatch/no-retry/no-fallback behavior;
 - ambiguous-submission handling;
-- log/result privacy redaction;
+- privacy redaction in logs/errors/results;
 - submitted-not-delivered truthfulness.
 
-No real Messages or Contacts data may appear in tests, logs, docs, prompts, reports, or commits. Use synthetic values only.
+Use only synthetic values in tests/docs. Do not access, print, log, or commit real Messages/Contacts data or private file paths/content.
 
-## Documentation and ADR reconciliation
+## Documentation reconciliation
 
-The manual Settings UX checkpoint has now passed. Update repository documentation accordingly.
+Update documentation so it no longer says picker-based attachments are always confirmation-required once this implementation exists.
 
-At minimum inspect and update:
+At minimum inspect/update as applicable:
 
+- `README.md`;
 - `docs/decisions/0010-global-automatic-send-authorization-policy.md`;
-- `docs/decisions/0002-messages-automation-security-boundary.md`;
-- `docs/decisions/README.md` if its status/index text needs adjustment;
+- `docs/decisions/0009-attachment-only-existing-chat-submission.md`;
 - `docs/messages-write-plan.md`;
-- `README.md` where it currently implies every existing-chat text send always requires confirmation;
-- `docs/project-reports/global-send-authorization-settings-2026-08-16.md`.
+- `docs/project-reports/existing-conversation-text-send-automatic-mode-wiring-2026-08-16.md` only if a small cross-reference is needed; do not rewrite its accepted evidence;
+- any tool description/comment in `App/Services/Messages.swift` that promises attachment confirmation unconditionally.
 
 Required documentation meaning:
 
-- ADR 0010 may now be marked **Accepted** because the user explicitly chose the global binary model and manually accepted the final Settings UX.
-- Reconcile ADR 0002's older absolute "confirmation for every submission, no opt-out" language with accepted ADR 0010. ADR 0010 supersedes only that unconditional-confirmation portion; preserve ADR 0002's fixed-script, exact-destination, revalidation, TCC, privacy, one-dispatch/no-retry, and truthful-result security boundaries. Do not casually mark the whole ADR superseded if that would imply those remaining boundaries are obsolete.
-- Record that the text-send runtime path is now being wired to the accepted mode, while attachments remain confirmation-required until their separate slice.
-- Update `messages_send` public description/copy so it no longer falsely promises required confirmation for every existing-chat send. It should explain that existing-chat text submission follows the user's global Sending mode, while verified-new recipients still open Messages UI for human completion.
-- Do not add a tool argument for the mode.
-- Clean the prior Settings report's stale self-referential documentation-SHA wording rather than trying to make a document name the commit that contains itself.
+- the global Sending mode applies equally to eligible existing-conversation text and picker-based attachment submissions;
+- Ask Before Sending still presents the existing attachment confirmation with destination + file name/type/size;
+- Send Automatically skips that final confirmation but **does not skip the native picker** or file/destination revalidation;
+- picker-based attachment sends are therefore not fully unattended;
+- no caller can select or override the mode;
+- verified-new-recipient attachments remain unsupported;
+- persistent handoff-directory and serialized-content ingress remain separate future mechanisms needed for fully unattended attachment workflows.
 
-Create one concise sanitized implementation report for this runtime-wiring slice under `docs/project-reports/`. It must identify the accepted starting head, implementation SHA(s), files/symbols changed, test/build evidence, unresolved manual gate, and next bounded action. No raw logs or private values.
+ADR 0009 describes the accepted original confirmation-required attachment slice. Reconcile its unconditional-confirmation wording narrowly with accepted ADR 0010 rather than implying its file-trust, revalidation, fixed-script, or one-dispatch boundaries are obsolete.
+
+Create one concise sanitized implementation report for this slice under `docs/project-reports/`. It must identify accepted starting head `eb64ee2d...`, implementation commit(s), files/symbols changed, focused/full verification evidence, remaining human runtime gate, and next bounded action. No raw logs or private values.
 
 ## Verification
 
-Run the narrowest relevant tests first, then the full applicable repository verification.
+Run narrow attachment-mode tests first, then the full applicable verification.
 
 At minimum:
 
-- focused `MessageSendTests` covering both modes and fail-closed ordering;
-- focused attachment regression test if added;
-- `swift format lint --strict --recursive App AppTests` (or the repository's stronger established lint command if current instructions require it);
+- focused `MessageAttachmentSendTests` for Ask/Automatic behavior and fail-closed ordering;
+- relevant `MessageSendTests` regression coverage to ensure accepted text behavior is unchanged;
+- `swift format lint --strict --recursive App AppTests` (or stronger repository-required lint if current instructions require it);
 - `git diff --check`;
 - full `imcp-serverTests` suite;
 - Debug iMCP build;
 - `imcp-server`/CLI build if shared compilation requires it;
-- do not spend time debugging the known unrelated `CLITests/test_elicitation_proxy.py` `DYLD_FRAMEWORK_PATH` path-fragility unless this task changes that path or its behavior materially changes;
+- do not spend time debugging the known unrelated `CLITests/test_elicitation_proxy.py` `DYLD_FRAMEWORK_PATH` path fragility unless this task materially changes that path;
 - regenerate the signed `.build/ManualVerification` app using the established procedure;
 - `codesign --verify --strict` the signed app;
-- confirm the effective entitlement set and Hardened Runtime are unchanged/unweakened.
+- confirm effective entitlements and Hardened Runtime are unchanged/unweakened.
 
-No automated verification step may send a real message.
+No automated verification step may send a real message or attachment.
 
-Perform an adversarial self-review of the task diff for any path that could dispatch without either Ask-mode confirmation or the accepted global automatic authorization, any caller-controlled bypass, duplicated dispatch path, retry/fallback, privacy leak, or attachment/new-recipient scope creep.
+Perform an adversarial self-review for any path that can dispatch without either Ask-mode confirmation or the accepted global automatic authorization, any picker bypass, any caller-controlled bypass, any weakened destination/file race defense, duplicated dispatch path, retry/fallback, privacy leak, or new-recipient scope creep.
 
 ## Manual checkpoint to prepare, but do not execute
 
-After supervising review of the exact pushed head, the user will perform the externally observable test. Claude must **not** send any real message during implementation or verification.
+After supervising review of the exact pushed implementation head, the user will perform the externally observable test. Claude must not send any real attachment during implementation or verification.
 
-Prepare the signed app so the later human checkpoint can verify:
+Prepare the signed build so a later human checkpoint can verify:
 
-1. In Ask Before Sending, an existing-conversation text call still presents the configured final confirmation; cancel sends nothing.
-2. In Send Automatically, an explicitly authorized existing-conversation text call submits without the final iMCP/MCP confirmation.
-3. Switching back to Ask Before Sending restores confirmation on the next call without app restart.
-4. New-recipient behavior still opens human-controlled Messages composition.
-5. Attachment sending still requires its existing picker + confirmation in this slice.
+1. With Ask Before Sending selected, invoke `messages_send_attachment` for an existing conversation, select an explicitly chosen supported test file, then cancel the final confirmation; verify nothing sends.
+2. Without restarting iMCP, switch to Send Automatically, invoke `messages_send_attachment` for the same explicitly authorized existing conversation, select the exact explicitly authorized test file, and verify the file submits after picker selection **without** an iMCP/MCP final confirmation.
+3. Switch back to Ask Before Sending and verify a later attachment call again presents final confirmation; cancel is sufficient.
 
-Any real send in that checkpoint requires separate explicit user authorization of the exact destination/conversation and exact body. Do not choose those values yourself and do not perform that test as the coding agent.
+Any real attachment send requires separate explicit human authorization of the exact destination/conversation and exact file. Do not choose those values and do not perform that test as the coding agent.
 
 ## Git and handoff
 
-Use additive commits only. Meaningful checkpoint commits are allowed; do not amend/rewrite accepted history.
+Use additive commits only. Meaningful checkpoint commits are allowed. Do not rewrite accepted history.
 
 A reasonable implementation commit message is:
 
-`feat: honor global Sending mode for existing text sends`
+`feat: honor global Sending mode for existing attachments`
 
-Update/create the sanitized tracked report, commit it additively, and push normally to:
+Commit implementation/docs/report changes additively and push normally to:
 
 `origin/feat/messages-write-foundation`
 
@@ -231,15 +254,16 @@ Do not open or merge a maintainer PR. Do not force-push.
 
 Do not implement in this task:
 
-- attachment automatic-mode bypass;
 - persistent attachment handoff directory;
 - serialized/base64 attachment ingress;
-- unattended new-recipient sending;
+- any MCP attachment path/name/bytes input;
+- verified-new-recipient attachment composition;
+- unattended new-recipient text sending;
 - Shortcuts experiments;
 - Accessibility/UI scripting;
 - per-client authorization;
 - direct/group/text/attachment authorization granularity;
-- circuit breaker defaults or UI;
+- circuit breaker defaults/UI;
 - cross-call idempotency;
 - Recent Automation Activity;
 - trusted-client identity hardening;
@@ -251,16 +275,16 @@ Do not implement in this task:
 
 STOP after:
 
-- existing-conversation plain-text `messages_send` honors the accepted global Sending mode exactly as specified;
-- Ask mode behavior remains intact;
-- automatic mode skips only final confirmation and preserves every downstream safety step;
-- new-recipient and attachment behavior remain unchanged;
-- docs/ADRs/public description accurately reflect the accepted state;
+- picker-based existing-conversation `messages_send_attachment` honors the accepted global Sending mode exactly as specified;
+- Ask behavior remains intact;
+- automatic mode skips only final attachment confirmation while preserving picker, destination/file validation and revalidation, Automation/addressability, and exactly-one dispatch;
+- text/new-recipient behavior remains unchanged;
+- docs/public description accurately reflect the new state and its non-unattended picker limitation;
 - focused and full verification pass;
 - signed ManualVerification build is regenerated and verified;
 - implementation/report commits are pushed normally;
-- local HEAD equals origin and the worktree is clean.
+- local HEAD equals origin and worktree is clean.
 
-Do not perform the real-message manual checkpoint. The next gate is supervising review of the exact pushed head, then explicit user-authorized manual verification.
+Do not perform the real-attachment manual checkpoint. The next gate is supervising review of the exact pushed head, then explicit user-authorized manual verification.
 
 When complete, the user should only need to say **done**; do not require copy/paste of the report.
