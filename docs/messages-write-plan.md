@@ -23,10 +23,12 @@ conversation evidence. The literal cross-service composite over those operations
 `contacts_find_conversations`, is implemented and is advertised and callable only
 while both the Contacts and Messages services are enabled.
 
-A global, category-keyed Messages automatic-send authorization policy and its
-Settings UI are implemented (ADR 0010). This first slice persists the policy and
-lets a user view/change it; no send path consults it yet, so confirmation-required
-behavior for every existing send is unchanged. See "Automatic-send authorization
+A global, binary Messages sending mode (Ask Before Sending / Send Automatically)
+and its Settings UI are implemented (ADR 0010), replacing an earlier
+four-category design that failed manual UX acceptance. This first slice
+persists the mode and lets a user view/change it; no send path consults it yet,
+so confirmation-required behavior for every existing send is unchanged. See
+"Automatic-send authorization
 policy" below.
 
 ## Verified baseline
@@ -512,17 +514,17 @@ Messages accepted one attachment submission, never that it was delivered.
 
 Feature completion was reopened by a product expansion: confirmation-required
 stays the factory default, but a user may explicitly opt into automatic sending
-for eligible categories in iMCP Settings, for unattended workflows. The
-architecture investigation behind this milestone is recorded in Hexa (project
-knowledge `imessage-mcp/automation-product-design`,
-`imessage-mcp/current-status`), not duplicated here.
+in iMCP Settings, for unattended workflows. The architecture investigation
+behind this milestone is recorded in Hexa (project knowledge
+`imessage-mcp/automation-product-design`, `imessage-mcp/current-status`), not
+duplicated here.
 
 Per-client automation authorization was considered and explicitly rejected by
 the user as unnecessary product complexity — the additional UX, configuration,
 and (to be trustworthy) pairing or authentication work is not worth it for this
-project. The settled product decision is **one global Messages automatic-send
-policy for the whole application**, applying equally to every connected MCP
-client, never a per-client model.
+project. The settled product decision is **one global Messages sending mode
+for the whole application**, applying equally to every connected MCP client,
+never a per-client model.
 
 Separately, that same investigation found the current MCP connection stack — a
 bundled CLI proxying stdio to a loopback-only `NWListener`/`NWConnection` TCP
@@ -535,31 +537,43 @@ as an authenticated identity or build a per-client authorization boundary on top
 of it without first establishing real client identity. See Proposed ADR 0010 for
 the full decision record.
 
-The first implementation slice adds only the persisted policy and its Settings
-UI. `MessagesAutomaticSendPolicy` stores the set of currently-automatic
-categories — `existingDirectConversationText`, `existingGroupConversationText`,
-`existingDirectConversationAttachment`, `existingGroupConversationAttachment` —
-JSON-encoded into one `UserDefaults` entry, with every category defaulting to
-confirmation-required and any absent or unrecognized persisted value resolving
-safely to confirmation-required rather than being guessed. There is
-deliberately no automatic-new-recipient category yet, because the new-recipient
+A first implementation represented the policy as four independent categories
+(existing direct/group conversation × text/attachment). It was code-reviewed
+and passed automated verification but **failed the human manual Settings
+acceptance checkpoint**: the user found that control surface more complex than
+the product needs and explicitly approved a simpler binary replacement. ADR
+0010 was revised in place to describe the settled model below rather than the
+rejected one.
+
+The implementation persists `MessagesSendingMode`, a two-case enum —
+`askBeforeSending` (factory default) and `sendAutomatically` — under its own
+`UserDefaults` key, distinct from the earlier four-category type's key. The
+earlier type's persisted data is simply never read by `MessagesSendingMode`, so
+any category a developer enabled while testing the rejected design cannot
+resolve into `sendAutomatically` now; a test pins this behavior explicitly.
+There is no operation-class dimension (no direct/group or text/attachment
+distinction) and no automatic-new-recipient state, because the new-recipient
 path stays human-completed `NSSharingService` composition (ADR 0006) regardless
-of this policy.
+of the selected mode.
 
-Settings gains an "Automatic Sending" section alongside the existing "Message
-Sending" (confirmation-presentation) section: one toggle per category, an "Allow
-Everything Automatically" action, and a "Require Confirmation for Everything"
-action. Enabling the first automatic category shows one native warning that
-connected MCP clients can then submit that category without asking each time;
-later categories enabled while at least one is already automatic do not repeat
-it. No MCP tool reads or writes this policy's storage key, so no tool argument,
-prompt, or elicitation response can change it — only Settings-owned code can.
+Settings replaces the prior two-section split ("Message Sending" +
+"Automatic Sending") with one section containing a single **Sending** choice.
+When Ask Before Sending is active, a subordinate **Confirmation method** choice
+(the existing `MessagesSendConfirmationMode`, whose `automatic` case is now
+labeled "Best available" in the UI while its stored raw value stays
+`"automatic"`) is shown beneath it; when Send Automatically is active, that
+control is hidden. Selecting Send Automatically shows one native warning that
+all connected MCP clients will be able to submit eligible sends without asking
+each time; canceling leaves the mode unchanged. Switching back to Ask Before
+Sending never warns, since that can only make behavior safer. No MCP tool reads
+or writes this mode's storage key, so no tool argument, prompt, or elicitation
+response can change it — only Settings-owned code can.
 
-This slice deliberately does not wire the policy into `messages_send` or
-`messages_send_attachment`. Changing these settings currently has zero effect on
+This slice deliberately does not wire the mode into `messages_send` or
+`messages_send_attachment`. Changing this setting currently has zero effect on
 send behavior; every existing send path is unchanged and its full test suite
-passes unmodified. Consuming the policy from the send paths is a separate,
-later slice with its own manual checkpoint.
+passes unmodified. Consuming the mode from the send paths is a separate, later
+slice with its own manual checkpoint.
 
 ## Reference implementation
 

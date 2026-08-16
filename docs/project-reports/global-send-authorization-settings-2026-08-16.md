@@ -1,8 +1,10 @@
 # Global Messages automatic-send authorization policy — Settings-only slice
 
 - Starting implementation SHA: `1822a44b3f40dbda7246ad2753978113aa235de3`
-- Final implementation SHA: `d6dc2ad` (`feat/messages-write-foundation`)
-- Correction SHA (Settings copy + rationale, no behavior change): `5dd68a6`
+- Final implementation SHA (four-category model, later rejected): `d6dc2ad`
+- Correction SHA (Settings copy + rationale, no behavior change): `5dd68a6` (actual pushed hash `7329f5e`, see note below)
+- Redesign implementation SHA (binary Sending mode, replacing the four-category model): `968b703`
+- Redesign documentation SHA (this update): `22486fa`
 - Branch: `feat/messages-write-foundation`
 
 Between the start of this task and its push, `origin/feat/messages-write-foundation`
@@ -62,94 +64,125 @@ this update without touching the reviewed commits:
 ADR 0010 remains at status `Proposed` — this correction does not mark it
 Accepted; that remains gated on the manual Settings acceptance checkpoint below.
 
+## Manual Settings UX rejection and simplified redesign (this update)
+
+The four-category implementation above (`d6dc2ad`, corrected in `7329f5e`) was
+code-reviewed and passed automated verification, but **failed the human manual
+Settings acceptance checkpoint**: the user found the four independent toggles
+plus "Allow Everything Automatically"/"Require Confirmation for Everything"
+more control surface than the product needs, and explicitly approved a
+simpler binary replacement rather than iterating on that design's copy or
+layout.
+
+The replacement, committed as `968b703` ("checkpoint: simplify automatic
+sending settings"), removes `MessagesAutomaticSendPolicy` /
+`MessagesAutomaticSendCategory` entirely and replaces them with
+`MessagesSendingMode` — a two-case enum, `askBeforeSending` (factory default)
+and `sendAutomatically` — with no operation-class or per-client dimension. The
+rest of this report is updated to describe that settled model. Everything
+below the "Files and symbols changed" section describes the current
+(redesigned) state, not the rejected four-category one; the sections above are
+kept as a historical record of what was tried and why it changed.
+
+ADR 0010 was revised in place (not superseded) to describe the binary model,
+and remains at status `Proposed` pending the next manual Settings acceptance
+checkpoint using the corrected UX.
+
 ## Files and symbols changed
 
-New:
+### Original four-category slice (`d6dc2ad`/`7329f5e`) — superseded by the redesign below
 
-- `App/Services/MessagesAutomaticSendPolicy.swift` — `MessagesAutomaticSendCategory`
-  (four cases) and `MessagesAutomaticSendPolicy` (the persisted value type:
-  `isAutomatic(_:)`, `setAutomatic(_:for:)`, `allowEverythingAutomatically()`,
-  `requireConfirmationForEverything()`, `isAnyCategoryAutomatic`,
-  `isEveryCategoryAutomatic`, `decode(_:)`, `load(from:)`, `encoded()`,
-  `save(to:)`).
-- `AppTests/MessagesAutomaticSendPolicyTests.swift` — 8 focused tests.
-- `docs/decisions/0010-global-automatic-send-authorization-policy.md` — ADR
-  (Proposed), full context/rationale/consequences.
+New: `App/Services/MessagesAutomaticSendPolicy.swift`,
+`AppTests/MessagesAutomaticSendPolicyTests.swift`,
+`docs/decisions/0010-global-automatic-send-authorization-policy.md`.
+Changed: `App/Views/SettingsView.swift`, `iMCP.xcodeproj/project.pbxproj`,
+`docs/messages-write-plan.md`, `docs/decisions/README.md`.
+
+### Redesign (`968b703`) — current state
+
+Deleted: `App/Services/MessagesAutomaticSendPolicy.swift` (122 lines),
+`AppTests/MessagesAutomaticSendPolicyTests.swift` (162 lines).
+
+New: `App/Services/MessagesSendingMode.swift` — `MessagesSendingMode`
+(`String, CaseIterable, Identifiable, Sendable`; cases `askBeforeSending`,
+`sendAutomatically`; `storageKey`, `defaultValue`, `title`, `decode(_:)`,
+`load(from:)`). `AppTests/MessagesSendingModeTests.swift` — 6 focused tests.
 
 Changed:
 
-- `App/Views/SettingsView.swift` — `GeneralSettingsView` gains an "Automatic
-  Sending" section (category toggles, "Allow Everything Automatically",
-  "Require Confirmation for Everything"), the `automaticSendPolicy` computed
-  property, `requestAutomaticSendPolicyChange(_:)` transition-warning helper,
-  and a `.alert` for the one-time "off → on" warning. `SettingsView` itself is
-  unchanged; the existing "Message Sending" (confirmation-presentation) and
-  "Phone Number Region" sections and the Trusted Clients list are unmodified.
-- `iMCP.xcodeproj/project.pbxproj` — registers the new test file (`AppTests` is
-  a manually-managed `PBXGroup`, not a file-system-synchronized group, so the
-  new file needed explicit `PBXFileReference`/`PBXBuildFile` entries and a
-  `Sources` build-phase entry for `imcp-serverTests`).
-- `docs/messages-write-plan.md` — new "Automatic-send authorization policy"
-  section plus a status-summary sentence.
-- `docs/decisions/README.md` — ADR 0010 index row.
+- `App/Services/MessagesSendConfirmation.swift` — one string literal: the
+  `automatic` case's `title` changed from `"Automatic"` to `"Best available"`.
+  Its `rawValue` (`"automatic"`, the stored/raw semantic value) and every
+  runtime presentation-selection code path are unchanged.
+- `App/Views/SettingsView.swift` — `GeneralSettingsView` replaces the
+  two-section split ("Message Sending" + "Automatic Sending") with one
+  "Message Sending" section containing a single "Sending" `Picker`
+  (`MessagesSendingMode`), a conditional "Confirmation method" `Picker`
+  (`MessagesSendConfirmationMode`, shown only while Ask Before Sending is
+  active), and one `.alert` for the Ask→Send-Automatically transition warning.
+  The `requestSendingModeChange(_:)` helper replaces
+  `requestAutomaticSendPolicyChange(_:)`. Phone Number Region and Trusted
+  Clients sections are unmodified.
+- `iMCP.xcodeproj/project.pbxproj` — swaps the manually-registered test-file
+  entries (`AppTests` is not a file-system-synchronized group) from
+  `MessagesAutomaticSendPolicyTests.swift` to `MessagesSendingModeTests.swift`.
+- `docs/decisions/0010-global-automatic-send-authorization-policy.md` —
+  revised in place (still `Proposed`) to describe the binary model; keeps the
+  global-vs-per-client reasoning, adds the four-category-rejection history.
+- `docs/messages-write-plan.md` — "Automatic-send authorization policy"
+  section and status summary rewritten for the binary model (this update).
+- This report (this update).
 
-Explicitly unchanged: `App/Services/MessagesSender.swift`,
-`App/Services/Messages.swift`, `App/Services/MessagesAttachment.swift`,
-`App/Services/MessagesSendConfirmation.swift`, and every MCP tool schema.
+Explicitly unchanged throughout every revision of this slice:
+`App/Services/MessagesSender.swift`, `App/Services/Messages.swift`,
+`App/Services/MessagesAttachment.swift`, and every MCP tool schema.
 
-## Policy shape
+## Sending mode shape
 
-`MessagesAutomaticSendCategory` (`String`, `CaseIterable`, `Codable`):
+`MessagesSendingMode` (`String, CaseIterable, Identifiable, Sendable`):
 
-- `existingDirectConversationText`
-- `existingGroupConversationText`
-- `existingDirectConversationAttachment`
-- `existingGroupConversationAttachment`
+- `askBeforeSending` (factory default)
+- `sendAutomatically`
 
-No automatic-new-recipient category exists yet — new-recipient sending stays
-human-completed `NSSharingService` composition (ADR 0006) regardless of this
-policy, so a category for it would be speculative.
-
-`MessagesAutomaticSendPolicy` wraps `Set<MessagesAutomaticSendCategory>` — the
-categories currently exempt from confirmation — JSON-encoded into one
-`UserDefaults` entry, `me.mattt.iMCP.messagesAutomaticSendPolicy`, following the
-same encode-a-`Codable`-value-into-`Data` pattern already used for
-`trustedClients` in `ServerController`. A category absent from a stored value
-(including every category on first launch, and any category unknown to a given
-build) is confirmation-required — never guessed to be automatic.
+No operation-class dimension (no direct/group or text/attachment distinction)
+and no automatic-new-recipient state — new-recipient sending stays
+human-completed `NSSharingService` composition (ADR 0006) regardless of the
+selected mode. Persisted as a raw string under its own `UserDefaults` key
+(`me.mattt.iMCP.messagesSendingMode`), distinct from the earlier four-category
+type's key (`me.mattt.iMCP.messagesAutomaticSendPolicy`). The earlier key is
+simply never read by `MessagesSendingMode`, so any categories a developer
+enabled while manually testing the rejected design cannot resolve into
+`sendAutomatically` now — verified by
+`testRejectedOldGranularPersistedStateCannotAccidentallyEnableSendAutomatically`.
+An absent, empty, or unrecognized stored value resolves to `askBeforeSending`,
+never guessed toward `sendAutomatically`.
 
 ## Settings behavior
 
-`GeneralSettingsView` gains an "Automatic Sending" section, positioned after the
-existing "Message Sending" (confirmation-presentation) section:
+`GeneralSettingsView`'s "Message Sending" section now contains:
 
-- Explanatory text stating: default is confirmation-required; enabling a
-  category applies to every connected MCP client; it does not change how a
-  destination is resolved or verified; it does not apply to a new recipient.
-- One toggle per category.
-- "Allow Everything Automatically" (disabled once every category is already
-  automatic) and "Require Confirmation for Everything" (disabled while no
-  category is automatic).
-- Turning on the **first** automatic category — via an individual toggle or
-  "Allow Everything Automatically," whichever control causes the "zero
-  automatic → at least one automatic" transition — shows one native `.alert`:
-  "Connected MCP clients will be able to send eligible Messages operations
-  without asking each time. You can turn this off again at any time." Enabling
-  further categories while at least one is already automatic does not repeat
-  the warning. "Require Confirmation for Everything" never warns.
-
-The existing `MessagesSendConfirmationMode` picker ("Send confirmation:
-Automatic / MCP form / iMCP app") is unchanged and remains independent — it
-answers "how is confirmation presented," this policy answers "is confirmation
-required at all."
+- A "Sending" picker: **Ask Before Sending** (default) / **Send Automatically**.
+- Explanatory text stating: Ask Before Sending is the safe default; Send
+  Automatically applies to every connected MCP client; neither changes how a
+  destination is resolved or verified; neither applies to a new recipient.
+- While Ask Before Sending is active, a "Confirmation method" picker for
+  `MessagesSendConfirmationMode`: **Best available** (renamed from
+  "Automatic") / **MCP form** / **iMCP app**, with its own explanatory text.
+  This control is hidden entirely (not shown disabled) while Send
+  Automatically is active.
+- Selecting Send Automatically from Ask Before Sending shows one native
+  `.alert`, "Send Automatically?": "All connected MCP clients will be able to
+  submit an eligible existing-conversation Messages send without asking each
+  time. You can switch back to Ask Before Sending at any time." Canceling
+  leaves the mode unchanged. Switching back to Ask Before Sending never warns.
 
 ## Defaults
 
-Factory default: every category confirmation-required
-(`MessagesAutomaticSendPolicy.defaultValue == .confirmationRequiredForEverything`).
-No stored value, an empty stored value, a corrupt stored value, or a stored value
-containing an unrecognized category all resolve to this same default — the whole
-decode fails safely rather than partially trusting a payload.
+Factory default: `MessagesSendingMode.defaultValue == .askBeforeSending`. An
+absent, empty, corrupt, or unrecognized stored value — including a
+plausible-looking but unrecognized string — all resolve to this same default.
+An old four-category persisted value (under its separate, no-longer-read key)
+cannot resolve to `sendAutomatically` under any content, verified explicitly.
 
 ## Verification evidence (original slice, `d6dc2ad`)
 
@@ -217,29 +250,61 @@ type, property, method, control-flow, or test.
   and the unrelated pre-existing entitlements carried from the base project),
   none weakened.
 
+## Redesign verification evidence (`968b703` + this documentation update)
+
+This redesign deletes one Swift service file and its tests, changes one string
+literal in `MessagesSendConfirmation.swift`, rewrites the Settings section in
+`App/Views/SettingsView.swift`, adds a new service file and test file, updates
+`project.pbxproj`'s manually-managed test registration, and rewrites the ADR
+and plan doc. It changes no send-execution file.
+
+- `swift format lint --strict --recursive App AppTests` — clean.
+- `git diff --check` — clean.
+- `xcodebuild -scheme iMCP -configuration Debug ... build` — succeeded.
+- `imcp-server` (CLI proxy) target build — succeeded, unaffected.
+- `xcodebuild -scheme imcp-serverTests -configuration Debug ... test` —
+  **258/258 tests passed, 0 failures** (252 base + 6 new
+  `MessagesSendingModeTests`, replacing the 8 removed
+  `MessagesAutomaticSendPolicyTests`: 260 − 8 + 6 = 258, confirming the swap
+  was exact). A stale `ManualVerification` process from an earlier session (PID
+  21586) blocked the first attempt — identified and terminated, not blindly
+  retried, matching the established procedure for this known issue class.
+- `-only-testing:imcp-serverTests/MessagesSendingModeTests` — all 6 new tests
+  individually confirmed passing.
+- Signed `.build/ManualVerification` build regenerated with
+  `DEVELOPMENT_TEAM=4LC533SNYD` — succeeded. `codesign --verify --strict`
+  valid. Entitlement key set identical to every earlier signed build in this
+  slice, none weakened.
+- `python3 CLITests/test_elicitation_proxy.py <built imcp-server>` — not
+  re-attempted this pass; the pre-existing `DYLD_FRAMEWORK_PATH` path-fragility
+  issue documented in the correction pass above is unrelated to this
+  redesign (no `CLI/` code touched) and was left as noted prior art rather than
+  re-diagnosed.
+- `git status --porcelain=v1 -uall` showed exactly the expected files before
+  staging this documentation update.
+
 ## Manual verification checkpoint
 
 Using the signed build at
 `.build/ManualVerification/Build/Products/Debug/iMCP.app`:
 
 1. Launch the app and open Settings — it opens normally.
-2. Confirm the new "Automatic Sending" section is visible in General settings,
-   below "Message Sending," with clear explanatory text.
-3. Confirm all four category toggles start **off** (confirmation-required) and
-   "Require Confirmation for Everything" is disabled (nothing to reset).
-4. Enable one category toggle. Confirm the "Allow Automatic Sending?" warning
-   appears exactly once, with "Cancel" and "Allow Automatically" options.
-   Confirm "Cancel" leaves the toggle off; confirm "Allow Automatically" turns
-   it on.
-5. Close and reopen Settings — the enabled category stays on. Quit and relaunch
-   the app — it is still on.
-6. Enable a second category — no warning repeats.
-7. Click "Allow Everything Automatically" — all four categories turn on, no
-   further warning (at least one was already automatic).
-8. Click "Require Confirmation for Everything" — all four categories turn off,
-   no warning.
-9. Confirm the existing "Send confirmation" picker (Automatic / MCP form / iMCP
-   app) and the Phone Number Region and Trusted Clients sections still display
+2. In the "Message Sending" section, confirm one **Sending** choice is visible,
+   defaulting to **Ask Before Sending**.
+3. Confirm a **Confirmation method** choice (**Best available** / **MCP form**
+   / **iMCP app**) is visible beneath it while Ask Before Sending is active.
+4. Select **Send Automatically**. Confirm one warning appears ("Send
+   Automatically?"). Confirm **Cancel** leaves the mode at Ask Before Sending.
+   Confirm **Send Automatically** (the alert's action button) applies the
+   change.
+5. Confirm the Confirmation method control is now hidden.
+6. Close and reopen Settings — Send Automatically persists. Quit and relaunch
+   the app — it is still selected.
+7. Switch back to **Ask Before Sending** — no warning appears, and the
+   Confirmation method control reappears, still set to its previous value.
+8. Confirm no four-category toggles, "Allow Everything Automatically," or
+   "Require Confirmation for Everything" controls remain anywhere in Settings.
+9. Confirm the Phone Number Region and Trusted Clients sections still display
    and behave normally, unaffected by any of the above.
 
 No message needs to be sent during this checkpoint, and none was sent during
@@ -247,18 +312,19 @@ implementation or automated verification.
 
 ## Explicit statement
 
-**Send execution still ignores this policy.** `messages_send` and
-`messages_send_attachment` are byte-for-byte unchanged from the starting SHA.
-Every send — direct, group, text, or attachment — still requires the existing
-mandatory final confirmation regardless of any setting added in this slice.
-Wiring this policy into the send paths is separate, later work with its own
-manual checkpoint.
+**Send execution still ignores this mode.** `messages_send` and
+`messages_send_attachment` are byte-for-byte unchanged from the starting SHA
+across every revision of this slice. Every send — direct, group, text, or
+attachment — still requires the existing mandatory final confirmation
+regardless of the selected Sending mode. Wiring this mode into the send paths
+is separate, later work with its own manual checkpoint, gated on this
+redesigned UX passing manual acceptance.
 
 ## Unresolved issues
 
-- Consuming this policy from `messages_send`/`messages_send_attachment` is not
+- Consuming this mode from `messages_send`/`messages_send_attachment` is not
   yet implemented — intentionally out of scope for this slice.
-- No automatic-new-recipient category exists; adding one depends on a still-open
+- No automatic-new-recipient state exists; adding one depends on a still-open
   investigation into whether any safe unattended new-recipient mechanism exists
   (see `imessage-mcp/automation-product-design` in Hexa).
 - The pre-existing `trustedClients` spoofing gap noted during the client-identity
@@ -266,8 +332,7 @@ manual checkpoint.
   `clientInfo.name`) is unrelated to this slice and was not touched here.
 - `CLITests/test_elicitation_proxy.py`'s `DYLD_FRAMEWORK_PATH` computation
   (four `os.path.dirname` calls from the binary path) pointed at the wrong
-  directory in this local `.build/DerivedData` state during the correction
-  pass, so the script could not complete against the freshly rebuilt
-  `imcp-server`. This is a pre-existing test-harness path-fragility issue, not
-  a regression from this correction; worth a small fix separately, out of
-  scope here.
+  directory in local `.build/DerivedData` state during the correction pass, so
+  the script could not complete against a freshly rebuilt `imcp-server`. Still
+  unresolved; a pre-existing test-harness path-fragility issue, not a
+  regression from any revision of this slice; worth a small fix separately.
