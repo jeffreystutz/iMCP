@@ -23,6 +23,12 @@ conversation evidence. The literal cross-service composite over those operations
 `contacts_find_conversations`, is implemented and is advertised and callable only
 while both the Contacts and Messages services are enabled.
 
+A global, category-keyed Messages automatic-send authorization policy and its
+Settings UI are implemented (ADR 0010). This first slice persists the policy and
+lets a user view/change it; no send path consults it yet, so confirmation-required
+behavior for every existing send is unchanged. See "Automatic-send authorization
+policy" below.
+
 ## Verified baseline
 
 - The app and CLI target macOS 15.1 and build in Swift 5 language mode.
@@ -501,6 +507,50 @@ public type description, and formatted size, and says that no message text is
 sent. It never shows the path or the contents. The result reuses the redacted
 submission status with `mode: attachment` and carries no file facts. Success means
 Messages accepted one attachment submission, never that it was delivered.
+
+## Automatic-send authorization policy
+
+Feature completion was reopened by a product expansion: confirmation-required
+stays the factory default, but a user may explicitly opt into automatic sending
+for eligible categories in iMCP Settings, for unattended workflows. The
+architecture investigation behind this milestone is recorded in Hexa (project
+knowledge `imessage-mcp/automation-product-design`,
+`imessage-mcp/current-status`), not duplicated here.
+
+That investigation found the current MCP connection stack — a bundled CLI
+proxying stdio to a loopback-only `NWListener`/`NWConnection` TCP socket in the
+signed app — exposes no OS-derived, unspoofable per-client identity.
+`clientInfo.name` is the only available signal, is caller-supplied, and is
+already the (unauthenticated) key behind the existing `trustedClients`
+connection-approval feature. The settled product decision, given that finding,
+is **one global Messages automatic-send policy for the whole application**,
+never a per-client model. See Proposed ADR 0010 for the full decision record.
+
+The first implementation slice adds only the persisted policy and its Settings
+UI. `MessagesAutomaticSendPolicy` stores the set of currently-automatic
+categories — `existingDirectConversationText`, `existingGroupConversationText`,
+`existingDirectConversationAttachment`, `existingGroupConversationAttachment` —
+JSON-encoded into one `UserDefaults` entry, with every category defaulting to
+confirmation-required and any absent or unrecognized persisted value resolving
+safely to confirmation-required rather than being guessed. There is
+deliberately no automatic-new-recipient category yet, because the new-recipient
+path stays human-completed `NSSharingService` composition (ADR 0006) regardless
+of this policy.
+
+Settings gains an "Automatic Sending" section alongside the existing "Message
+Sending" (confirmation-presentation) section: one toggle per category, an "Allow
+Everything Automatically" action, and a "Require Confirmation for Everything"
+action. Enabling the first automatic category shows one native warning that
+connected MCP clients can then submit that category without asking each time;
+later categories enabled while at least one is already automatic do not repeat
+it. No MCP tool reads or writes this policy's storage key, so no tool argument,
+prompt, or elicitation response can change it — only Settings-owned code can.
+
+This slice deliberately does not wire the policy into `messages_send` or
+`messages_send_attachment`. Changing these settings currently has zero effect on
+send behavior; every existing send path is unchanged and its full test suite
+passes unmodified. Consuming the policy from the send paths is a separate,
+later slice with its own manual checkpoint.
 
 ## Reference implementation
 
