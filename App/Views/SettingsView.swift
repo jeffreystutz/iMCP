@@ -120,7 +120,7 @@ struct GeneralSettingsView: View {
                 }
 
                 Text(
-                    "How iMCP confirms a message sent to a conversation you already have. Automatic uses an MCP form when the client advertises support; otherwise iMCP shows the confirmation. Choose iMCP app for clients that do not visibly support form elicitation. A confirmation is always required."
+                    "How iMCP confirms a message sent to a conversation you already have, when confirmation is required. Automatic uses an MCP form when the client advertises support; otherwise iMCP shows the confirmation. Choose iMCP app for clients that do not visibly support form elicitation. Whether confirmation is required at all for a given kind of message is controlled separately, in Automatic Sending below."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)

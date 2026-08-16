@@ -14,17 +14,26 @@ also needs a deliberate, user-controlled way to let eligible sends skip
 confirmation for unattended workflows, without ever letting an MCP caller enable
 that for itself.
 
-A companion investigation (recorded in Hexa, not duplicated here) considered
-whether authorization could be scoped per connected MCP client. It found that the
-current connection stack — a bundled CLI proxying stdio to a loopback-only
-`NWListener`/`NWConnection` TCP socket in the signed app — exposes no OS-derived,
-unspoofable client identity. The only signal available, `clientInfo.name`, is a
-plaintext value the connecting process supplies in its own `initialize` request,
-already used for the existing `trustedClients` connection-approval feature with no
-secondary verification, and already provably spoofable there. Building
-per-client automation authorization on top of that signal would present a false
-security boundary. The product decision, made explicitly given that finding, is
-one global policy for the whole application rather than a per-client trust model.
+Per-client automation authorization — separate approval state for each connected
+MCP client — was considered. The user explicitly rejected it: for this project,
+the additional UX, configuration, and (if it were to be made trustworthy) pairing
+or authentication complexity is not worth it. The product decision is one global
+policy for the whole application, applying equally to every connected MCP client,
+chosen for product simplicity.
+
+A companion investigation (recorded in Hexa, not duplicated here) separately
+considered whether authorization *could* be scoped per connected MCP client if
+the project wanted to. It found that the current connection stack — a bundled CLI
+proxying stdio to a loopback-only `NWListener`/`NWConnection` TCP socket in the
+signed app — exposes no OS-derived, unspoofable client identity. The only signal
+available, `clientInfo.name`, is a plaintext value the connecting process
+supplies in its own `initialize` request, already used for the existing
+`trustedClients` connection-approval feature with no secondary verification, and
+already provably spoofable there. That finding is not why the global model was
+chosen — it did not drive the product decision — but it is a reason the project
+should not describe `clientInfo.name` as an authenticated client identity, and a
+reason not to build a fake per-client security boundary on top of it later
+without first establishing real client identity.
 
 This ADR covers only the policy's shape and Settings surface. No send path
 consults it yet; that is a deliberate later slice, so that the Settings behavior
@@ -33,13 +42,17 @@ bypassed.
 
 ## Decision drivers
 
+- Product simplicity: the user explicitly chose not to take on per-client
+  approval UX, configuration, and pairing/authentication complexity for this
+  project.
 - Confirmation-required must remain the factory default; nothing here may weaken
   it by itself.
 - Automation authorization must be app-owned, persistent policy. No MCP argument,
   prompt, or elicitation response may enable it.
-- The policy must not pretend to be more precise than the identity model
-  supports. A per-client policy keyed on a spoofable, self-declared string would
-  be a false boundary, not a real one.
+- Separately, the policy must not pretend to be more precise than the identity
+  model supports. A per-client policy keyed on a spoofable, self-declared string
+  would be a false boundary, not a real one, so this project should not build one
+  even if per-client scoping were later reconsidered.
 - The shape must be forward-compatible enough to add a future automatic
   new-recipient category without redesigning the Settings architecture.
 - Existing confirmation-presentation settings (`MessagesSendConfirmationMode`)
@@ -49,16 +62,20 @@ bypassed.
 
 ## Options considered
 
-### Per-client policy keyed by `clientInfo.name`
+### Per-client automation authorization
 
-Rejected for this decision. `clientInfo.name` is unauthenticated and
-caller-supplied; nothing distinguishes a legitimately reconnecting trusted client
-from another local process that opens the Bonjour-advertised port and echoes a
-previously-seen name. Shipping per-client automation authorization on this
-signal would let a policy the user believes is scoped to one client actually
-apply to anything willing to claim that name. `clientInfo.name` may continue to
-support display and the existing connection-approval feature, but it is not an
-authorization boundary.
+Considered and explicitly rejected by the user as unnecessary product
+complexity: separate approval state per connected MCP client would add UX,
+configuration, and — to be trustworthy — pairing or authentication work this
+project does not need. That is the primary reason it was not selected.
+
+Separately, even setting complexity aside, keying such a policy on
+`clientInfo.name` specifically would not have produced a real security boundary.
+That value is unauthenticated and caller-supplied; nothing distinguishes a
+legitimately reconnecting trusted client from another local process that opens
+the Bonjour-advertised port and echoes a previously-seen name. `clientInfo.name`
+may continue to support display and the existing connection-approval feature,
+but it is not an authorization boundary.
 
 ### A loose collection of independent `UserDefaults` booleans
 
@@ -118,12 +135,16 @@ exactly as it did before this change.
 
 ## Rationale
 
-Keying the boundary on the one thing that is actually true today — this is an
-app-wide, user-set trust decision, not a per-caller grant — is more honest than
-building visible per-client controls over an identity signal that cannot support
-them. If a durable client-identity mechanism is added later, a per-client
-override can be layered on top of this same category model without changing its
-shape; nothing here forecloses that.
+One global policy is simpler to build, explain, and verify than a per-client
+model, and the user explicitly decided that simplicity is the right tradeoff for
+this project rather than a compromise forced by any technical constraint.
+Separately, the connection-identity finding reinforces the choice rather than
+driving it: even if per-client scoping were reconsidered later, it should not be
+built on `clientInfo.name` without first establishing a real client-identity
+mechanism, since doing so today would present a false security boundary. If a
+durable client-identity mechanism is added later, a per-client override can be
+layered on top of this same category model without changing its shape; nothing
+here forecloses that.
 
 Separating the policy's existence from its consumption gives the project a
 manual Settings checkpoint — the user can see and change the policy, confirm
@@ -150,8 +171,9 @@ wire it in correctly," which is a materially riskier change touching
 ### Negative
 
 - A user who wants finer-grained trust per MCP client cannot get it from this
-  policy; that would require a durable identity mechanism this ADR explicitly
-  does not attempt to fabricate.
+  policy. That was an explicit, considered tradeoff, not an oversight; revisiting
+  it later would also require a durable client-identity mechanism this ADR does
+  not attempt to fabricate, since `clientInfo.name` alone cannot support it.
 - The Settings section currently has no effect on behavior, which is correct for
   this slice but means "I turned this on and nothing changed" is expected,
   temporary behavior until the next slice wires it in.

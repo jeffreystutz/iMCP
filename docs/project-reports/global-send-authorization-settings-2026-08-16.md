@@ -2,6 +2,7 @@
 
 - Starting implementation SHA: `1822a44b3f40dbda7246ad2753978113aa235de3`
 - Final implementation SHA: `d6dc2ad` (`feat/messages-write-foundation`)
+- Correction SHA (Settings copy + rationale, no behavior change): `5dd68a6`
 - Branch: `feat/messages-write-foundation`
 
 Between the start of this task and its push, `origin/feat/messages-write-foundation`
@@ -20,11 +21,46 @@ Confirmation remains mandatory for every existing send, exactly as at the
 starting SHA.
 
 Per the settled product decision (see ADR 0010), the policy is global rather than
-per-client: the current MCP connection stack was found to expose no OS-derived,
-unspoofable client identity, only a caller-supplied `clientInfo.name` already
-used, unauthenticated, for the existing `trustedClients` connection-approval
-feature. A per-client automation-authorization boundary built on that signal
-would be a false boundary, so this slice intentionally does not attempt one.
+per-client. Per-client automation authorization was considered and explicitly
+rejected by the user as unnecessary product complexity — the additional UX,
+configuration, and (to be trustworthy) pairing or authentication work is not
+worth it for this project. Separately, an investigation found the current MCP
+connection stack exposes no OS-derived, unspoofable client identity, only a
+caller-supplied `clientInfo.name` already used, unauthenticated, for the
+existing `trustedClients` connection-approval feature. That finding did not
+drive the global-policy decision, but it is a reason the project should not
+describe `clientInfo.name` as an authenticated identity or build a per-client
+authorization boundary on top of it later without first establishing real
+client identity. No client-profile/pairing/token project is required or planned
+for this policy, and the pre-existing `trustedClients` spoofing weakness may be
+hardened separately if desired but is not a prerequisite for this feature.
+
+## Supervising review corrections (this update)
+
+A supervising review of `d6dc2ad`/`cab286f` found the implementation and tests
+sound but identified two documentation/UX-copy issues, corrected additively in
+this update without touching the reviewed commits:
+
+1. **Contradictory Settings copy.** The existing "Message Sending" help text in
+   `App/Views/SettingsView.swift` ended with "A confirmation is always
+   required," which contradicts the adjacent Automatic Sending policy and would
+   become false once send-path wiring is added. Revised to state that this text
+   describes *how* confirmation is presented *when* confirmation is required,
+   and that *whether* confirmation is required at all is controlled separately
+   in the Automatic Sending section below.
+2. **Product-decision rationale drift.** This report, the ADR, and the plan
+   document previously implied the global (rather than per-client) policy was
+   chosen *because* `clientInfo.name` is spoofable. That reversed the actual
+   reasoning: the user chose the global policy for product simplicity, and
+   explicitly rejected per-client controls as unneeded complexity; the
+   spoofability finding is separate supporting context for why the project
+   should not fake a per-client boundary on top of the existing declared-name
+   signal, not the decisive reason for the product choice. Corrected in this
+   report (above), in `docs/decisions/0010-global-automatic-send-authorization-policy.md`,
+   and in `docs/messages-write-plan.md`.
+
+ADR 0010 remains at status `Proposed` — this correction does not mark it
+Accepted; that remains gated on the manual Settings acceptance checkpoint below.
 
 ## Files and symbols changed
 
@@ -115,7 +151,7 @@ No stored value, an empty stored value, a corrupt stored value, or a stored valu
 containing an unrecognized category all resolve to this same default — the whole
 decode fails safely rather than partially trusting a payload.
 
-## Verification evidence
+## Verification evidence (original slice, `d6dc2ad`)
 
 - `swift format lint --strict --recursive App AppTests` — clean (fixed two
   formatting violations with `swift format format --in-place`, then re-linted
@@ -142,6 +178,44 @@ decode fails safely rather than partially trusting a payload.
   (`/Users/*/Library/Messages/`) all present and unweakened.
 - `git status --porcelain=v1 -uall` clean immediately before committing (only
   the intended files staged).
+
+## Correction verification evidence (Settings copy + rationale, no behavior change)
+
+This correction changed one Swift string literal (`App/Views/SettingsView.swift`)
+and prose in three documentation files. It did not add, remove, or change any
+type, property, method, control-flow, or test.
+
+- `swift format lint --strict --recursive App AppTests` — clean, no violations.
+- `git diff --check` — clean.
+- `git status --porcelain=v1 -uall` before staging showed exactly the four
+  expected files changed: `App/Views/SettingsView.swift`,
+  `docs/decisions/0010-global-automatic-send-authorization-policy.md`,
+  `docs/messages-write-plan.md`, and this report.
+- `xcodebuild -scheme iMCP -configuration Debug ... build` — succeeded.
+- `xcodebuild -scheme imcp-serverTests -configuration Debug ... test` — re-ran
+  the full suite despite the copy-only scope, for extra confidence:
+  **260/260 tests passed, 0 failures**, identical to the original slice's
+  result. No stale `ManualVerification` process was running this time.
+- `python3 CLITests/test_elicitation_proxy.py <built imcp-server>` —
+  **could not complete**, for a reason unrelated to this correction: the
+  script computes `DYLD_FRAMEWORK_PATH` from the binary's path
+  (`CLITests/test_elicitation_proxy.py`, four `os.path.dirname` calls) and, in
+  this local `.build/DerivedData` state, that computed path
+  (`.../DerivedData/PackageFrameworks`) does not match where the just-built
+  `imcp-server`'s `PackageFrameworks` actually live
+  (`.../DerivedData/Build/Products/Debug/PackageFrameworks`). Confirmed by
+  direct inspection: launching the binary with the script's exact environment
+  produces `dyld: Library not loaded: @rpath/Logging_..._PackageProduct...`,
+  a link-resolution issue, not a behavior change from this correction — no
+  code this correction touches is on that binary's link path, and this
+  correction does not modify `CLI/`, entitlements, or build settings.
+- Signed `.build/ManualVerification` build regenerated with the same
+  `DEVELOPMENT_TEAM=4LC533SNYD` — succeeded. `codesign --verify --strict`
+  valid. Entitlement key set identical to the original slice's signed build
+  (`app-sandbox`, `automation.apple-events`, `files.bookmarks.app-scope`,
+  `files.user-selected.read-write`, both Messages temporary-exception keys,
+  and the unrelated pre-existing entitlements carried from the base project),
+  none weakened.
 
 ## Manual verification checkpoint
 
@@ -190,3 +264,10 @@ manual checkpoint.
 - The pre-existing `trustedClients` spoofing gap noted during the client-identity
   investigation (any local process can claim a previously-trusted
   `clientInfo.name`) is unrelated to this slice and was not touched here.
+- `CLITests/test_elicitation_proxy.py`'s `DYLD_FRAMEWORK_PATH` computation
+  (four `os.path.dirname` calls from the binary path) pointed at the wrong
+  directory in this local `.build/DerivedData` state during the correction
+  pass, so the script could not complete against the freshly rebuilt
+  `imcp-server`. This is a pre-existing test-harness path-fragility issue, not
+  a regression from this correction; worth a small fix separately, out of
+  scope here.

@@ -517,14 +517,23 @@ architecture investigation behind this milestone is recorded in Hexa (project
 knowledge `imessage-mcp/automation-product-design`,
 `imessage-mcp/current-status`), not duplicated here.
 
-That investigation found the current MCP connection stack — a bundled CLI
-proxying stdio to a loopback-only `NWListener`/`NWConnection` TCP socket in the
-signed app — exposes no OS-derived, unspoofable per-client identity.
-`clientInfo.name` is the only available signal, is caller-supplied, and is
-already the (unauthenticated) key behind the existing `trustedClients`
-connection-approval feature. The settled product decision, given that finding,
-is **one global Messages automatic-send policy for the whole application**,
-never a per-client model. See Proposed ADR 0010 for the full decision record.
+Per-client automation authorization was considered and explicitly rejected by
+the user as unnecessary product complexity — the additional UX, configuration,
+and (to be trustworthy) pairing or authentication work is not worth it for this
+project. The settled product decision is **one global Messages automatic-send
+policy for the whole application**, applying equally to every connected MCP
+client, never a per-client model.
+
+Separately, that same investigation found the current MCP connection stack — a
+bundled CLI proxying stdio to a loopback-only `NWListener`/`NWConnection` TCP
+socket in the signed app — exposes no OS-derived, unspoofable per-client
+identity. `clientInfo.name` is the only available signal, is caller-supplied,
+and is already the (unauthenticated) key behind the existing `trustedClients`
+connection-approval feature. This finding did not drive the global-policy
+decision, but it is a reason the project should not describe `clientInfo.name`
+as an authenticated identity or build a per-client authorization boundary on top
+of it without first establishing real client identity. See Proposed ADR 0010 for
+the full decision record.
 
 The first implementation slice adds only the persisted policy and its Settings
 UI. `MessagesAutomaticSendPolicy` stores the set of currently-automatic
