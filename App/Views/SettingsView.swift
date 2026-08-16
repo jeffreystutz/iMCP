@@ -68,35 +68,25 @@ struct GeneralSettingsView: View {
     @ObservedObject var serverController: ServerController
     @AppStorage(MessagesSendConfirmationMode.storageKey)
     private var sendConfirmationMode = MessagesSendConfirmationMode.defaultValue.rawValue
-    @AppStorage(MessagesAutomaticSendPolicy.storageKey)
-    private var automaticSendPolicyData = MessagesAutomaticSendPolicy.defaultValue.encoded()
+    @AppStorage(MessagesSendingMode.storageKey)
+    private var sendingMode = MessagesSendingMode.defaultValue.rawValue
     @AppStorage(PhoneNumberRegionSetting.storageKey)
     private var phoneNumberRegion = PhoneNumberRegionSetting.defaultValue.rawValue
     @State private var showingResetAlert = false
     @State private var selectedClients = Set<String>()
-    @State private var showingAutomaticSendWarning = false
-    @State private var pendingAutomaticSendPolicyData: Data?
+    @State private var showingSendAutomaticallyWarning = false
 
-    private var automaticSendPolicy: MessagesAutomaticSendPolicy {
-        MessagesAutomaticSendPolicy.decode(automaticSendPolicyData)
-    }
-
-    /// Applies a policy change directly, unless it is the sensitive "no category was
-    /// automatic, now at least one is" transition, in which case it stages the change and
-    /// shows one warning instead of applying it — regardless of which control (an
-    /// individual toggle or "Allow Everything Automatically") triggered the transition, so
-    /// the warning appears at most once per transition rather than once per checkbox.
-    private func requestAutomaticSendPolicyChange(
-        _ mutate: (inout MessagesAutomaticSendPolicy) -> Void
-    ) {
-        var updated = automaticSendPolicy
-        let wasAnyAutomatic = updated.isAnyCategoryAutomatic
-        mutate(&updated)
-        if updated.isAnyCategoryAutomatic && !wasAnyAutomatic {
-            pendingAutomaticSendPolicyData = updated.encoded()
-            showingAutomaticSendWarning = true
+    /// Applies a sending-mode change directly, unless it is the transition from Ask
+    /// Before Sending to Send Automatically, in which case it stages the change and
+    /// shows one warning instead of applying it immediately. Switching back to Ask
+    /// Before Sending never warns, since that can only make behavior safer.
+    private func requestSendingModeChange(_ newMode: MessagesSendingMode) {
+        if newMode == .sendAutomatically
+            && MessagesSendingMode.decode(sendingMode) == .askBeforeSending
+        {
+            showingSendAutomaticallyWarning = true
         } else {
-            automaticSendPolicyData = updated.encoded()
+            sendingMode = newMode.rawValue
         }
     }
 
@@ -108,64 +98,48 @@ struct GeneralSettingsView: View {
         Form {
             Section("Message Sending") {
                 Picker(
-                    "Send confirmation",
+                    "Sending",
                     selection: Binding(
-                        get: { MessagesSendConfirmationMode.decode(sendConfirmationMode) },
-                        set: { sendConfirmationMode = $0.rawValue }
+                        get: { MessagesSendingMode.decode(sendingMode) },
+                        set: { requestSendingModeChange($0) }
                     )
                 ) {
-                    ForEach(MessagesSendConfirmationMode.allCases) { mode in
+                    ForEach(MessagesSendingMode.allCases) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
 
                 Text(
-                    "How iMCP confirms a message sent to a conversation you already have, when confirmation is required. Automatic uses an MCP form when the client advertises support; otherwise iMCP shows the confirmation. Choose iMCP app for clients that do not visibly support form elicitation. Whether confirmation is required at all for a given kind of message is controlled separately, in Automatic Sending below."
+                    "Ask Before Sending is the safe default: iMCP confirms before submitting a message to a conversation you already have. Send Automatically applies to every connected MCP client, letting any of them submit an eligible message without asking each time. Neither changes how a destination is resolved or verified."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-                Text(
-                    "This setting does not apply to a recipient you have no conversation with. Those open a Messages compose window that you review, may edit, and send yourself."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            Section("Automatic Sending") {
-                Text(
-                    "By default, iMCP asks you to confirm before sending. Turning on a category below applies to every connected MCP client: any of them may then submit that kind of message without asking each time. This does not change how a destination is resolved or verified, and does not apply to a new recipient, which always opens a Messages compose window you complete yourself."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-                ForEach(MessagesAutomaticSendCategory.allCases) { category in
-                    Toggle(
-                        category.title,
-                        isOn: Binding(
-                            get: { automaticSendPolicy.isAutomatic(category) },
-                            set: { isAutomatic in
-                                requestAutomaticSendPolicyChange {
-                                    $0.setAutomatic(isAutomatic, for: category)
-                                }
-                            }
+                if MessagesSendingMode.decode(sendingMode) == .askBeforeSending {
+                    Picker(
+                        "Confirmation method",
+                        selection: Binding(
+                            get: { MessagesSendConfirmationMode.decode(sendConfirmationMode) },
+                            set: { sendConfirmationMode = $0.rawValue }
                         )
+                    ) {
+                        ForEach(MessagesSendConfirmationMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+
+                    Text(
+                        "How iMCP presents that confirmation. Best available uses an MCP form when the client advertises support, otherwise iMCP shows the confirmation. Choose iMCP app for clients that do not visibly support form elicitation."
                     )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
 
-                HStack {
-                    Button("Allow Everything Automatically") {
-                        requestAutomaticSendPolicyChange { $0.allowEverythingAutomatically() }
-                    }
-                    .disabled(automaticSendPolicy.isEveryCategoryAutomatic)
-
-                    Button("Require Confirmation for Everything") {
-                        automaticSendPolicyData =
-                            MessagesAutomaticSendPolicy.confirmationRequiredForEverything
-                            .encoded()
-                    }
-                    .disabled(!automaticSendPolicy.isAnyCategoryAutomatic)
-                }
+                Text(
+                    "Neither setting applies to a recipient you have no conversation with. Those open a Messages compose window that you review, may edit, and send yourself."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             Section("Phone Number Region") {
@@ -244,19 +218,14 @@ struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .alert("Allow Automatic Sending?", isPresented: $showingAutomaticSendWarning) {
-            Button("Cancel", role: .cancel) {
-                pendingAutomaticSendPolicyData = nil
-            }
-            Button("Allow Automatically") {
-                if let pendingAutomaticSendPolicyData {
-                    automaticSendPolicyData = pendingAutomaticSendPolicyData
-                }
-                pendingAutomaticSendPolicyData = nil
+        .alert("Send Automatically?", isPresented: $showingSendAutomaticallyWarning) {
+            Button("Cancel", role: .cancel) {}
+            Button("Send Automatically") {
+                sendingMode = MessagesSendingMode.sendAutomatically.rawValue
             }
         } message: {
             Text(
-                "Connected MCP clients will be able to send eligible Messages operations without asking each time. You can turn this off again at any time."
+                "All connected MCP clients will be able to submit an eligible existing-conversation Messages send without asking each time. You can switch back to Ask Before Sending at any time."
             )
         }
         .alert("Remove All Trusted Clients", isPresented: $showingResetAlert) {

@@ -14,7 +14,7 @@ enum MessagesSendConfirmationMode: String, CaseIterable, Identifiable, Sendable 
 
     var title: String {
         switch self {
-        case .automatic: "Automatic"
+        case .automatic: "Best available"
         case .mcpForm: "MCP form"
         case .appDialog: "iMCP app"
         }

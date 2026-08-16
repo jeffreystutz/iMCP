@@ -40,6 +40,17 @@ consults it yet; that is a deliberate later slice, so that the Settings behavior
 itself is a manually verifiable checkpoint before any confirmation can be
 bypassed.
 
+A first implementation represented the policy as four independent categories —
+existing direct/group conversation crossed with text/attachment — each with its
+own toggle, plus "Allow Everything Automatically" and "Require Confirmation for
+Everything" actions. That implementation was code-reviewed and passed automated
+verification, but failed the human manual Settings acceptance checkpoint: the
+user found the four-category control surface itself more complex than the
+product needs and explicitly approved a simpler binary replacement — one global
+**Sending mode**, either Ask Before Sending or Send Automatically, with no
+per-operation-class granularity. This ADR is revised in place to describe that
+settled binary model rather than the rejected four-category one.
+
 ## Decision drivers
 
 - Product simplicity: the user explicitly chose not to take on per-client
@@ -53,10 +64,16 @@ bypassed.
   model supports. A per-client policy keyed on a spoofable, self-declared string
   would be a false boundary, not a real one, so this project should not build one
   even if per-client scoping were later reconsidered.
-- The shape must be forward-compatible enough to add a future automatic
-  new-recipient category without redesigning the Settings architecture.
+- The control surface itself must stay minimal: a single global on/off choice
+  the user can understand at a glance, not per-conversation-kind or
+  per-payload-kind granularity, established by the manual UX checkpoint
+  rejecting the more granular alternative.
+- The mode never applies to a new recipient, which remains the human-completed
+  `NSSharingService` compose flow regardless of the selected mode.
 - Existing confirmation-presentation settings (`MessagesSendConfirmationMode`)
-  answer a different question and must stay independent.
+  answer a different question — how confirmation is presented when it is
+  required, not whether it is required — and must stay independent, though the
+  Settings layout may nest one beneath the other.
 - The slice must be safe to ship and verify entirely within Settings, with zero
   effect on current send behavior.
 
@@ -77,61 +94,62 @@ the Bonjour-advertised port and echoes a previously-seen name. `clientInfo.name`
 may continue to support display and the existing connection-approval feature,
 but it is not an authorization boundary.
 
-### A loose collection of independent `UserDefaults` booleans
+### Four-category granular control (existing direct/group × text/attachment)
 
-Rejected. Four (or more, later) unrelated boolean keys make "allow everything" /
-"require confirmation for everything" awkward to implement consistently, make a
-future new-recipient category an ad hoc addition rather than a natural extension,
-and give up the one place to enforce "an unknown persisted value must resolve to
-confirmation-required" uniformly.
+Implemented first, code-reviewed, and passed automated verification, but
+**rejected at the human manual Settings acceptance checkpoint**. The control
+surface — four independent toggles plus "Allow Everything Automatically" and
+"Require Confirmation for Everything" — was more than the user wanted to
+understand or manage for a product whose actual need is a single yes/no
+decision. The user explicitly approved replacing it rather than iterating on its
+copy or layout.
 
-### One coherent value-type policy, keyed by category, JSON-encoded into one `UserDefaults` entry
+### One binary global Sending mode
 
-Selected.
+Selected. `MessagesSendingMode` has exactly two cases, `.askBeforeSending`
+(factory default) and `.sendAutomatically`, with no operation-class dimension.
+This is the simplest model that still satisfies every decision driver above,
+and it is the model the user explicitly approved after rejecting the granular
+alternative.
 
 ## Decision
 
-Add `MessagesAutomaticSendPolicy`, a small value type wrapping
-`Set<MessagesAutomaticSendCategory>` — the categories currently exempt from
-confirmation — JSON-encoded into one `UserDefaults` entry
-(`me.mattt.iMCP.messagesAutomaticSendPolicy`), following the same
-encode-a-`Codable`-value-into-`Data` pattern already used for `trustedClients`.
+Add `MessagesSendingMode`, a `String`-backed enum with exactly two cases —
+`askBeforeSending` (factory default) and `sendAutomatically` — persisted as a
+raw string under its own `UserDefaults` key
+(`me.mattt.iMCP.messagesSendingMode`), following the same
+`decode(_:)`/`load(from:)` pattern already used by `MessagesSendConfirmationMode`.
 
-`MessagesAutomaticSendCategory` currently has four cases, each a conversation
-shape crossed with a payload shape:
+There is deliberately no operation-class dimension: no direct/group distinction,
+no text/attachment distinction, and no per-client variant. `sendAutomatically`
+applies equally to every connected MCP client, for every eligible
+existing-conversation programmatic send. It never applies to a new recipient,
+which remains human-completed `NSSharingService` composition (ADR 0006)
+regardless of the selected mode.
 
-- `existingDirectConversationText`
-- `existingGroupConversationText`
-- `existingDirectConversationAttachment`
-- `existingGroupConversationAttachment`
+This type replaces the earlier four-category `MessagesAutomaticSendPolicy` /
+`MessagesAutomaticSendCategory`, which is deleted rather than deprecated. That
+earlier type persisted under a different key
+(`me.mattt.iMCP.messagesAutomaticSendPolicy`); `MessagesSendingMode` never reads
+that key, so any category a developer enabled while manually testing the
+rejected design cannot resolve into `sendAutomatically` now — the safe default
+holds regardless of what that orphaned key contains.
 
-There is deliberately no automatic-new-recipient category yet. The current
-new-recipient path is human-completed `NSSharingService` composition (ADR 0006);
-this policy does not apply to it, and adding a category for a mechanism that does
-not exist would be speculative. Because the storage format is "the set of
-categories currently automatic," adding a category later — including a future
-new-recipient one — is an additive enum case, not a schema change, and any
-category absent from a previously saved value decodes safely to
-confirmation-required.
+Settings replaces the prior two-section split ("Message Sending" +
+"Automatic Sending") with one section containing a single **Sending** choice.
+When Ask Before Sending is active, a subordinate **Confirmation method** choice
+(the existing `MessagesSendConfirmationMode`, its `automatic` case now labeled
+"Best available" in the UI while its stored raw value stays `"automatic"`) is
+shown beneath it; when Send Automatically is active, that control is hidden
+rather than shown disabled. Selecting Send Automatically from Ask Before Sending
+shows one native `.alert` warning that all connected MCP clients will be able to
+submit eligible sends without asking each time; canceling leaves the mode
+unchanged. Switching back to Ask Before Sending never warns, since that can only
+make behavior safer.
 
-The policy is global. It applies equally to every connected MCP client; there is
-no per-client variant, and nothing about the value type or its storage key
-depends on any client-supplied information. Only Settings-owned code in
-`GeneralSettingsView` reads and writes it; no MCP tool touches this storage key,
-so no tool argument, prompt, or elicitation response can change it.
-
-Settings adds one "Automatic Sending" section: a toggle per category, an "Allow
-Everything Automatically" action, and a "Require Confirmation for Everything"
-action. Turning on the first automatic category — whichever control causes the
-transition from zero automatic categories to at least one — shows one native
-`.alert` warning that connected MCP clients will be able to send eligible
-operations without asking each time; subsequent categories enabled while at
-least one is already automatic do not repeat it. Returning to
-confirmation-required never warns, since it can only make behavior safer.
-
-This slice reads and writes the policy but does not wire it into
-`messages_send` or `messages_send_attachment`. Every existing send behaves
-exactly as it did before this change.
+This slice reads and writes the mode but does not wire it into `messages_send`
+or `messages_send_attachment`. Every existing send behaves exactly as it did
+before this change.
 
 ## Rationale
 
@@ -141,19 +159,26 @@ this project rather than a compromise forced by any technical constraint.
 Separately, the connection-identity finding reinforces the choice rather than
 driving it: even if per-client scoping were reconsidered later, it should not be
 built on `clientInfo.name` without first establishing a real client-identity
-mechanism, since doing so today would present a false security boundary. If a
-durable client-identity mechanism is added later, a per-client override can be
-layered on top of this same category model without changing its shape; nothing
-here forecloses that.
+mechanism, since doing so today would present a false security boundary.
 
-Separating the policy's existence from its consumption gives the project a
-manual Settings checkpoint — the user can see and change the policy, confirm
-persistence and the four required behaviors (initial confirmation-required,
-persistence across relaunch, "allow everything," "require confirmation for
-everything"), all before any code path can act on it. That sequencing turns "did
-we build the right control surface" into a reviewable step independent of "did we
-wire it in correctly," which is a materially riskier change touching
-`messages_send`/`messages_send_attachment` directly.
+The same simplicity principle turned out to apply one level down, inside the
+global model itself: the first attempt encoded that "global" scope as four
+independent operation-class toggles, which is a defensible design on paper but
+was, in practice, more control surface than the user wanted to reason about at
+the point of use. Rather than iterate on that shape's copy or layout, the user
+approved collapsing it to the binary choice the product actually needs today.
+If a genuine need for operation-class or per-client granularity emerges later,
+it is a new product decision and a new (or superseding) ADR, not a default this
+one should pre-build speculatively.
+
+Separating the mode's existence from its consumption still gives the project a
+manual Settings checkpoint — the user can see and change the mode, confirm
+persistence and its required behaviors, all before any code path can act on it.
+That sequencing turns "did we build the right control surface" into a
+reviewable step independent of "did we wire it in correctly," which is a
+materially riskier change touching `messages_send`/`messages_send_attachment`
+directly — a lesson reinforced, not undermined, by this correction: the control
+surface itself needed its own iteration before that riskier step should begin.
 
 ## Consequences
 
@@ -161,19 +186,21 @@ wire it in correctly," which is a materially riskier change touching
 
 - No caller can ever enable automatic sending for itself; the storage key has no
   MCP-reachable writer.
-- A stale, corrupt, or partially-recognized persisted value always resolves to
-  confirmation-required, never to an unintended automatic category.
-- The four-category shape and the enum-case extension pattern absorb a future
-  new-recipient category without a storage migration.
-- Existing `MessagesSendConfirmationMode` behavior and Settings layout are
-  untouched.
+- A stale, corrupt, or unrecognized persisted value always resolves to Ask
+  Before Sending, never to Send Automatically.
+- The rejected four-category model's persisted data, under its own separate
+  storage key, is simply never read by `MessagesSendingMode` — no migration
+  code was needed to make that safe, and a test pins the behavior explicitly.
+- Existing `MessagesSendConfirmationMode` runtime presentation semantics are
+  unchanged; only its `automatic` case's UI label changed, and only while Ask
+  Before Sending is active is the control shown at all.
 
 ### Negative
 
-- A user who wants finer-grained trust per MCP client cannot get it from this
-  policy. That was an explicit, considered tradeoff, not an oversight; revisiting
-  it later would also require a durable client-identity mechanism this ADR does
-  not attempt to fabricate, since `clientInfo.name` alone cannot support it.
+- A user who wants finer-grained trust per MCP client, or per conversation/
+  payload kind, cannot get it from this mode. That is now a twice-explicit,
+  considered tradeoff (once for per-client scope, once for operation-class
+  granularity), not an oversight.
 - The Settings section currently has no effect on behavior, which is correct for
   this slice but means "I turned this on and nothing changed" is expected,
   temporary behavior until the next slice wires it in.
@@ -186,40 +213,45 @@ wire it in correctly," which is a materially riskier change touching
   `MessagesAttachment.swift`, verified by running the full existing send-path test
   suite unchanged and confirming zero regressions.
 - **A user could misread "global" as "per client" from the UI wording.** The
-  Settings copy explicitly states a category applies to every connected MCP
+  Settings copy explicitly states the mode applies to every connected MCP
   client.
-- **Silent policy widening from a future category rename.** Tests pin the exact
-  four persisted rawValue strings, so a rename is a visible, deliberate change
-  rather than an accidental storage-format break.
+- **The orphaned four-category storage key could be misread as still relevant.**
+  It is never referenced by name in Settings or in `MessagesSendingMode`, and a
+  test asserts loading the new mode is unaffected by its contents regardless of
+  what they are.
 
 ## Validation
 
-Automated tests cover: every category confirmation-required by factory default;
-persistence round-trip through `UserDefaults`; independence between categories
-under individual updates; "Allow Everything" enabling every current category;
-"Require Confirmation for Everything" clearing every category; safe
-confirmation-required fallback for absent, empty, corrupt, and
-unknown-category-containing persisted values; and independence from
-`MessagesSendConfirmationMode`. The full existing `imcp-serverTests` suite passes
-unchanged alongside the new tests, evidencing no send-path regression.
+Automated tests cover: Ask Before Sending as the factory default; persistence
+round-trip for both modes; safe fallback to Ask Before Sending for absent,
+empty, and unrecognized stored values (including a plausible-looking but wrong
+string); the rejected four-category model's persisted data being unable to
+enable Send Automatically; independence between `MessagesSendingMode` and
+`MessagesSendConfirmationMode` in both directions; and the former `automatic`
+case's title now reading "Best available" while its stored raw value stays
+`"automatic"`. The full existing `imcp-serverTests` suite passes unchanged
+alongside the new tests, evidencing no send-path regression.
 
-Manual verification is a Settings-only checkpoint: open Settings, confirm the new
-section is visible and every category starts confirmation-required, enable one
-category and confirm the warning appears exactly once, confirm the change
-persists across closing/reopening Settings and an app relaunch, confirm "Allow
-Everything Automatically" enables all four categories, and confirm "Require
-Confirmation for Everything" resets them. No message is sent during this
-checkpoint.
+Manual verification is a Settings-only checkpoint: open Settings, confirm one
+Sending choice defaulting to Ask Before Sending, confirm Confirmation method
+(Best available / MCP form / iMCP app) is visible beneath it only while Ask
+Before Sending is active, choosing Send Automatically shows exactly one warning
+that canceling reverts and accepting applies, the mode and confirmation choice
+persist across Settings reopen and app relaunch, and switching back to Ask
+Before Sending requires no warning and restores the Confirmation method control.
+No message is sent during this checkpoint.
 
 ## References
 
-- ADR 0002, for the confirmation-required default this policy will eventually be
-  permitted to bypass for eligible categories
-- ADR 0006, for the human-completed new-recipient path this policy does not cover
-- ADR 0009, for the existing-conversation attachment path this policy's
-  attachment categories describe
+- ADR 0002, for the confirmation-required default this mode will eventually be
+  permitted to bypass for eligible existing-conversation sends
+- ADR 0006, for the human-completed new-recipient path this mode does not cover
+- ADR 0009, for the existing-conversation attachment path this mode will
+  eventually apply to
 - `App/Services/MessagesSendConfirmation.swift`, for the independent
-  presentation-mode setting this policy does not replace
+  presentation-mode setting this mode does not replace, and for the `automatic`
+  case whose UI label this correction changed to "Best available" without
+  changing its stored raw value
 - `App/Controllers/ServerController.swift`, for the `trustedClients` pattern this
-  policy's storage follows and the spoofable-identity finding this policy avoids
+  mode's storage follows and the spoofable-identity finding this mode avoids
   relying on
