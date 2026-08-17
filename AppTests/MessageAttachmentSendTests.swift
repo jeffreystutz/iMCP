@@ -64,12 +64,16 @@ final class MessageAttachmentSendTests: XCTestCase {
         // Nothing is required at the schema level: exactly-one-of is enforced in code.
         XCTAssertNil(schema["required"])
 
-        // No file or message input may exist on this tool in any spelling.
+        // No file or message input may exist on this tool in any spelling, and no
+        // caller-facing sending-mode/confirmation-bypass argument may exist either: the
+        // global Sending mode is app-owned and unreachable from any MCP argument.
         let schemaText = try XCTUnwrap(String(data: encoded, encoding: .utf8)).lowercased()
         for forbidden in [
             "\"path\"", "\"file\"", "\"file_path\"", "\"filepath\"", "\"url\"", "\"body\"",
             "\"text\"", "\"caption\"", "\"filename\"", "\"file_name\"", "\"bytes\"", "\"data\"",
             "\"attachment\"", "\"attachment_id\"", "\"content\"", "\"mime_type\"", "\"uti\"",
+            "\"mode\"", "\"sending_mode\"", "\"automatic\"", "\"bypass\"", "\"confirm\"",
+            "\"confirmation\"",
         ] {
             XCTAssertFalse(
                 schemaText.contains(forbidden),
@@ -755,27 +759,243 @@ final class MessageAttachmentSendTests: XCTestCase {
         }
     }
 
-    /// Attachment sending is not wired to the global Sending mode in this slice: it must
-    /// keep requesting its final confirmation even while Send Automatically is selected
-    /// for text sends, and must not dispatch without it.
-    func testSendAutomaticallyDoesNotBypassAttachmentConfirmation() async throws {
+    // MARK: - Global Sending mode: Send Automatically
+
+    func testAskBeforeSendingAttachmentRemainsUnchanged() async throws {
         let url = try makeFile("Still Confirmed.pdf", byteCount: 1_024)
+        // No sendingMode argument: the default must behave exactly like the explicit
+        // .askBeforeSending case, matching the accepted behavior at eb64ee2d.
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch], selection: .success(url))
+        let result = try await harness.call(["recipient": .string("recipient@example.invalid")])
+
+        XCTAssertEqual(harness.elicitation.requestCount, 1)
+        let dispatches = await harness.sender.attachmentSubmissionCount
+        XCTAssertEqual(dispatches, 1)
+        XCTAssertEqual(result.objectValue?["status"]?.stringValue, "submitted")
+        XCTAssertEqual(result.objectValue?["mode"]?.stringValue, "attachment")
+    }
+
+    func testAutomaticModeDirectAttachmentSkipsConfirmationButPreservesEveryOtherStep()
+        async throws
+    {
+        let log = AttachmentEventLog()
+        let url = try makeFile("Automatic.pdf", byteCount: 1_024)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
             selection: .success(url),
+            eventLog: log,
             sendingMode: { .sendAutomatically }
         )
         let result = try await harness.call(["recipient": .string("recipient@example.invalid")])
 
         XCTAssertEqual(
             harness.elicitation.requestCount,
-            1,
-            "attachment sends must still confirm even when the global mode is Send Automatically"
+            0,
+            "Send Automatically must request zero final confirmations"
+        )
+        let selections = await harness.selector.selectionCount
+        XCTAssertEqual(selections, 1, "the native picker still runs in automatic mode")
+        // Destination match, picker/selection, destination match again (revalidation),
+        // TCC, addressability, and dispatch all still run, in the same order, just
+        // without an elicitation step.
+        XCTAssertEqual(
+            log.events,
+            [
+                "match", "automation-status", "select", "match", "automation-request",
+                "addressability", "attachment-submit",
+            ]
         )
         let dispatches = await harness.sender.attachmentSubmissionCount
         XCTAssertEqual(dispatches, 1)
         XCTAssertEqual(result.objectValue?["status"]?.stringValue, "submitted")
         XCTAssertEqual(result.objectValue?["mode"]?.stringValue, "attachment")
+    }
+
+    func testAutomaticModeGroupAttachmentSkipsConfirmationAndDispatchesOnceToTheExactResolvedChat()
+        async throws
+    {
+        let match = MessagesConversationMatch.unique(
+            publicChatID: "imcp-chat-v1_synthetic-group",
+            destination: groupChat
+        )
+        let harness = Harness(
+            matches: [match, match],
+            selection: .success(try makeFile("photo.png", byteCount: 128)),
+            sendingMode: { .sendAutomatically }
+        )
+        let result = try await harness.call([
+            "recipients": .array([
+                .string("first@example.invalid"), .string("second@example.invalid"),
+            ])
+        ])
+
+        XCTAssertEqual(harness.elicitation.requestCount, 0)
+        let dispatches = await harness.sender.attachmentSubmissionCount
+        let dispatchedGUID = await harness.sender.lastChatGUID
+        XCTAssertEqual(dispatches, 1)
+        XCTAssertEqual(dispatchedGUID, groupChat.chatGuid)
+        XCTAssertEqual(result.objectValue?["status"]?.stringValue, "submitted")
+    }
+
+    func testLiveModeChangesAreObservedForAttachmentsWithoutReinitializingTheService()
+        async throws
+    {
+        final class SendingModeBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storedMode: MessagesSendingMode = .askBeforeSending
+            var mode: MessagesSendingMode {
+                get { lock.withLock { storedMode } }
+                set { lock.withLock { storedMode = newValue } }
+            }
+        }
+        let box = SendingModeBox()
+        let url = try makeFile("Live.txt", byteCount: 16)
+        let harness = Harness(
+            matches: [
+                uniqueDirectMatch, uniqueDirectMatch, uniqueDirectMatch, uniqueDirectMatch,
+            ],
+            selection: .success(url),
+            sendingMode: { box.mode }
+        )
+
+        _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        XCTAssertEqual(
+            harness.elicitation.requestCount,
+            1,
+            "Ask Before Sending must request confirmation"
+        )
+
+        box.mode = .sendAutomatically
+
+        _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        XCTAssertEqual(
+            harness.elicitation.requestCount,
+            1,
+            "Send Automatically must take effect on the very next call, same service instance, without a second confirmation"
+        )
+
+        let dispatches = await harness.sender.attachmentSubmissionCount
+        XCTAssertEqual(dispatches, 2)
+    }
+
+    func testPickerCancellationInAutomaticModeSendsNothing() async throws {
+        let harness = Harness(
+            matches: [uniqueDirectMatch, uniqueDirectMatch],
+            selection: .failure(MessagesAttachmentError.selectionCancelled),
+            sendingMode: { .sendAutomatically }
+        )
+        await harness.assertAttachmentFailure(
+            .selectionCancelled,
+            arguments: ["recipient": .string("recipient@example.invalid")]
+        )
+
+        let selections = await harness.selector.selectionCount
+        XCTAssertEqual(selections, 1, "automatic mode must never bypass the picker")
+        XCTAssertEqual(harness.elicitation.requestCount, 0)
+        let dispatches = await harness.sender.attachmentSubmissionCount
+        let authorizations = await harness.sender.authorizationRequestCount
+        XCTAssertEqual(dispatches, 0)
+        XCTAssertEqual(authorizations, 0)
+    }
+
+    func testAutomaticModeStaleDestinationFailsClosedWithZeroDispatch() async throws {
+        let changed = MessagesConversationMatch.unique(
+            publicChatID: "imcp-chat-v1_other",
+            destination: groupChat
+        )
+        let harness = Harness(
+            matches: [uniqueDirectMatch, changed],
+            selection: .success(try makeFile("note.txt", byteCount: 8)),
+            sendingMode: { .sendAutomatically }
+        )
+        await harness.assertFailure(
+            MessageSendError.staleMatchedConversation,
+            arguments: ["recipient": .string("recipient@example.invalid")]
+        )
+
+        XCTAssertEqual(harness.elicitation.requestCount, 0, "confirmation was correctly skipped")
+        let dispatches = await harness.sender.attachmentSubmissionCount
+        let authorizations = await harness.sender.authorizationRequestCount
+        XCTAssertEqual(dispatches, 0)
+        XCTAssertEqual(
+            authorizations,
+            0,
+            "skipping confirmation must not weaken the stale-destination defense"
+        )
+    }
+
+    func testAutomaticModeFileChangeFailsClosedWithZeroDispatch() async throws {
+        let url = try makeFile("note.txt", byteCount: 32)
+        let harness = Harness(
+            matches: [uniqueDirectMatch, uniqueDirectMatch],
+            selection: .success(url),
+            // Fires on the revalidation read, the only checkpoint shared by both modes,
+            // simulating the file changing after selection/validation but before dispatch
+            // even though there is no confirmation step to hook into here.
+            onSecondResolve: {
+                try? Data(repeating: 0x41, count: 64).write(to: url)
+            },
+            sendingMode: { .sendAutomatically }
+        )
+        await harness.assertAttachmentFailure(
+            .attachmentChanged,
+            arguments: ["recipient": .string("recipient@example.invalid")]
+        )
+
+        XCTAssertEqual(harness.elicitation.requestCount, 0)
+        let dispatches = await harness.sender.attachmentSubmissionCount
+        XCTAssertEqual(
+            dispatches,
+            0,
+            "skipping confirmation must not weaken file-identity revalidation"
+        )
+    }
+
+    func testAutomaticModeAutomationDenialOrUnavailabilityFailsClosedWithZeroDispatch()
+        async throws
+    {
+        // Denied at the non-prompting preflight, which runs unconditionally before the
+        // mode is ever consulted.
+        let deniedHarness = Harness(
+            matches: [uniqueDirectMatch, uniqueDirectMatch],
+            selection: .success(try makeFile("note.txt", byteCount: 8)),
+            authorization: .denied,
+            sendingMode: { .sendAutomatically }
+        )
+        await deniedHarness.assertFailure(
+            MessageSendError.automationDenied,
+            arguments: ["recipient": .string("recipient@example.invalid")]
+        )
+        let deniedDispatches = await deniedHarness.sender.attachmentSubmissionCount
+        XCTAssertEqual(deniedDispatches, 0)
+
+        // Unavailable at the post-authorization addressability check, which still runs
+        // after the skipped confirmation.
+        let unavailableHarness = Harness(
+            matches: [uniqueDirectMatch, uniqueDirectMatch],
+            selection: .success(try makeFile("note2.txt", byteCount: 8)),
+            authorization: .consentRequired,
+            addressability: [false],
+            sendingMode: { .sendAutomatically }
+        )
+        await unavailableHarness.assertFailure(
+            MessageSendError.chatUnavailableInAutomation,
+            arguments: ["recipient": .string("recipient@example.invalid")]
+        )
+        let unavailableDispatches = await unavailableHarness.sender.attachmentSubmissionCount
+        XCTAssertEqual(unavailableDispatches, 0)
+    }
+
+    func testVerifiedNewRecipientRemainsUnsupportedForAttachmentsInAutomaticMode() async throws {
+        let harness = Harness(matches: [.none], sendingMode: { .sendAutomatically })
+        await harness.assertFailure(
+            MessageSendError.attachmentRequiresExistingConversation,
+            arguments: ["recipient": .string("brand-new@example.invalid")]
+        )
+
+        let compositions = await harness.composer.compositionCount
+        XCTAssertEqual(compositions, 0, "attachments never reach system composition")
+        await harness.assertNothingHappened()
     }
 
     func testExplicitChatAndGroupDestinationsDispatchExactlyOnce() async throws {
@@ -1086,6 +1306,7 @@ private struct Harness {
         ),
         confirmationRequester: (any MessagesFinalSendConfirmationRequesting)? = nil,
         onConfirmation: (@Sendable () -> Void)? = nil,
+        onSecondResolve: (@Sendable () -> Void)? = nil,
         eventLog: AttachmentEventLog? = nil,
         sendingMode: @escaping @Sendable () -> MessagesSendingMode = { .askBeforeSending }
     ) {
@@ -1108,7 +1329,8 @@ private struct Harness {
             chatRepository: RecordingAttachmentChatRepository(
                 results: results,
                 matches: matches,
-                eventLog: eventLog
+                eventLog: eventLog,
+                onSecondResolve: onSecondResolve
             ),
             sendConfirmationRequester: confirmationRequester
                 ?? MessagesFinalSendConfirmationRequester(mode: { .mcpForm }),
@@ -1302,15 +1524,30 @@ private final class RecordingAttachmentChatRepository: MessagesChatListing, @unc
     private var results: [Result<MessagesResolvedChatDestination, Error>]
     private var matches: [MessagesConversationMatch]
     private let eventLog: AttachmentEventLog?
+    private var callCount = 0
+    /// Fires once, on the second destination read only. That read is always the
+    /// revalidation read — the first happens during `prepareDestination`, before the
+    /// picker even runs — so this simulates "the world changed between authorization
+    /// and dispatch" identically in Ask Before Sending (where `onConfirmation` also
+    /// fires at that same logical moment) and Send Automatically (which has no
+    /// confirmation step to hook into).
+    private let onSecondResolve: (@Sendable () -> Void)?
 
     init(
         results: [Result<MessagesResolvedChatDestination, Error>],
         matches: [MessagesConversationMatch],
-        eventLog: AttachmentEventLog?
+        eventLog: AttachmentEventLog?,
+        onSecondResolve: (@Sendable () -> Void)? = nil
     ) {
         self.results = results
         self.matches = matches
         self.eventLog = eventLog
+        self.onSecondResolve = onSecondResolve
+    }
+
+    private func recordCallAndFireHookIfSecond() {
+        callCount += 1
+        if callCount == 2 { onSecondResolve?() }
     }
 
     func listChats(
@@ -1332,7 +1569,8 @@ private final class RecordingAttachmentChatRepository: MessagesChatListing, @unc
         databasePath: String
     ) throws -> MessagesResolvedChatDestination {
         let result: Result<MessagesResolvedChatDestination, Error>? = lock.withLock {
-            results.isEmpty ? nil : results.removeFirst()
+            recordCallAndFireHookIfSecond()
+            return results.isEmpty ? nil : results.removeFirst()
         }
         eventLog?.record("match")
         guard let result else { throw MessagesChatRepositoryError.staleIdentifier }
@@ -1345,7 +1583,8 @@ private final class RecordingAttachmentChatRepository: MessagesChatListing, @unc
         databasePath: String
     ) throws -> MessagesConversationMatch {
         let match: MessagesConversationMatch = lock.withLock {
-            matches.isEmpty ? .none : matches.removeFirst()
+            recordCallAndFireHookIfSecond()
+            return matches.isEmpty ? .none : matches.removeFirst()
         }
         eventLog?.record("match")
         return match

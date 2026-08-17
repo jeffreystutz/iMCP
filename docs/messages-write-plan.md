@@ -26,9 +26,11 @@ while both the Contacts and Messages services are enabled.
 A global, binary Messages sending mode (Ask Before Sending / Send Automatically)
 and its Settings UI are implemented and manually accepted (ADR 0010, now
 Accepted), replacing an earlier four-category design that failed manual UX
-acceptance. Existing-conversation plain-text `messages_send` now honors this
-mode; `messages_send_attachment` and verified-new-recipient composition do
-not yet. See "Automatic-send authorization policy" below.
+acceptance. Existing-conversation plain-text `messages_send` honors this mode
+and passed its own real-runtime manual checkpoint; picker-based
+`messages_send_attachment` now honors it too, pending its own manual
+checkpoint. Verified-new-recipient composition remains unaffected by the mode
+in both cases. See "Automatic-send authorization policy" below.
 
 ## Verified baseline
 
@@ -587,10 +589,7 @@ code — cancellation checks, destination revalidation, Automation/addressabilit
 verification, the single dispatch, categorical logging, and the redacted
 result — unconditionally, for both modes. There is no second dispatch path.
 Verified-new-recipient composition returns before the mode is ever consulted,
-so it is unaffected. `messages_send_attachment` does not read `sendingMode` at
-all in this slice, so attachment submission still always requires its own
-confirmation regardless of the global mode; wiring attachments to the mode is
-a separate, later slice with its own design and acceptance.
+so it is unaffected.
 
 `messages_send`'s public description and its `recipient` parameter description
 were updated to stop promising confirmation for every existing-chat send; they
@@ -602,6 +601,30 @@ ADR 0002's "confirmation for every submission, no opt-out" language is
 reconciled in place (not superseded wholesale) to describe this accepted
 exception; every other invariant it establishes remains in force in both
 modes. See ADR 0002 and ADR 0010 for the full record.
+
+### Runtime wiring for existing-conversation picker-based attachments
+
+The 2026-08-16 real-runtime checkpoint accepted the text-send wiring above.
+Following that acceptance, picker-based `messages_send_attachment` now reads
+the same `sendingMode` provider already on `MessageService`. The
+authorization branch sits immediately around this tool's own final
+attachment confirmation and nowhere else: the native picker, bounded file
+validation, destination/file revalidation, Automation/addressability
+verification, the single dispatch, categorical logging, and the redacted
+result are all identical, shared, unconditional code in both modes. In Send
+Automatically, only the confirmation step is skipped — the picker still
+always runs, and selecting a file is never itself treated as authorization,
+so attachment sending is not fully unattended even in that mode.
+Verified-new-recipient attachment rejection happens before the picker is
+ever presented and is unaffected by the mode.
+
+`messages_send_attachment`'s public description was updated the same way as
+`messages_send`'s: it no longer promises confirmation unconditionally, and
+now explains that whether confirmation happens follows the Sending mode
+setting while the native picker itself always runs. ADR 0009's "confirmation
+for every attachment submission" language is reconciled in place (not
+superseded) the same way ADR 0002's was, for the same accepted exception. See
+ADR 0009 and ADR 0010 for the full record.
 
 ## Reference implementation
 

@@ -634,7 +634,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         Tool(
             name: "messages_send_attachment",
             description:
-                "Submit exactly one file as an attachment to one existing Messages conversation that you identify by recipient, recipients, or chat_id. This tool takes no file path, no file name, and no file contents: after the destination resolves, iMCP opens a native file picker on the user's Mac and the user chooses the file there, then confirms the exact conversation together with the file's name, type, and size. It sends no message text, so it cannot carry a caption or a body; send any accompanying text as its own messages_send call. The file must be one ordinary image, video or audio, PDF, or plain-text file of at most 25 MiB. Unlike messages_send, a recipient with no existing conversation fails instead of opening a compose window, and no new conversation or group is ever created. Cancelling the picker or the confirmation sends nothing. Success means Messages accepted one attachment submission, never that it was delivered.",
+                "Submit exactly one file as an attachment to one existing Messages conversation that you identify by recipient, recipients, or chat_id. This tool takes no file path, no file name, and no file contents: after the destination resolves, iMCP always opens a native file picker on the user's Mac and the user chooses the file there. Whether the user must then separately confirm the exact conversation together with the file's name, type, and size before it sends, or it submits directly after the picker, follows the user's Sending mode setting in iMCP; there is no way for a caller to choose or override it, and the picker itself is never treated as that authorization. It sends no message text, so it cannot carry a caption or a body; send any accompanying text as its own messages_send call. The file must be one ordinary image, video or audio, PDF, or plain-text file of at most 25 MiB. Unlike messages_send, a recipient with no existing conversation fails instead of opening a compose window, and no new conversation or group is ever created, in either mode. Cancelling the picker, or the confirmation when one is presented, sends nothing. Success means Messages accepted one attachment submission, never that it was delivered.",
             inputSchema: .object(
                 properties: [
                     "recipient": .string(
@@ -696,19 +696,29 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             defer { access.release() }
             let facts = try self.attachmentValidator.validate(selectedURL)
 
-            // 4. One immutable confirmation naming the exact conversation and the file's
-            //    display name, public type, and size. Never its path or its contents.
-            try await self.sendConfirmationRequester.requestConfirmation(
-                MessagesSendConfirmationPresentation(
-                    title: "Confirm existing-chat attachment submission",
-                    message: self.attachmentConfirmationMessage(
-                        initialChat,
-                        attachment: facts,
-                        matchedFromParticipants: preparedDestination.isMatchedGroup
-                    )
-                ),
-                elicitation: context.elicitation
-            )
+            // 4. Authorization: either one immutable confirmation naming the exact
+            //    conversation and the file's display name, public type, and size (never
+            //    its path or its contents), in Ask Before Sending mode, or the user's
+            //    persisted app-owned Send Automatically setting. The native picker above
+            //    is still the only file-input/selection mechanism in either mode — it is
+            //    never itself treated as authorization, and automatic mode does not add a
+            //    second confirmation after it.
+            switch self.sendingMode() {
+            case .askBeforeSending:
+                try await self.sendConfirmationRequester.requestConfirmation(
+                    MessagesSendConfirmationPresentation(
+                        title: "Confirm existing-chat attachment submission",
+                        message: self.attachmentConfirmationMessage(
+                            initialChat,
+                            attachment: facts,
+                            matchedFromParticipants: preparedDestination.isMatchedGroup
+                        )
+                    ),
+                    elicitation: context.elicitation
+                )
+            case .sendAutomatically:
+                break
+            }
 
             // 5. The destination must still be exactly the conversation that was shown.
             try Task.checkCancellation()

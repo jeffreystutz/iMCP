@@ -8,6 +8,21 @@
 
 ## Context
 
+**Amended by ADR 0010 (accepted).** This record originally required one
+immutable final confirmation before every attachment submission,
+unconditionally. ADR 0010's accepted, app-owned, never-caller-controlled
+global Sending mode now applies equally to attachment sends: in **Ask Before
+Sending**, this record's confirmation-required flow is exactly as originally
+specified; in **Send Automatically**, only that one confirmation step is
+skipped, and every other boundary this record establishes — the mandatory
+native picker, bounded file validation, security-scoped access lifetime,
+destination and file revalidation immediately before dispatch, fixed-script
+typed-descriptor dispatch, one-dispatch/no-retry, privacy redaction, and
+submitted-not-delivered truthfulness — remains unconditionally in force in
+both modes. This ADR is not superseded; only the absolute-confirmation claim
+is narrowed, and only for this operation class. Selecting a file in the
+native picker is never itself treated as authorization in either mode.
+
 `messages_send` submits plain text to one exact existing conversation, or hands a
 verified-new recipient to system-owned composition (ADR 0002, ADR 0006). It cannot
 send a file.
@@ -108,10 +123,13 @@ from validation through the synchronous Apple Event and then released.
 2. If Automation is already authorized, run the existing non-prompting
    addressability preflight; otherwise do not prompt.
 3. Present the picker and validate the selection.
-4. Request one immutable final confirmation through the existing router, showing
-   the exact conversation plus the attachment's display name, public type
-   description, and formatted size — never its path or contents. The wording
-   authorizes an attachment submission and states that no message text is sent.
+4. Authorize: in **Ask Before Sending**, request one immutable final
+   confirmation through the existing router, showing the exact conversation
+   plus the attachment's display name, public type description, and formatted
+   size — never its path or contents — with wording that authorizes an
+   attachment submission and states that no message text is sent. In **Send
+   Automatically** (ADR 0010, accepted), skip only this confirmation; the
+   picker in step 3 is not itself authorization.
 5. Re-resolve the destination and require exact equality with what was shown.
 6. Re-read the file facts and require the same identity and unchanged bounded
    properties. Removed, replaced, modified, enlarged, or newly unsupported fails
@@ -219,10 +237,30 @@ confirmation, proving file access and authorization with no send. Any real
 attachment send requires separate explicit authorization of the exact file and the
 exact destination.
 
+## Runtime wiring (ADR 0010)
+
+Following ADR 0010's acceptance and the text-send runtime slice, picker-based
+`messages_send_attachment` also reads the same app-owned `MessagesSendingMode`
+provider already on `MessageService`, evaluated fresh per call. The
+authorization branch sits immediately around this record's step-4 confirmation
+request and nowhere else: everything before it (destination resolution,
+non-prompting preflight, picker presentation, file validation) and everything
+after it (destination revalidation, file revalidation, Automation/addressability
+verification, the single dispatch, categorical logging, and the redacted
+result) is identical, shared code for both modes. There is no second dispatch
+path. Verified-new-recipient attachment rejection happens before the picker is
+ever presented and is unaffected by the mode. The native picker remains
+mandatory in both modes, so this does not make attachment sending unattended —
+only the post-selection confirmation step becomes optional, and only by the
+user's own persistent Settings choice.
+
 ## References
 
-- ADR 0002, for the existing-conversation automation boundary this extends
+- ADR 0002, for the existing-conversation automation boundary this extends,
+  reconciled there for the same accepted Sending-mode exception
 - ADR 0006, for the new-recipient composition path this deliberately does not use
+- ADR 0010, for the accepted global Sending mode this record's confirmation step
+  now honors
 - `/System/Applications/Messages.app/Contents/Resources/Messages.sdef`, `send`
 - Foundation `NSAppleEventDescriptor(fileURL:)`
 - `URL.removeAllCachedResourceValues()` and `URLResourceKey.fileIdentifierKey`

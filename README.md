@@ -45,7 +45,7 @@ and a [growing list of clients][mcp-clients] that support the
       <img src="Assets/messages.svg" width="48" height="48" alt="" role="presentation"/>
     </th>
     <td><strong>Messages</strong></td>
-    <td>Access message history with specific participants within customizable date ranges. Submit text to an existing conversation subject to your Sending mode setting, or a single attachment after you confirm the exact destination and file details, or open a Messages compose window for a new recipient that you review and send yourself.</td>
+    <td>Access message history with specific participants within customizable date ranges. Submit text or a single attachment (via a native picker) to an existing conversation, subject to your Sending mode setting, or open a Messages compose window for a new recipient that you review and send yourself.</td>
   </tr>
   <tr>
     <th>
@@ -310,17 +310,20 @@ already have a conversation with the recipient.
 **To an existing conversation**, iMCP can submit a text message, or a single
 attachment, to a conversation you already have, using Messages automation
 ([Apple Events][apple-events]); the first time this happens you'll see a
-system prompt asking you to allow iMCP to control Messages. Whether a text
+system prompt asking you to allow iMCP to control Messages. Whether a
 submission requires your confirmation first follows the global **Sending
 mode** you choose in iMCP's settings: **Ask Before Sending** (the default)
-shows you an immutable confirmation with the exact destination and message
-body before anything is sent, and only submits after you confirm; **Send
-Automatically** is an explicit opt-in that submits eligible existing-chat
-text messages without that per-send confirmation. No MCP client can enable
-or override Send Automatically itself — only you, in Settings. Attachment
-submission always shows an immutable confirmation with the file's name,
-type, and size (never its path or contents), regardless of Sending mode.
-iMCP reports messages as *submitted*, not as *delivered*.
+shows you an immutable confirmation — the exact destination and message
+body for text, or the exact destination and the file's name, type, and size
+(never its path or contents) for an attachment — before anything is sent,
+and only submits after you confirm; **Send Automatically** is an explicit
+opt-in that submits eligible existing-chat text messages and attachments
+without that per-send confirmation. No MCP client can enable or override
+Send Automatically itself — only you, in Settings. An attachment always
+still goes through the native file picker in both modes: selecting a file is
+never itself treated as confirmation, so attachment sending is not fully
+unattended even with Send Automatically on. iMCP reports messages as
+*submitted*, not as *delivered*.
 
 **To a recipient you don't already have a conversation with**, iMCP opens
 the system Messages compose window, seeded with the recipient and your

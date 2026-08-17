@@ -219,3 +219,9 @@ then the manual checkpoint above under the user's own explicit, separate
 authorization for any real send. No further implementation is expected until
 that review and checkpoint complete; the next candidate slice (attachment
 automatic-mode wiring) is intentionally not started here.
+
+**Update:** the text-send manual checkpoint above passed on 2026-08-16, and
+attachment automatic-mode wiring is now implemented in a later slice. See
+`docs/project-reports/existing-conversation-attachment-send-automatic-mode-wiring-2026-08-16.md`
+for that slice's full record; this report's evidence above is unchanged and
+still describes only the text-send wiring.

@@ -9,10 +9,13 @@
 Accepted on 2026-08-16 after the user's manual Settings UX acceptance of the
 binary `MessagesSendingMode` model (Ask Before Sending / Send Automatically)
 described below. Runtime wiring for existing-conversation plain-text
-`messages_send` now honors this policy; see the "Runtime wiring" section
-near the end of this record. Attachment submission remains
-confirmation-required regardless of the selected mode until its own separate
-slice is designed and accepted.
+`messages_send` now honors this policy, followed by picker-based
+`messages_send_attachment`; see the "Runtime wiring" section near the end of
+this record and ADR 0009's own "Runtime wiring" section. The native picker
+remains mandatory for attachments in both modes, so attachment sending is not
+fully unattended even under Send Automatically. Verified-new-recipient
+sending, for both text and attachments, remains human-completed regardless of
+the selected mode.
 
 ## Context
 
@@ -267,11 +270,18 @@ step after it (cancellation checks, destination revalidation, Automation
 authorization and addressability reverification, the single `sender.submit`
 dispatch, categorical logging, and the redacted result) is identical, shared
 code for both modes — there is no second dispatch path. Verified-new-recipient
-composition and `messages_send_attachment` are both unaffected: composition
-returns before the mode is ever consulted, and the attachment tool does not
-read `sendingMode` at all, so it keeps requiring its own confirmation
-regardless of the global mode until attachment automation gets its own
-accepted design.
+composition is unaffected: composition returns before the mode is ever
+consulted, for both text and attachments.
+
+A second, later slice extended this same pattern to picker-based
+`messages_send_attachment`, reusing the identical `sendingMode` provider and
+placing the authorization branch immediately around that tool's own final
+attachment confirmation. The native file picker and bounded file validation
+still run unconditionally in both modes — the picker is never itself treated
+as authorization — and destination/file revalidation, Automation/addressability
+verification, and the single dispatch remain shared, unconditional code after
+the branch, exactly as for text. See ADR 0009's "Runtime wiring" section for
+the full record of that slice.
 
 `messages_send`'s public description and its `recipient` parameter description
 were updated so they no longer promise confirmation for every existing-chat
