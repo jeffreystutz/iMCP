@@ -403,6 +403,63 @@ directory. `build-for-testing` was not re-verified in this session since it
 was already confirmed clean in the prior correction session and no
 production/test source changed since.
 
+### Diagnostic CI execution and stale-assertion correction (2026-08-17)
+
+Because three consecutive local/headless sessions had failed identically at
+`IDELaunchErrorDomain` code 20 before XCTest launch, a disposable draft CI
+diagnostic PR was used to exercise this repository's existing GitHub Actions
+environment (macOS 26 / Xcode 26.0) instead of retrying the same broken local
+runner again. That CI environment successfully launched XCTest — the first
+actual execution of this milestone's test code.
+
+On exact feature source `d878366ddf095e46e694d316e26330393ad9e41f`, the
+focused `MessageAttachmentSendTests` suite executed **83 tests: 82 passed, 1
+failed.**
+
+The sole failure was
+`testAutomaticModeDirectAttachmentSkipsConfirmationButPreservesEveryOtherStep`.
+Expected event sequence:
+
+```
+["match", "automation-status", "source-resolve", "match", "automation-request",
+ "addressability", "attachment-submit"]
+```
+
+Actual:
+
+```
+["match", "automation-status", "source-resolve", "match", "source-resolve",
+ "automation-request", "addressability", "attachment-submit"]
+```
+
+This was a stale test expectation, not a production defect, confirmed by
+inspecting `resolveAttachmentSourceHandle`/`ResolvedAttachmentSourceHandle`
+in `App/Services/Messages.swift`: the filesystem branch's `revalidate`
+closure deliberately calls `attachmentFolderGrantResolver.resolveAccess(forRequestedPath:)`
+a second time — after destination revalidation (step 5) and before the
+Automation/dispatch steps (step 7-8) — so that allowed-folder authority
+revoked between initial validation/authorization and dispatch fails closed
+rather than trusting a stale security scope. The failing test itself already
+asserted `folderGrantResolver.resolveCount == 2` with the message "the source
+is resolved once and revalidated once"; only its `log.events` array omitted
+the second `source-resolve` the test double logs on every `resolveAccess`
+call. No production behavior was changed.
+
+Fix: `AppTests/MessageAttachmentSendTests.swift`, updated only the expected
+`log.events` array (and its adjoining comment) in that one test to include
+the intentional second `"source-resolve"` between the second `"match"` and
+`"automation-request"`. The `resolveCount == 2` assertion is unchanged.
+
+Verification performed in this session: `swift format lint --strict` over
+the touched file (clean, no output); `git diff --check` (clean); `xcodebuild
+-scheme imcp-serverTests ... build-for-testing` with `-warnings-as-errors`
+active (**TEST BUILD SUCCEEDED**, compiling the corrected file cleanly). No
+local `xcodebuild test` invocation was attempted, per this task's explicit
+instruction not to loop on the known `IDELaunchErrorDomain` code 20 launch
+failure. The authoritative full-suite executed-test result is the normal CI
+run that the existing draft PR triggers automatically on this push; that
+result is not yet known at the time this report section was written.
+
 ## Manual checkpoint to prepare (not executed)
 
 Using the signed build at

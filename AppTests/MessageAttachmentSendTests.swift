@@ -1355,14 +1355,16 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         let resolves = harness.folderGrantResolver.resolveCount
         XCTAssertEqual(resolves, 2, "the source is resolved once and revalidated once")
-        // Destination match, source resolution, destination match again (revalidation),
-        // TCC, addressability, and dispatch all still run, in the same order, just
-        // without an elicitation step.
+        // Destination match, initial source resolution, destination match again
+        // (revalidation), source resolution again (revalidation — allowed-folder
+        // authority can be revoked between initial validation and dispatch, so it must
+        // be re-derived, not just re-read), TCC, addressability, and dispatch all still
+        // run, in the same order, just without an elicitation step.
         XCTAssertEqual(
             log.events,
             [
-                "match", "automation-status", "source-resolve", "match", "automation-request",
-                "addressability", "attachment-submit",
+                "match", "automation-status", "source-resolve", "match", "source-resolve",
+                "automation-request", "addressability", "attachment-submit",
             ]
         )
         let dispatches = await harness.sender.attachmentSubmissionCount
