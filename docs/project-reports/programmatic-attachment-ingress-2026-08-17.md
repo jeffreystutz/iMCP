@@ -335,6 +335,74 @@ a substitute for actually running it.
   point. Every test fixture is a synthetic temporary file, directory, or
   path string.
 
+### Fresh-session verification attempt (2026-08-17, verification-only task)
+
+A dedicated fresh Claude Code session executed
+`docs/project-prompts/current-task.md` at prompt-only head
+`f0f5aef1d18f8408343d45d5ac72d09d07ead13b`, with the sole goal of getting the
+milestone's XCTest suite to actually execute. Repository state was verified
+first: `feat/messages-write-foundation` at `HEAD` equal to `origin/HEAD`
+(`f0f5aef1d18f8408343d45d5ac72d09d07ead13b`), clean worktree, and the only
+commit after `0a20c99e372096e5d777309e5acc282e36aeb824` was that prompt-only
+commit — no unexpected production/test drift.
+
+Environment: macOS 26.5.2 (build 25F84), Xcode 26.6 (build 17F113), Darwin
+25.5.0, arm64 (Mac15,12).
+
+Two focused-test attempts were made, each against a distinct, freshly created,
+git-ignored `-derivedDataPath` (neither reused any directory from a prior
+session):
+
+```
+xcodebuild -scheme imcp-serverTests -configuration Debug -destination "platform=macOS" \
+  -derivedDataPath .build/DerivedData-xctest-verify-20260817 \
+  -only-testing:imcp-serverTests/MessageAttachmentSendTests \
+  -only-testing:imcp-serverTests/AllowedFolderGrantStoreTests \
+  test
+```
+
+```
+xcodebuild -scheme imcp-serverTests -configuration Debug -destination "platform=macOS" \
+  -derivedDataPath .build/DerivedData-xctest-verify-2 \
+  -only-testing:imcp-serverTests/MessageAttachmentSendTests \
+  -only-testing:imcp-serverTests/AllowedFolderGrantStoreTests \
+  test
+```
+
+Both attempts failed identically, before any XCTest case executed:
+
+```
+IDELaunchReport: ... Finished with error: Could not launch "imcp-serverTests"
+Domain: IDELaunchErrorDomain
+Code: 20
+Recovery Suggestion: The LaunchServices launcher has returned an error. Please check the system logs for the underlying cause of the error.
+```
+
+Result bundles: `.build/DerivedData-xctest-verify-20260817/Logs/Test/Test-imcp-serverTests-2026.08.17_12-28-37--0700.xcresult`
+and `.build/DerivedData-xctest-verify-2/Logs/Test/Test-imcp-serverTests-2026.08.17_12-29-34--0700.xcresult`
+(both git-ignored under `.build/`, not committed).
+
+This is the third consecutive session (across the original implementation
+session, the correction session, and this dedicated verification session) to
+hit the identical `IDELaunchErrorDomain` code 20 failure at test-runner
+launch time, now confirmed with two independently fresh `DerivedData`
+directories in the same session, ruling out a stale-cache explanation
+specific to one directory. Per this task's explicit bounded-retry limit (at
+most one safe, non-product retry), no further attempts were made. No
+signing, entitlements, sandboxing, test, product code, scheme, or project
+configuration change was made to try to coerce the runner, and no
+GUI/Accessibility/AppleScript workaround was introduced.
+
+**No test execution occurred in this session. The last actual XCTest
+execution result for this repository remains the pre-attachment-milestone
+282/282 figure.** This session neither adds nor claims any new pass/fail
+count; it adds confirming evidence that the launch failure is environment/
+infrastructure-level (LaunchServices) and reproduces across fresh
+`DerivedData` paths and sessions, not a property of any one stale build
+directory. `build-for-testing` was not re-verified in this session since it
+was already confirmed clean in the prior correction session and no
+production/test source changed since.
+
 ## Manual checkpoint to prepare (not executed)
 
 Using the signed build at
@@ -367,11 +435,21 @@ or attachment during implementation or automated verification.
 
 ## Next bounded action
 
-Run the full `imcp-serverTests` suite in an interactive session (the
-launch-infrastructure limitation above did not exist for the prior
-milestone's 282/282 result, so this is expected to be a session-specific
-gap, not a defect to fix in code). Then supervising review of the exact
-pushed correction head on `feat/messages-write-foundation`, then the manual
-checkpoint above under the user's own explicit, separate authorization for
-any real send. No further implementation is expected until the test suite
-has actually been executed and that review/checkpoint complete.
+A third, dedicated verification-only session (above) reproduced the same
+`IDELaunchErrorDomain` code 20 launch failure with two independently fresh
+`DerivedData` directories, so the failure is not specific to one stale build
+directory or one prior session's environment. The failure remains launch-time
+infrastructure (LaunchServices), not a compile or test-assertion defect: the
+test target still builds cleanly and no product/test code changed.
+
+Running the full `imcp-serverTests` suite so it actually executes remains a
+**prerequisite** for supervising acceptance of this milestone. That may
+require an interactive/GUI-attached session (the environment the prior
+282/282 result was obtained in) rather than another CLI-only `xcodebuild
+test` invocation, since three consecutive CLI-only sessions have now hit the
+identical launch failure. Once XCTest actually executes and passes, then
+supervising review of the exact pushed head on
+`feat/messages-write-foundation`, then the manual checkpoint above under the
+user's own explicit, separate authorization for any real send. No further
+implementation is expected until the test suite has actually been executed
+and that review/checkpoint complete.
