@@ -1,301 +1,345 @@
 # Current Claude Code Task
 
-**Status:** active correction implementation
+**Status:** active public-input correction
 
-**Recommended session:** continue the current Claude Code session if available; otherwise a fresh session is fine  
+**Recommended session:** continue the current Claude Code session if it still has useful repository context; otherwise a fresh session is fine  
 **Recommended model:** Sonnet  
-**Effort:** high — the public-API change is straightforward, but it crosses two security-sensitive send paths that already have accepted behavior and must be preserved exactly.
+**Effort:** high — the code change is localized, but it sits immediately in front of two security-sensitive send pipelines whose downstream behavior must remain unchanged.
 
 This file is the canonical supervising prompt for one bounded correction task.
 
-## Repository and current state
+## Repository and exact starting state
 
 Repository: `jeffreystutz/iMCP`  
 Branch: `feat/messages-write-foundation`
 
-Expected remote HEAD before this prompt-only commit:
+Expected production/review head before this prompt-only trajectory commit:
 
-`801f3418f4a713d1ffa9aa784d972c3452952eb5` — `refactor: unify Messages text and attachment send tool`
+`fa5733b91f383eba0b8e257f1132bacc58e98aae` — `refactor: split Messages text and attachment send tools`
 
-That commit implemented one unified public `messages_send` tool and passed supervising structural/code review plus full automated verification (275/275 tests), but **it was never manually accepted**. Before the human runtime checkpoint, the user explicitly reversed that public-API decision.
+That head passed supervising code review, automated verification, and signed-build verification. It is **not fully manually accepted**: the 2026-08-17 human checkpoint explicitly rejected two pieces of current public behavior that this task corrects:
+
+1. `message_send_text` must not elicit a missing body; missing/malformed/empty body should fail.
+2. The send tools should not expose separate `recipient` and `recipients` destination fields.
+
+The user also rejected the current native picker as the final ordinary attachment ingress. That attachment-source redesign is **not part of this task**; the current picker path remains temporarily in code as a reviewed downstream-execution scaffold until the separate filesystem/serialized-ingress milestone replaces its source boundary.
 
 Important accepted ancestry:
 
 - `eb64ee2de11a50d63bc1d64362136d1251f0bdf4` — existing-conversation text automatic-send wiring, fully accepted including real runtime verification;
-- `3b9a4a71f33245c511adcdd64f129c24e48f3603` — picker-attachment automatic-send wiring, supervising code-review accepted with full automated verification; its manual runtime checkpoint was deliberately deferred and remains pending.
-
-The current `801f3418...` implementation is therefore a superseded API experiment sitting on top of two still-valid reviewed internal pipelines. Correct it additively; do not reset or rewrite history.
+- `3b9a4a71f33245c511adcdd64f129c24e48f3603` — picker-attachment automatic-send wiring, code-review accepted and still useful as downstream attachment validation/revalidation/dispatch evidence, although picker ingress itself is no longer the desired product UX;
+- `fa5733b9...` — final split public tool names `message_send_text` / `message_send_attachment`, code-review accepted.
 
 Before editing:
 
 1. `git pull --ff-only origin feat/messages-write-foundation`;
 2. retrieve and follow `imessage-mcp/coding-agent-bootstrap` from Hexa as required by `AGENTS.md`;
 3. verify repository, branch, remotes, local/origin HEAD equality, and clean worktree;
-4. verify `801f3418f4a713d1ffa9aa784d972c3452952eb5` is in history and inspect commits after it; only this prompt-only trajectory commit should follow it;
-5. inspect `MessageService.tools`, the unified `messages_send` router at current HEAD, the pre-consolidation implementations at `3b9a4a71...`, `MessagesSendingMode`, destination preparation/revalidation, attachment picker/validator/access code, sender adapters, `MessageSendTests`, `MessageAttachmentSendTests`, tool-schema conventions, and ADRs 0002/0009/0010/0011.
-
-If any unexpected production source/test commit exists after `801f3418...`, stop and report exact state rather than absorbing it.
+4. verify `fa5733b91f383eba0b8e257f1132bacc58e98aae` is in history;
+5. inspect commits after `fa5733b9...` and confirm they are only this prompt-only trajectory commit; if any unexpected production source/test commit follows it, stop and report exact state;
+6. inspect `MessageService.tools`, `resolveSendInput`, `resolveAttachmentDestination`, `SendDestination`, destination preparation/revalidation, `MessageSendTests`, `MessageAttachmentSendTests`, tool-list/schema tests, and ADRs 0010/0012 before editing;
+7. inspect existing repository uses of property-level JSON Schema unions (`oneOf`/equivalent) and follow the local SDK idiom rather than inventing a new schema abstraction.
 
 Do not amend, rebase, squash, reset, force-push, or rewrite reviewed history.
 
-## Settled product decision
+## Concrete goal
 
-The user explicitly reversed the unified `messages_send` public API before manual acceptance.
+Make both public Messages send tools use one simplified destination field and make text body input strict.
 
-The desired final public send surface is **exactly two tools with these exact names**:
+The public send operations remain exactly:
 
 - `message_send_text`
 - `message_send_attachment`
 
-Do not normalize those names back to the older plural `messages_*` send names. Other existing read-only Messages tools retain their existing names; this task changes only the public send-tool names/surface.
+No unified alias and no old plural send-tool alias should exist.
 
-Do not retain `messages_send`, `messages_send_attachment`, or any unified/legacy send alias unless repository evidence establishes a released compatibility requirement. None is currently known on this feature-completion branch. If you find such evidence, stop and report it before adding compatibility surface.
+## Settled destination API
 
-### Why the split is now intentional
+Both tools must accept exactly one of:
 
-Messages' installed scripting interface submits one direct `send` parameter as either text or file. A body plus attachment therefore requires two sequential Messages submissions, introducing partial-success semantics and violating this project's one-dispatch-per-operation/no-retry invariant.
+- `recipients`
+- `chat_id`
 
-The final API should map one MCP send operation to one Messages submission class:
+Remove the singular `recipient` property entirely from both public schemas and parsing paths.
 
-- `message_send_text` -> one text submission or, for a verified-new direct recipient, the existing human-controlled Messages composition flow;
-- `message_send_attachment` -> one picker-selected file submission to one existing conversation.
+### `recipients` accepts scalar or array
 
-Do not support atomic body + attachment/caption in either tool. A caption is a separate `message_send_text` operation with its own authorization/submission semantics.
+`recipients` accepts either:
 
-## `message_send_text` contract
+- one exact handle as a scalar string; or
+- an array containing one or more exact-handle strings.
 
-Restore the pre-consolidation text-tool behavior, under the new exact public name `message_send_text`.
+Represent this in the tool schema with the repository's established property-level JSON Schema union mechanism. Do not create two public properties merely to avoid a union.
 
-Inputs:
+Normalize only at the parsing boundary:
 
-- exactly one destination selector: `recipient`, `recipients`, or `chat_id`;
-- `body`: non-empty plain-text message body.
+- scalar string -> direct-recipient intent;
+- one-item array -> the same direct-recipient intent;
+- array with two or more supplied elements -> exact-existing-group intent.
 
-No attachment/file/path/bytes/source argument belongs on this tool.
+Preserve the existing internal direct/group distinction if useful. There is no requirement to collapse `SendDestination` internals merely because the public field is unified.
 
-Preserve the previously reviewed text routing exactly:
+### Exact validation semantics
 
-- unique existing direct conversation -> existing AppleScript text-send pipeline;
-- exact existing group or explicit `chat_id` -> same existing AppleScript text-send pipeline;
-- verified-new direct recipient -> existing human-completed `NSSharingService.Name.composeMessage` flow;
-- ambiguous, incomplete, stale, invalid, or automation-unaddressable destination -> fail closed;
-- no new group creation, transport selector, retry, fallback, or delivery claim.
+`recipients` scalar:
 
-### Restore missing-body elicitation
+- must be a valid exact Messages handle under the existing exact-handle rules;
+- maps to the existing direct-recipient route.
 
-The unified experiment removed the old missing-body elicitation. Restore the established text-only behavior because the payload is unambiguous again:
+`recipients` array:
 
-- if the caller supplies a valid destination but omits `body`, request the existing MCP form elicitation for the missing non-empty body;
-- accepting the input supplies the body, but is **not** final send authorization;
-- in Ask Before Sending mode, the exact destination + resolved body must still go through the separate final confirmation before an existing-conversation submission;
-- in Send Automatically mode, the app-owned mode may skip only that final confirmation, not the missing-input elicitation;
-- for verified-new-recipient composition, the elicited body seeds the same human-controlled Messages composer and there is no separate immutable iMCP final confirmation because the human can edit/send in system UI;
-- decline/cancel/malformed missing-body elicitation remains terminal with zero submission/composition as appropriate.
+- must contain at least one element;
+- every element must be a string and a valid exact Messages handle;
+- one element maps to the direct-recipient route;
+- two or more supplied elements express group intent and must remain two-or-more **distinct normalized handles**;
+- duplicate or normalization-colliding group inputs must fail closed rather than silently collapse to a one-recipient/direct call;
+- preserve exact existing-group membership semantics: no additional/missing participant, no group creation, no fuzzy membership.
 
-Prefer restoring the previously tested pre-consolidation implementation from repository history rather than inventing a new elicitation model.
+`chat_id`:
 
-## `message_send_attachment` contract
+- preserves its existing exact indexed-conversation behavior.
 
-Restore the already-reviewed standalone picker attachment behavior from `3b9a4a71...`, under the new exact public name `message_send_attachment`.
+Selector rules:
 
-Inputs in this slice:
+- exactly one of `recipients` or `chat_id` must be supplied;
+- both -> invalid destination;
+- neither -> invalid destination;
+- an empty recipients array is invalid;
+- do not infer a country, rewrite a handle, choose a transport, or fall back between destination routes.
 
-- exactly one destination selector: `recipient`, `recipients`, or `chat_id`;
-- **no body/caption**;
-- **no attachment wrapper/source argument**;
-- **no path, filename, URL, file bytes, or serialized content**.
+### Direct-recipient behavior remains operation-specific
 
-The native picker itself supplies the file after destination resolution.
+For `message_send_text`, direct-recipient intent (scalar or one-item array):
 
-Preserve the reviewed pipeline:
+- unique existing direct conversation -> existing exact AppleScript text-send pipeline;
+- recipient verified to have no existing conversation -> existing human-controlled `NSSharingService.Name.composeMessage` path;
+- ambiguous/incomplete/stale/invalid -> fail closed.
 
-1. validate/resolve one exact existing destination;
-2. verified-new recipient fails unsupported before picker/composition/dispatch;
-3. run the existing non-prompting addressability preflight when safe;
-4. present the native single-file picker;
-5. acquire security-scoped access and enforce the existing bounded file policy;
-6. authorize according to the global Sending mode: Ask shows the existing immutable attachment confirmation; Send Automatically skips only that final confirmation;
-7. revalidate the exact destination;
-8. revalidate file identity/properties;
-9. request/verify Messages Automation/TCC and exact chat addressability;
-10. dispatch exactly once through the fixed typed-file AppleScript path;
-11. return the existing privacy-redacted submitted result.
+For `message_send_attachment`, direct-recipient intent (scalar or one-item array):
 
-The picker remains mandatory in both Sending modes and is never itself authorization.
+- unique existing direct conversation -> current reviewed attachment pipeline;
+- verified-new recipient -> current categorical unsupported failure before attachment source selection/dispatch;
+- no fallback to text composition.
 
-Future handoff-directory and serialized/base64 attachment ingress are separate work. When later approved, they should extend `message_send_attachment` rather than create another top-level send tool.
+## Settled `message_send_text.body` behavior
 
-## Global Sending mode remains unchanged
+`body` is required and must be a non-empty string.
 
-There is still one app-owned global `MessagesSendingMode`:
+Remove the current missing-body MCP form elicitation completely.
 
-- Ask Before Sending: payload-specific final confirmation is required for eligible existing-conversation sends;
-- Send Automatically: explicit user opt-in skips only that final confirmation.
+Required behavior:
 
-Both `message_send_text` and `message_send_attachment` use the same live provider, evaluated per call. No caller argument, elicitation response, client name, environment variable, build flag, or debug path may enable or override automatic mode.
+- missing `body` -> terminal input error, zero destination lookup side effect that could lead to composition/submission, zero confirmation request, zero send;
+- non-string/malformed `body` -> terminal input error, zero send;
+- empty string -> existing empty-body error (or equally clear established body-validation error), zero send;
+- valid non-empty string -> preserve the existing text pipeline exactly.
 
-Do not reintroduce direct/group/text/attachment authorization granularity.
+Do **not** ask the user/LLM for a missing body through elicitation. The user explicitly rejected that UX during manual testing.
 
-## Implementation guidance
+This does **not** remove or weaken final send confirmation. In Ask Before Sending mode, existing-conversation text still uses the configured confirmation mechanism after destination resolution. MCP form confirmation, when selected as the confirmation presentation method, is a separate authorization surface and must remain intact.
 
-Prefer the smallest correction that makes the reviewed paths recognizable.
+If `MessageSendError.inputDeclined` / `inputCancelled` or other cases become dead solely because missing-body elicitation is removed, remove them only after verifying no other production path uses them. Do not churn unrelated error types.
 
-The current unified `sendText`/`sendAttachment` private helpers may be reused if that produces a cleaner diff, but do not preserve the unified payload router merely for its own sake. The final public tools should each parse only their own schema and call exactly one internal pipeline.
+## Downstream behavior that must remain unchanged
 
-For text, restore the pre-consolidation missing-body elicitation behavior from history. For attachment, remove the unified `attachment: {"source":"picker"}` input shape and return to picker-only input semantics.
+This task is a public input/parser correction. Do not redesign the accepted/reviewed send engines.
 
-Preserve one dispatch call site per operation and no fallback between tools.
+Preserve for text:
 
-Do not modify the fixed AppleScript sender, file validator, destination resolution semantics, or signing/entitlement architecture unless repository reality reveals a concrete defect directly caused by this correction. If so, stop and report before broadening scope.
+- exact destination preparation and revalidation;
+- verified-new-recipient human-controlled composition;
+- live global `MessagesSendingMode` evaluation per call;
+- Ask-mode final confirmation / Send-Automatically confirmation skip;
+- non-prompting preflight rules;
+- Automation/TCC and exact chat addressability;
+- one text dispatch, no retry/fallback;
+- privacy-redacted logging/errors/results;
+- submitted/completed, never delivered, truthfulness.
+
+Preserve for attachments:
+
+- existing exact destination preparation and revalidation;
+- current file picker/validator/access pipeline **temporarily**, without presenting it as the final product design;
+- live global `MessagesSendingMode` behavior;
+- file identity/property revalidation;
+- Automation/TCC and exact chat addressability;
+- one typed-file dispatch, no retry/fallback;
+- privacy/result semantics.
+
+Do not add attachment path/bytes/source fields in this task.
+
+## Attachment-ingress product state — explicit exclusion
+
+The user has already decided that ordinary `message_send_attachment` execution should eventually be programmatic, not picker-driven. Settled future direction:
+
+- persistent user-approved filesystem root + relative path, with a dedicated staging area as the primary/simple case;
+- bounded serialized attachment content staged into app-owned temporary storage;
+- file picker only in Settings/onboarding when granting a persistent filesystem root, not per send;
+- staging deletion is an iMCP Settings lifecycle policy, not an MCP argument; factory default keeps staging files, optional deletion applies only after definitive successful staging-file submission.
+
+Do **not** implement any of that here. It has a separate UX/security/entitlement acceptance boundary and will follow this correction.
+
+## Schema and implementation guidance
+
+Prefer the smallest change that keeps the downstream code recognizable.
+
+A good shape is:
+
+- replace the public `recipient` + `recipients` schema properties with one `recipients` property whose value schema is string-or-nonempty-string-array;
+- keep `chat_id` as the alternative;
+- replace duplicated destination parsing with a small shared parser only if doing so clearly reduces duplication without touching resolution/revalidation behavior;
+- internally map scalar/one-item array to the existing direct destination case and 2+ valid distinct normalized items to the existing group destination case;
+- remove body elicitation from the text input parser and require a body directly.
+
+Do not introduce a compatibility alias for `recipient`; this feature-completion branch has no released compatibility requirement for it.
+
+Top-level `additionalProperties: false` remains.
 
 ## Required focused tests
 
-Refactor existing consolidation tests back toward the final split surface without discarding the security coverage. At minimum prove:
+Preserve all still-valid tests and update/add focused coverage. At minimum prove:
 
-1. `MessageService.tools` advertises **exactly** `message_send_text` and `message_send_attachment` as send-capable Messages tools; `messages_send`, `messages_send_attachment`, and the unified alias are absent.
-2. `message_send_text` schema exposes destination selectors + `body`, no attachment/file/path/source/mode/bypass fields, and preserves existing text input semantics.
-3. `message_send_attachment` schema exposes only destination selectors in the current slice, with no body/caption/path/file/bytes/source/mode/bypass fields.
-4. Text direct/group/chat_id behavior remains intact.
-5. Missing text body is elicited again; accepted elicited body is still followed by separate Ask-mode final confirmation for an existing conversation.
-6. Missing-body elicitation decline/cancel/malformed content sends nothing.
-7. Ask Before Sending requests exactly one final text confirmation for existing-conversation text and exactly one final attachment confirmation after picker selection for attachments.
-8. Send Automatically skips only those final confirmations while preserving all downstream revalidation/Automation/one-dispatch behavior for both tools.
-9. Live Sending-mode changes are observed without reinitializing `MessageService` for both operations; reuse existing coverage where practical.
-10. Text verified-new recipient still opens human-controlled Messages composition; attachment verified-new recipient still fails before picker/composer/dispatch.
-11. Picker cancellation, stale destination, changed/replaced/enlarged/disappeared file, Automation denial/unavailability, and Ask-mode attachment confirmation decline/cancel remain fail-closed with zero attachment dispatch.
-12. Neither public tool can express body + attachment in one invocation; there is no code path that turns one MCP operation into two Messages submissions.
-13. Existing read-only Messages behavior and unrelated services are unchanged.
-14. Result semantics remain submitted/completed, never delivered.
+1. Both public send schemas contain `recipients` and `chat_id`, and contain **no `recipient` property**.
+2. `message_send_text` additionally exposes required `body`; `message_send_attachment` does not expose body/caption/file/path/bytes/source yet.
+3. Encoded/schema representation of `recipients` accepts a scalar string and a nonempty array of strings via the local property-union idiom.
+4. Scalar `recipients` on text follows direct-recipient behavior.
+5. One-item array `recipients` on text follows the same direct-recipient behavior.
+6. Scalar and one-item array produce equivalent exact-existing-direct destination behavior in synthetic tests.
+7. Two-or-more array items follow exact-group behavior.
+8. Duplicate or normalized-colliding 2+ group input fails rather than degenerating into direct intent.
+9. Empty array fails; non-string array member fails; malformed scalar fails.
+10. `recipients` + `chat_id` together fail; neither fails.
+11. Verified-new text behavior is preserved for scalar and, if inexpensive, one-item-array input.
+12. Verified-new attachment behavior remains unsupported for scalar/one-item-array input, before picker/composer/dispatch.
+13. Missing body causes an immediate input error and **does not issue any elicitation request**, confirmation request, composition, Automation request, or dispatch.
+14. Malformed/non-string body fails with zero side effect.
+15. Empty body still fails with zero side effect.
+16. A valid body in Ask Before Sending still reaches exactly one final confirmation for an existing conversation.
+17. A valid body in Send Automatically still skips only that final confirmation and retains destination revalidation/Automation/exactly-one dispatch.
+18. Existing attachment Ask/Automatic, picker cancellation, stale destination, changed file, Automation denial/unavailability, and one-dispatch coverage remains green after destination parser changes.
+19. Tool-list tests still expose only `message_send_text` and `message_send_attachment` as send operations; no old/unified alias returns.
+20. Read-only Messages/Contacts behavior and unrelated services are unchanged.
 
-Preserve or strengthen existing event/order assertions. Do not weaken race-defense or authorization tests to make the API correction easier.
+Use only synthetic handles/files in tests. Do not access real Messages/Contacts data.
 
 ## ADR and documentation reconciliation
 
-This is another explicit public-API decision change. Preserve decision history rather than rewriting it.
+The two-tool split in ADR 0012 remains accepted. This task changes destination input shape and reverses ADR 0012's restored missing-body elicitation behavior.
 
-Repository state currently has Accepted ADR 0011 for the unified `messages_send` design. The user explicitly reversed that design before manual acceptance.
+Create the next ADR (expected ADR 0013 if repository numbering agrees) recording the user's explicit 2026-08-17 decision:
 
-Create the next ADR (expected ADR 0012 if repository state agrees) for the final two-tool public API. It may be `Accepted` because the user explicitly chose it.
+- retain `message_send_text` / `message_send_attachment`;
+- remove singular `recipient`;
+- `recipients` accepts scalar or one-or-more array plus mutually exclusive `chat_id`;
+- scalar/one-item array = direct intent; 2+ array = exact-existing-group intent with duplicate/degenerate failure;
+- require non-empty `message_send_text.body` and do not elicit a missing body;
+- final confirmation elicitation remains separate and unchanged;
+- attachment source redesign is explicitly deferred to a later ADR/milestone.
 
-ADR requirements:
+Mark ADR 0012 as superseded **only for these public-input details** if that matches the repository's ADR convention; do not imply its two-tool split or carried-forward safety contracts were rejected.
 
-- mark ADR 0011 `Superseded` by ADR 0012;
-- explain that ADR 0011 was implemented and code-reviewed but never manually accepted before the user reversed the API decision;
-- keep ADR 0009's historical supersession chain intact rather than pretending history did not happen;
-- ADR 0012 must explicitly carry forward the still-binding attachment safety/validation contract from ADR 0009 and the global Sending-mode behavior from ADR 0010;
-- explain why separate text/attachment operations now intentionally map to one Messages submission class each and avoid partial-success semantics from text + file;
-- record the exact final tool names `message_send_text` and `message_send_attachment`;
-- record restored text missing-body elicitation as part of returning to a dedicated text operation.
+Update as applicable:
 
-Update `docs/decisions/README.md` and reconcile ADR 0010 wording to the final two-tool surface.
-
-Inspect/update as applicable:
-
-- `README.md`;
+- `docs/decisions/README.md`;
+- ADR 0010/0012 cross-references only where needed for current truth;
 - `docs/messages-write-plan.md`;
-- tool descriptions/parameter descriptions in `App/Services/Messages.swift`;
-- `docs/project-reports/unified-messages-send-tool-2026-08-16.md` with a short forward note that the unified API was superseded before manual acceptance; do not rewrite its historical evidence;
-- earlier text/attachment automatic-mode reports only with concise forward references if needed;
-- any documentation that still presents unified `messages_send` or old plural send-tool names as the desired final public API.
+- `README.md` if it documents these argument names/semantics;
+- current tool descriptions/parameter descriptions in `App/Services/Messages.swift`;
+- any current-facing documentation that says callers should use singular `recipient` or that missing text body is elicited.
 
-Create one concise sanitized report for this correction under `docs/project-reports/`. It must state current starting head `801f3418...`, the user reversal, final tool names, implementation commit(s), restored elicitation behavior, files/symbols changed, verification evidence, remaining manual gate, and next bounded action. No raw logs or private values.
+Historical reports/ADRs may retain old names/behavior as historical narration; add a concise forward note only if needed to prevent readers mistaking superseded behavior for current truth. Do not rewrite history.
+
+Create a concise sanitized project report under `docs/project-reports/` for this correction. It must identify starting reviewed head `fa5733b91f383eba0b8e257f1132bacc58e98aae`, final commit(s), exact schema/behavior changes, verification, unresolved attachment-ingress milestone, and any manual gate. No raw logs/private values.
 
 ## Security and privacy invariants
 
-This API correction must not weaken:
+This correction must not weaken:
 
-- exact destination selector validation;
-- direct/group ambiguity and incomplete-membership failure;
-- verified-new-recipient route distinction;
-- non-prompting-only preflight before final authorization;
-- mandatory picker for the current attachment operation;
-- bounded attachment validation;
-- security-scoped access lifetime;
-- destination revalidation;
-- file identity/property revalidation;
+- exact handle validation;
+- direct/group ambiguity and complete-membership checks;
+- destination revalidation immediately before dispatch;
+- verified-new route distinction;
 - app-owned global Sending mode and caller inability to override it;
-- Messages Automation/TCC checks;
-- exact chat addressability verification;
-- cancellation before dispatch;
-- fixed AppleScript source;
-- descriptor-only untrusted text/chat/file input;
-- one-dispatch/no-retry/no-fallback semantics;
-- ambiguous-submission handling;
-- privacy-redacted logs/errors/results;
+- final confirmation semantics in Ask mode;
+- Automation/TCC and exact chat addressability;
+- attachment file validation/revalidation in the temporary picker path;
+- fixed AppleScript source and descriptor-only untrusted inputs;
+- one-dispatch/no-retry/no-fallback;
+- cancellation-before-dispatch;
+- privacy redaction;
 - submitted-not-delivered truthfulness.
 
-Use only synthetic values in tests/docs. Do not access, print, log, or commit real Messages/Contacts contents or private attachment paths/content.
+Production logs must not add recipient handles, chat IDs, message bodies, filenames, paths, or attachment contents.
 
 ## Verification
 
-Run narrow tool-schema/text-elicitation/attachment-path tests first, then full verification.
+Run focused parser/schema/body tests first, then the full applicable verification.
 
 At minimum:
 
-- focused `MessageSendTests` and `MessageAttachmentSendTests` for the final two public tools;
-- any tool-list/schema regression tests affected by the renamed surface;
+- focused `MessageSendTests`;
+- focused destination/schema portions of `MessageAttachmentSendTests`;
+- affected tool-list/schema regression tests;
 - `swift format lint --strict --recursive App AppTests`;
 - `git diff --check`;
 - full `imcp-serverTests` suite;
 - Debug iMCP build;
 - `imcp-server`/CLI build if shared compilation requires it;
-- do not spend time debugging the known unrelated `CLITests/test_elicitation_proxy.py` `DYLD_FRAMEWORK_PATH` fragility unless this correction materially changes that path;
-- regenerate the signed `.build/ManualVerification` app with the established signing procedure;
+- do not spend time on the known unrelated `CLITests/test_elicitation_proxy.py` `DYLD_FRAMEWORK_PATH` fragility unless this task changes that path;
+- regenerate the signed `.build/ManualVerification` app using the established procedure;
 - `codesign --verify --strict` the signed app;
-- confirm effective entitlements and Hardened Runtime are unchanged/unweakened.
+- confirm effective entitlements and Hardened Runtime remain unchanged.
 
 No automated verification may send a real message or attachment.
 
-Perform adversarial self-review for: any legacy/unified alias still advertised; a tool reaching the wrong internal pipeline; text missing-body elicitation being mistaken for final authorization; caller-controlled automatic-send bypass; picker bypass; weakened destination/file race checks; two dispatches from one MCP operation; retry/fallback; privacy leak; or changed new-recipient behavior.
+Perform adversarial self-review for: a hidden singular-recipient alias; scalar/array disagreement; group duplicate degeneration into direct intent; malformed body accidentally reaching confirmation/composition; loss of final confirmation because missing-body elicitation was removed; changed new-recipient behavior; weakened destination/file race checks; caller-controlled automatic bypass; retry/fallback; privacy leak.
 
 ## Manual checkpoint to prepare, but do not execute
 
-Do not perform any real send during implementation or automated verification.
+After supervising review of the exact pushed implementation head, prepare for a small non-destructive human check:
 
-After supervising review, the human checkpoint should be minimal and use only the final tool names:
+1. Refresh/reconnect the MCP client and inspect `message_send_text` / `message_send_attachment`: `recipient` is absent; `recipients` is represented as scalar-or-array; `chat_id` remains alternative.
+2. Call `message_send_text` without `body`; verify an immediate error and **no missing-body form appears**.
+3. In Ask Before Sending, call `message_send_text` with a scalar `recipients` value and a deliberately chosen test body to an explicitly authorized existing conversation; verify the normal final send confirmation appears, then cancel. Nothing needs to be sent.
+4. If the client can conveniently express it, repeat with a one-item `recipients` array and verify it reaches the same final confirmation; cancel.
 
-1. Confirm the connected MCP client advertises `message_send_text` and `message_send_attachment` and does not advertise unified/old send aliases.
-2. With Ask Before Sending selected, invoke `message_send_text` for an existing conversation and cancel its final confirmation; verify nothing sends. If practical, also exercise omitted-body elicitation non-destructively and then cancel final confirmation.
-3. Still in Ask mode, invoke `message_send_attachment`, choose an explicitly selected supported file, then cancel final confirmation; verify nothing sends.
-4. Without restarting iMCP, switch to Send Automatically and perform **one explicitly authorized attachment submission** through `message_send_attachment`; picker still appears, final confirmation does not.
-5. Switch back to Ask Before Sending and verify a later attachment invocation presents final confirmation again; cancel is sufficient.
+Do not use the current attachment picker as a product-acceptance test. Attachment ingress remains explicitly pending redesign.
 
-No additional real text send is required merely because the public text tool was renamed; its automatic runtime path was already accepted before this correction unless supervising review finds a reason to reopen that gate.
-
-Any real send requires separate explicit human authorization of the exact destination and exact body/file. Claude must not choose or perform those values.
+Any real message test would require separate explicit authorization of exact destination and body. The checklist above should require no actual send.
 
 ## Explicit exclusions
 
-Do not implement:
+Do not implement in this task:
 
-- a unified send alias;
-- body + attachment/caption in one operation;
-- handoff-directory attachment ingress;
+- filesystem/staging attachment ingress;
 - serialized/base64 attachment ingress;
-- arbitrary local path/file-name/file-bytes MCP input;
-- multiple attachments;
-- verified-new-recipient attachment composition;
+- Managed File Access Settings/onboarding;
+- staging delete-after-send setting/runtime;
+- attachment picker removal;
+- verified-new attachment sending;
 - unattended new-recipient text sending;
-- Shortcuts/Accessibility experiments;
-- per-client authorization;
-- operation-class authorization granularity;
-- circuit breaker defaults/UI;
-- cross-call idempotency;
+- body + attachment/caption in one operation;
+- multiple attachments;
+- per-client or operation-class authorization;
+- circuit breaker;
 - Recent Automation Activity;
+- cross-call idempotency;
 - trusted-client identity hardening;
-- CLI path-fragility cleanup;
+- CLI test-harness cleanup;
 - upstream PR decomposition;
-- unrelated cleanup/refactors.
+- unrelated refactors.
 
 ## Git and handoff
 
-Use additive commits only. Do not rewrite `801f3418...` or any reviewed history.
+Use additive commits only. Do not rewrite `fa5733b9...` or any reviewed history.
 
 A reasonable implementation commit message is:
 
-`refactor: split Messages text and attachment send tools`
+`refactor: simplify Messages send destination inputs`
 
-Commit implementation/docs/report changes and push normally to `origin/feat/messages-write-foundation`.
+Commit implementation/tests/docs/report changes and push normally to:
+
+`origin/feat/messages-write-foundation`
 
 Then:
 
@@ -309,16 +353,17 @@ Do not open or merge a maintainer PR. Do not force-push.
 
 STOP after:
 
-- the only public Messages send tools are exactly `message_send_text` and `message_send_attachment`;
-- text missing-body elicitation is restored and remains distinct from final send authorization;
-- existing reviewed text and attachment pipelines and global Sending-mode behavior remain intact;
-- one-dispatch/no-fallback and all validation/revalidation/privacy invariants remain intact;
-- ADR/docs accurately preserve the unified experiment as superseded history and record the final split-tool decision;
-- focused/full tests and builds pass;
-- signed ManualVerification build is regenerated and verified;
-- sanitized report is committed;
-- branch is pushed normally, local HEAD equals origin, and worktree is clean.
+- both send tools expose only scalar-or-array `recipients` plus `chat_id` for destination selection;
+- singular `recipient` is gone with no alias;
+- scalar/one-item input preserves direct/new-recipient semantics and 2+ array preserves exact-group semantics;
+- duplicate/degenerate group input fails closed;
+- `message_send_text.body` is required/non-empty and missing body never elicits;
+- final confirmation and all downstream send safety/authorization behavior remain intact;
+- attachment ingress is deliberately not redesigned;
+- ADR/docs/report accurately describe current state;
+- focused/full verification and signed-build checks pass;
+- implementation/report commits are pushed normally, local HEAD equals origin, and worktree is clean.
 
-Do not perform the human runtime checkpoint. The next gate is supervising review of the exact pushed correction head, then the compact manual verification above.
+Do not perform the human checkpoint. The next gate is supervising review of the exact pushed head, followed by the compact non-destructive schema/text-input checkpoint above.
 
 When complete, the user should only need to say **done**.
