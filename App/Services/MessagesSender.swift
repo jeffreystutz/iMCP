@@ -50,11 +50,10 @@ protocol MessagesSending: Sendable {
 
 enum MessageSendError: LocalizedError, Sendable {
     case missingInput
-    case inputDeclined
-    case inputCancelled
     case inputMalformed
     case invalidRecipient
     case invalidDestination
+    case emptyRecipients
     case insufficientGroupParticipants
     case groupConversationNotFound
     case ambiguousDirectConversation
@@ -79,17 +78,15 @@ enum MessageSendError: LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .missingInput:
-            return "A recipient and non-empty message body are required."
-        case .inputDeclined:
-            return "Required message information was declined."
-        case .inputCancelled:
-            return "Required message information was cancelled."
+            return "A destination and a non-empty message body are required."
         case .inputMalformed:
             return "Required message information was missing or malformed."
         case .invalidRecipient:
-            return "The recipient must be one exact E.164 phone number or email address."
+            return "Every recipients entry must be one exact E.164 phone number or email address."
         case .invalidDestination:
-            return "Exactly one message destination is required: recipient, recipients, or chat_id."
+            return "Exactly one message destination is required: recipients or chat_id."
+        case .emptyRecipients:
+            return "The recipients array must contain at least one handle."
         case .insufficientGroupParticipants:
             return "A group destination requires at least two distinct valid participants."
         case .groupConversationNotFound:

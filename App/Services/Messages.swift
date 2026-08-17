@@ -524,28 +524,30 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         Tool(
             name: "message_send_text",
             description:
-                "Send one plain-text message to exactly one destination, by one of two routes that never fall back to each other. A recipient that uniquely matches one existing direct conversation, or an explicit chat_id, is submitted to that existing conversation, showing the exact destination and body. Whether that submission requires the user's confirmation first, or submits directly, follows the user's Sending mode setting in iMCP; there is no way for a caller to choose or override it. A recipient verified to have no existing conversation instead opens a Messages compose window, seeded with that recipient and body, which you review and send yourself; because you can edit it there, iMCP does not confirm it first and cannot report what was ultimately sent, and this route is unaffected by the Sending mode setting. Ambiguous or unresolvable matching fails without sending. Recipients can address only an existing group conversation: iMCP cannot create a new group from a list, and the complete participant set must exactly match one existing group or the call fails without sending. When multiple groups have the same participant set, use chat_id; chat_id is preferred when the intended group is already known. Messages chooses iMessage, SMS, or RCS; this tool never selects it.",
+                "Send one plain-text message to exactly one destination, by one of two routes that never fall back to each other. A recipient that uniquely matches one existing direct conversation, or an explicit chat_id, is submitted to that existing conversation, showing the exact destination and body. Whether that submission requires the user's confirmation first, or submits directly, follows the user's Sending mode setting in iMCP; there is no way for a caller to choose or override it. A recipient verified to have no existing conversation instead opens a Messages compose window, seeded with that recipient and body, which you review and send yourself; because you can edit it there, iMCP does not confirm it first and cannot report what was ultimately sent, and this route is unaffected by the Sending mode setting. Ambiguous or unresolvable matching fails without sending. Two or more recipients can address only an existing group conversation: iMCP cannot create a new group from a list, and the complete participant set must exactly match one existing group or the call fails without sending. When multiple groups have the same participant set, use chat_id; chat_id is preferred when the intended group is already known. Messages chooses iMessage, SMS, or RCS; this tool never selects it. body is required and must be a non-empty string; a missing or empty body fails immediately and is never elicited.",
             inputSchema: .object(
                 properties: [
-                    "recipient": .string(
-                        description:
-                            "One exact E.164 phone number or email address. A unique existing direct conversation is submitted to, subject to the user's Sending mode setting. A recipient verified to have no existing conversation instead opens a user-controlled Messages compose window seeded with this recipient and body, which the user reviews, may edit, and sends personally. Ambiguous or unresolvable matching fails without sending."
-                    ),
-                    "recipients": .array(
-                        description:
-                            "The complete set of remote participants in an existing group conversation. This does not create a new group. The set must exactly match one existing group, or the call fails without sending.",
-                        items: .string(
-                            description: "One exact E.164 phone number or email address"
+                    "recipients": .oneOf([
+                        .string(
+                            description:
+                                "One exact E.164 phone number or email address, addressing an existing direct conversation, subject to the user's Sending mode setting. A recipient verified to have no existing conversation instead opens a user-controlled Messages compose window seeded with this recipient and body, which the user reviews, may edit, and sends personally. Ambiguous or unresolvable matching fails without sending."
                         ),
-                        minItems: 2
-                    ),
+                        .array(
+                            description:
+                                "One exact handle behaves identically to the scalar form above. Two or more exact handles are the complete set of remote participants in an existing group conversation; this does not create a new group, and the set must exactly match one existing group or the call fails without sending. Duplicate or colliding handles that leave fewer than two distinct participants fail rather than silently becoming a direct send.",
+                            items: .string(
+                                description: "One exact E.164 phone number or email address"
+                            ),
+                            minItems: 1
+                        ),
+                    ]),
                     "chat_id": .string(
                         description:
                             "Opaque chat ID returned by messages_list_chats that explicitly selects an existing direct or group conversation; preferred when the intended group is already known. Do not supply a database or scripting identifier.",
                         minLength: 1
                     ),
                     "body": .string(
-                        description: "Plain-text message body",
+                        description: "Plain-text message body. Required; must be non-empty.",
                         minLength: 1
                     ),
                 ],
@@ -560,10 +562,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                 openWorldHint: true
             )
         ) { arguments, context in
-            let input = try await self.resolveSendInput(
-                arguments,
-                context: context
-            )
+            let input = try self.resolveSendInput(arguments)
             return try await self.sendText(
                 destination: input.destination,
                 body: input.body,
@@ -574,21 +573,23 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         Tool(
             name: "message_send_attachment",
             description:
-                "Submit exactly one file as an attachment to one existing Messages conversation that you identify by recipient, recipients, or chat_id. This tool takes no file path, no file name, and no file contents: after the destination resolves, iMCP always opens a native file picker on the user's Mac and the user chooses the file there. Whether the user must then separately confirm the exact conversation together with the file's name, type, and size before it sends, or it submits directly after the picker, follows the user's Sending mode setting in iMCP; there is no way for a caller to choose or override it, and the picker itself is never treated as that authorization. It sends no message text, so it cannot carry a caption or a body; send any accompanying text as its own message_send_text call. The file must be one ordinary image, video or audio, PDF, or plain-text file of at most 25 MiB. Unlike message_send_text, a recipient with no existing conversation fails instead of opening a compose window, and no new conversation or group is ever created, in either mode. Cancelling the picker, or the confirmation when one is presented, sends nothing. Success means Messages accepted one attachment submission, never that it was delivered.",
+                "Submit exactly one file as an attachment to one existing Messages conversation that you identify by recipients or chat_id. This tool takes no file path, no file name, and no file contents: after the destination resolves, iMCP always opens a native file picker on the user's Mac and the user chooses the file there. Whether the user must then separately confirm the exact conversation together with the file's name, type, and size before it sends, or it submits directly after the picker, follows the user's Sending mode setting in iMCP; there is no way for a caller to choose or override it, and the picker itself is never treated as that authorization. It sends no message text, so it cannot carry a caption or a body; send any accompanying text as its own message_send_text call. The file must be one ordinary image, video or audio, PDF, or plain-text file of at most 25 MiB. Unlike message_send_text, a recipient with no existing conversation fails instead of opening a compose window, and no new conversation or group is ever created, in either mode. Cancelling the picker, or the confirmation when one is presented, sends nothing. Success means Messages accepted one attachment submission, never that it was delivered.",
             inputSchema: .object(
                 properties: [
-                    "recipient": .string(
-                        description:
-                            "One exact E.164 phone number or email address that must already have exactly one existing direct conversation. A recipient with no existing conversation, or an ambiguous or unresolvable match, fails without opening the picker and without sending."
-                    ),
-                    "recipients": .array(
-                        description:
-                            "The complete set of remote participants in an existing group conversation. This does not create a new group. The set must exactly match one existing group, or the call fails without sending.",
-                        items: .string(
-                            description: "One exact E.164 phone number or email address"
+                    "recipients": .oneOf([
+                        .string(
+                            description:
+                                "One exact E.164 phone number or email address that must already have exactly one existing direct conversation. A recipient with no existing conversation, or an ambiguous or unresolvable match, fails without opening the picker and without sending."
                         ),
-                        minItems: 2
-                    ),
+                        .array(
+                            description:
+                                "One exact handle behaves identically to the scalar form above. Two or more exact handles are the complete set of remote participants in an existing group conversation; this does not create a new group, and the set must exactly match one existing group or the call fails without sending. Duplicate or colliding handles that leave fewer than two distinct participants fail rather than silently becoming a direct send.",
+                            items: .string(
+                                description: "One exact E.164 phone number or email address"
+                            ),
+                            minItems: 1
+                        ),
+                    ]),
                     "chat_id": .string(
                         description:
                             "Opaque chat ID returned by messages_list_chats that explicitly selects an existing direct or group conversation; preferred when the intended conversation is already known. Do not supply a database or scripting identifier.",
@@ -605,7 +606,7 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                 openWorldHint: true
             )
         ) { arguments, context in
-            let destination = try self.resolveAttachmentDestination(arguments)
+            let destination = try self.resolveDestination(arguments)
             return try await self.sendAttachment(
                 destination: destination,
                 context: context
@@ -618,84 +619,21 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         let body: String
     }
 
-    /// Validates `message_send_text`'s destination selectors and resolves the message
-    /// body, eliciting it through the existing MCP form mechanism when the caller omits
-    /// it. Accepting that elicitation supplies the body; it is never itself final send
-    /// authorization, which remains a separate step in `sendText`.
+    /// Validates `message_send_text`'s destination and requires a non-empty `body`
+    /// directly. A missing or malformed body is a terminal input error and is never
+    /// elicited: the user explicitly rejected missing-body elicitation during manual
+    /// testing, so a caller must always supply its own body.
     private func resolveSendInput(
-        _ arguments: [String: Value],
-        context: ToolCallContext
-    ) async throws -> ResolvedSendInput {
-        let recipient = arguments["recipient"]?.stringValue
-        let recipientsValue = arguments["recipients"]
-        let chatID = arguments["chat_id"]?.stringValue
-        var body = arguments["body"]?.stringValue
-        let suppliedDestinationCount = [recipient != nil, recipientsValue != nil, chatID != nil]
-            .filter { $0 }.count
-        guard suppliedDestinationCount == 1 else {
-            throw MessageSendError.invalidDestination
+        _ arguments: [String: Value]
+    ) throws -> ResolvedSendInput {
+        let destination = try self.resolveDestination(arguments)
+        guard let bodyValue = arguments["body"] else {
+            throw MessageSendError.missingInput
         }
-
-        var properties: [String: MCP.Value] = [:]
-        var required: [String] = []
-        if body == nil {
-            properties["body"] = .object([
-                "type": .string("string"),
-                "description": .string("Plain-text message body"),
-                "minLength": .int(1),
-            ])
-            required.append("body")
-        }
-
-        if !required.isEmpty {
-            let response = try await context.elicitation.requestForm(
-                message: "Provide the missing information required to prepare a message.",
-                schema: .init(
-                    title: "Complete Message",
-                    properties: properties,
-                    required: required
-                )
-            )
-            switch response.action {
-            case .decline:
-                throw MessageSendError.inputDeclined
-            case .cancel:
-                throw MessageSendError.inputCancelled
-            case .accept:
-                body = body ?? response.content?["body"]?.stringValue
-            }
-        }
-
-        guard let body else {
+        guard let body = bodyValue.stringValue else {
             throw MessageSendError.inputMalformed
         }
-        if let recipient {
-            guard recipient.isExactMessageHandle else {
-                throw MessageSendError.invalidRecipient
-            }
-            return ResolvedSendInput(destination: .recipient(recipient), body: body)
-        }
-        if let recipientsValue {
-            guard case .array(let values) = recipientsValue else {
-                throw MessageSendError.insufficientGroupParticipants
-            }
-            let handles = values.compactMap(\.stringValue)
-            guard handles.count == values.count else {
-                throw MessageSendError.invalidRecipient
-            }
-            let normalized = handles.compactMap(MessagesHandleNormalization.normalize)
-            guard normalized.count == handles.count else { throw MessageSendError.invalidRecipient }
-            let distinct = Set(normalized)
-            guard distinct.count >= 2 else {
-                throw MessageSendError.insufficientGroupParticipants
-            }
-            return ResolvedSendInput(destination: .recipients(distinct), body: body)
-        }
-        guard let chatID else { throw MessageSendError.invalidDestination }
-        guard !chatID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw MessageSendError.invalidChatIdentifier
-        }
-        return ResolvedSendInput(destination: .chat(chatID), body: body)
+        return ResolvedSendInput(destination: destination, body: body)
     }
 
     /// Existing-conversation plain-text submission, or verified-new-recipient composition.
@@ -961,48 +899,69 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         }
     }
 
-    /// Validates the attachment tool's destination selectors.
-    ///
-    /// It accepts exactly the same mutually exclusive selectors as `message_send_text`, and
-    /// deliberately accepts nothing else: there is no path, URL, file name, byte, body, or
-    /// attachment identifier in this tool's arguments.
-    private func resolveAttachmentDestination(
+    /// Validates the destination selectors shared by both `message_send_text` and
+    /// `message_send_attachment`: exactly one of `recipients` or `chat_id`. There is no
+    /// path, URL, file name, byte, body, or attachment identifier in either tool's
+    /// destination arguments.
+    private func resolveDestination(
         _ arguments: [String: Value]
     ) throws -> SendDestination {
-        let recipient = arguments["recipient"]?.stringValue
         let recipientsValue = arguments["recipients"]
         let chatID = arguments["chat_id"]?.stringValue
-        let suppliedDestinationCount = [recipient != nil, recipientsValue != nil, chatID != nil]
+        let suppliedDestinationCount = [recipientsValue != nil, chatID != nil]
             .filter { $0 }.count
         guard suppliedDestinationCount == 1 else {
             throw MessageSendError.invalidDestination
         }
 
-        if let recipient {
-            guard recipient.isExactMessageHandle else {
-                throw MessageSendError.invalidRecipient
-            }
-            return .recipient(recipient)
-        }
         if let recipientsValue {
-            guard case .array(let values) = recipientsValue else {
-                throw MessageSendError.insufficientGroupParticipants
-            }
-            let handles = values.compactMap(\.stringValue)
-            guard handles.count == values.count else { throw MessageSendError.invalidRecipient }
-            let normalized = handles.compactMap(MessagesHandleNormalization.normalize)
-            guard normalized.count == handles.count else { throw MessageSendError.invalidRecipient }
-            let distinct = Set(normalized)
-            guard distinct.count >= 2 else {
-                throw MessageSendError.insufficientGroupParticipants
-            }
-            return .recipients(distinct)
+            return try Self.parseRecipients(recipientsValue)
         }
         guard let chatID else { throw MessageSendError.invalidDestination }
         guard !chatID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MessageSendError.invalidChatIdentifier
         }
         return .chat(chatID)
+    }
+
+    /// Parses the unified `recipients` field into destination intent.
+    ///
+    /// A scalar handle and a one-element array express identical direct-recipient
+    /// intent. Two or more array elements express exact-existing-group intent.
+    /// Duplicate or normalization-colliding elements fail closed
+    /// (`insufficientGroupParticipants`) rather than silently degenerating into a
+    /// direct send: a caller that supplied two or more entries never gets treated as
+    /// having supplied one.
+    private static func parseRecipients(_ value: Value) throws -> SendDestination {
+        if let scalar = value.stringValue {
+            guard scalar.isExactMessageHandle else {
+                throw MessageSendError.invalidRecipient
+            }
+            return .recipient(scalar)
+        }
+        guard case .array(let values) = value else {
+            throw MessageSendError.invalidRecipient
+        }
+        guard !values.isEmpty else {
+            throw MessageSendError.emptyRecipients
+        }
+        let handles = values.compactMap(\.stringValue)
+        guard handles.count == values.count else {
+            throw MessageSendError.invalidRecipient
+        }
+        if handles.count == 1 {
+            guard handles[0].isExactMessageHandle else {
+                throw MessageSendError.invalidRecipient
+            }
+            return .recipient(handles[0])
+        }
+        let normalized = handles.compactMap(MessagesHandleNormalization.normalize)
+        guard normalized.count == handles.count else { throw MessageSendError.invalidRecipient }
+        let distinct = Set(normalized)
+        guard distinct.count >= 2 else {
+            throw MessageSendError.insufficientGroupParticipants
+        }
+        return .recipients(distinct)
     }
 
     /// Runs one read-only conversation-database operation under the directory-scoped

@@ -1,10 +1,21 @@
 # ADR 0012: Split Messages send tools — `message_send_text` and `message_send_attachment`
 
-- Status: Accepted
+- Status: Superseded
 - Date: 2026-08-16
 - Deciders: iMCP maintainers (user)
 - Supersedes: ADR 0011 (its public-API decision only; see "What this does not change")
-- Superseded by:
+- Superseded by: ADR 0013 (its destination-field shape and missing-body elicitation only)
+
+**Superseded by ADR 0013 for two narrow public-input details only.** The
+2026-08-17 manual checkpoint rejected this record's separate singular
+`recipient`/plural `recipients` destination properties (replaced by one
+unified `recipients` property accepting a scalar or an array) and this
+record's restored missing-body MCP form elicitation for `message_send_text`
+(replaced by a hard non-empty-`body` requirement with no elicitation). ADR
+0013 does not reopen, and explicitly reaffirms, this record's two-tool
+public-API split (`message_send_text`/`message_send_attachment` remain the
+only public send tools) and every security/validation contract this record
+carried forward from ADR 0009 and ADR 0010.
 
 ## Context
 

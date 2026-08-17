@@ -59,17 +59,19 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
 
-        XCTAssertEqual(Set(properties.keys), ["recipient", "recipients", "chat_id"])
+        XCTAssertEqual(Set(properties.keys), ["recipients", "chat_id"])
         XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
         // Nothing is required at the schema level: exactly-one-of is enforced in code.
         XCTAssertNil(schema["required"])
 
-        // No file or message input may exist on this tool in any spelling, and no
-        // caller-facing sending-mode/confirmation-bypass argument may exist either: the
-        // global Sending mode is app-owned and unreachable from any MCP argument.
+        // No file or message input may exist on this tool in any spelling, no singular
+        // `recipient` alias, and no caller-facing sending-mode/confirmation-bypass
+        // argument either: the global Sending mode is app-owned and unreachable from any
+        // MCP argument.
         let schemaText = try XCTUnwrap(String(data: encoded, encoding: .utf8)).lowercased()
         for forbidden in [
-            "\"path\"", "\"file\"", "\"file_path\"", "\"filepath\"", "\"url\"", "\"body\"",
+            "\"recipient\"", "\"path\"", "\"file\"", "\"file_path\"", "\"filepath\"", "\"url\"",
+            "\"body\"",
             "\"text\"", "\"caption\"", "\"filename\"", "\"file_name\"", "\"bytes\"", "\"data\"",
             "\"attachment\"", "\"attachment_id\"", "\"content\"", "\"mime_type\"", "\"uti\"",
             "\"mode\"", "\"sending_mode\"", "\"automatic\"", "\"bypass\"", "\"confirm\"",
@@ -107,14 +109,8 @@ final class MessageAttachmentSendTests: XCTestCase {
         let combinations: [[String: Value]] = [
             [:],
             [
-                "recipient": .string("one@example.invalid"),
+                "recipients": .string("one@example.invalid"),
                 "chat_id": .string("imcp-chat-v1_synthetic"),
-            ],
-            [
-                "recipient": .string("one@example.invalid"),
-                "recipients": .array([
-                    .string("one@example.invalid"), .string("two@example.invalid"),
-                ]),
             ],
             [
                 "recipients": .array([
@@ -133,11 +129,12 @@ final class MessageAttachmentSendTests: XCTestCase {
 
     func testInvalidAndInexactDestinationsFailBeforeThePicker() async throws {
         let cases: [([String: Value], MessageSendError)] = [
-            (["recipient": .string("not a handle")], .invalidRecipient),
-            (["recipient": .string("5551234567")], .invalidRecipient),
-            (["recipient": .string("")], .invalidRecipient),
+            (["recipients": .string("not a handle")], .invalidRecipient),
+            (["recipients": .string("5551234567")], .invalidRecipient),
+            (["recipients": .string("")], .invalidRecipient),
             (["chat_id": .string("   ")], .invalidChatIdentifier),
-            (["recipients": .array([.string("only@example.invalid")])], .insufficientGroupParticipants),
+            (["recipients": .array([])], .emptyRecipients),
+            (["recipients": .array([.string("not a handle")])], .invalidRecipient),
             (
                 ["recipients": .array([.string("dup@example.invalid"), .string("dup@example.invalid")])],
                 .insufficientGroupParticipants
@@ -152,10 +149,27 @@ final class MessageAttachmentSendTests: XCTestCase {
         }
     }
 
+    func testOneItemArrayRecipientsBehavesIdenticallyToScalar() async throws {
+        // A one-item array and a scalar handle must be indistinguishable: both express
+        // direct-recipient intent and dispatch identically.
+        for recipientsValue: Value in [
+            .string("recipient@example.invalid"),
+            .array([.string("recipient@example.invalid")]),
+        ] {
+            let harness = Harness(
+                matches: [uniqueDirectMatch, uniqueDirectMatch],
+                selection: .success(try makeFile("note.txt", byteCount: 8))
+            )
+            _ = try await harness.call(["recipients": recipientsValue])
+            let dispatches = await harness.sender.attachmentSubmissionCount
+            XCTAssertEqual(dispatches, 1, "\(recipientsValue) did not dispatch once")
+        }
+    }
+
     func testUnresolvedDestinationsFailClosedWithoutPickerOrDispatch() async throws {
         let cases: [(MessagesConversationMatch, [String: Value], MessageSendError)] = [
-            (.ambiguous, ["recipient": .string("one@example.invalid")], .ambiguousDirectConversation),
-            (.incomplete, ["recipient": .string("one@example.invalid")], .incompleteDirectMembership),
+            (.ambiguous, ["recipients": .string("one@example.invalid")], .ambiguousDirectConversation),
+            (.incomplete, ["recipients": .string("one@example.invalid")], .incompleteDirectMembership),
             (
                 .none,
                 ["recipients": .array([.string("a@example.invalid"), .string("b@example.invalid")])],
@@ -185,7 +199,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             let harness = Harness(matches: [.none])
             await harness.assertFailure(
                 MessageSendError.attachmentRequiresExistingConversation,
-                arguments: ["recipient": .string(recipient)]
+                arguments: ["recipients": .string(recipient)]
             )
 
             // No sharing composer, no picker, no confirmation, no dispatch.
@@ -220,7 +234,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .selectionCancelled,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
 
         let selections = await harness.selector.selectionCount
@@ -239,7 +253,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             selection: .success(try makeFile("note.txt", byteCount: 8)),
             eventLog: log
         )
-        _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
 
         let events = log.events
         let matchIndex = try XCTUnwrap(events.firstIndex(of: "match"))
@@ -349,7 +363,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             )
             await harness.assertAttachmentFailure(
                 expected,
-                arguments: ["recipient": .string("recipient@example.invalid")]
+                arguments: ["recipients": .string("recipient@example.invalid")]
             )
             XCTAssertEqual(
                 harness.elicitation.requestCount,
@@ -371,7 +385,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             matches: [uniqueDirectMatch, uniqueDirectMatch],
             selection: .success(url)
         )
-        _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
 
         XCTAssertEqual(harness.elicitation.requestCount, 1)
         let message = harness.elicitation.lastMessage
@@ -432,7 +446,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             authorization: .consentRequired,
             eventLog: log
         )
-        _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
 
         let events = log.events
         let confirmation = try XCTUnwrap(events.firstIndex(of: "elicitation"))
@@ -459,7 +473,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             authorization: .authorized,
             eventLog: log
         )
-        _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
 
         let events = log.events
         let preflight = try XCTUnwrap(events.firstIndex(of: "addressability"))
@@ -478,7 +492,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertFailure(
             MessageSendError.chatUnavailableInAutomation,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
 
         let selections = await harness.selector.selectionCount
@@ -496,7 +510,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertFailure(
             MessageSendError.automationDenied,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
         let selections = await harness.selector.selectionCount
         XCTAssertEqual(selections, 0)
@@ -518,7 +532,7 @@ final class MessageAttachmentSendTests: XCTestCase {
                 confirmation: outcome
             )
             do {
-                _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+                _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
                 XCTFail("Expected the attachment submission to fail")
             } catch is MessageSendError {
                 // Expected.
@@ -550,7 +564,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertFailure(
             MessageSendError.confirmationCancelled,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
 
         XCTAssertEqual(native.requestCount, 1)
@@ -577,7 +591,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             )
             await harness.assertFailure(
                 MessageSendError.staleMatchedConversation,
-                arguments: ["recipient": .string("recipient@example.invalid")]
+                arguments: ["recipients": .string("recipient@example.invalid")]
             )
             XCTAssertEqual(harness.elicitation.requestCount, 1)
             let dispatches = await harness.sender.attachmentSubmissionCount
@@ -610,7 +624,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .unreadableSelection,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
         await harness.assertConfirmedButNeverDispatched()
     }
@@ -626,7 +640,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .attachmentChanged,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
         await harness.assertConfirmedButNeverDispatched()
     }
@@ -660,7 +674,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .attachmentChanged,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
         await harness.assertConfirmedButNeverDispatched()
 
@@ -682,7 +696,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .fileTooLarge,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
         await harness.assertConfirmedButNeverDispatched()
     }
@@ -704,7 +718,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .notRegularFile,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
         await harness.assertConfirmedButNeverDispatched()
     }
@@ -714,7 +728,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             matches: [uniqueDirectMatch, uniqueDirectMatch],
             selection: .success(try makeFile("note.txt", byteCount: 32))
         )
-        _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
         let dispatches = await harness.sender.attachmentSubmissionCount
         XCTAssertEqual(dispatches, 1)
     }
@@ -727,7 +741,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             matches: [uniqueDirectMatch, uniqueDirectMatch],
             selection: .success(url)
         )
-        let result = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        let result = try await harness.call(["recipients": .string("recipient@example.invalid")])
 
         let dispatches = await harness.sender.attachmentSubmissionCount
         let messageDispatches = await harness.sender.chatSubmissionCount
@@ -766,7 +780,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         // No sendingMode argument: the default must behave exactly like the explicit
         // .askBeforeSending case, matching the accepted behavior at eb64ee2d.
         let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch], selection: .success(url))
-        let result = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        let result = try await harness.call(["recipients": .string("recipient@example.invalid")])
 
         XCTAssertEqual(harness.elicitation.requestCount, 1)
         let dispatches = await harness.sender.attachmentSubmissionCount
@@ -786,7 +800,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             eventLog: log,
             sendingMode: { .sendAutomatically }
         )
-        let result = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        let result = try await harness.call(["recipients": .string("recipient@example.invalid")])
 
         XCTAssertEqual(
             harness.elicitation.requestCount,
@@ -858,7 +872,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             sendingMode: { box.mode }
         )
 
-        _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
         XCTAssertEqual(
             harness.elicitation.requestCount,
             1,
@@ -867,7 +881,7 @@ final class MessageAttachmentSendTests: XCTestCase {
 
         box.mode = .sendAutomatically
 
-        _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
         XCTAssertEqual(
             harness.elicitation.requestCount,
             1,
@@ -886,7 +900,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .selectionCancelled,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
 
         let selections = await harness.selector.selectionCount
@@ -910,7 +924,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertFailure(
             MessageSendError.staleMatchedConversation,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
 
         XCTAssertEqual(harness.elicitation.requestCount, 0, "confirmation was correctly skipped")
@@ -939,7 +953,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .attachmentChanged,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
 
         XCTAssertEqual(harness.elicitation.requestCount, 0)
@@ -964,7 +978,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await deniedHarness.assertFailure(
             MessageSendError.automationDenied,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
         let deniedDispatches = await deniedHarness.sender.attachmentSubmissionCount
         XCTAssertEqual(deniedDispatches, 0)
@@ -980,7 +994,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await unavailableHarness.assertFailure(
             MessageSendError.chatUnavailableInAutomation,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
         let unavailableDispatches = await unavailableHarness.sender.attachmentSubmissionCount
         XCTAssertEqual(unavailableDispatches, 0)
@@ -990,7 +1004,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         let harness = Harness(matches: [.none], sendingMode: { .sendAutomatically })
         await harness.assertFailure(
             MessageSendError.attachmentRequiresExistingConversation,
-            arguments: ["recipient": .string("brand-new@example.invalid")]
+            arguments: ["recipients": .string("brand-new@example.invalid")]
         )
 
         let compositions = await harness.composer.compositionCount
@@ -1034,7 +1048,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertFailure(
             MessageSendError.chatUnavailableInAutomation,
-            arguments: ["recipient": .string("recipient@example.invalid")]
+            arguments: ["recipients": .string("recipient@example.invalid")]
         )
         let dispatches = await harness.sender.attachmentSubmissionCount
         let probes = await harness.sender.addressabilityCount
@@ -1054,7 +1068,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             )
             await harness.assertFailure(
                 failure,
-                arguments: ["recipient": .string("recipient@example.invalid")]
+                arguments: ["recipients": .string("recipient@example.invalid")]
             )
 
             // Exactly one dispatch attempt, and nothing else was tried afterwards.
@@ -1083,7 +1097,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             confirmationRequester: SlowAttachmentConfirmationRequester()
         )
         let task = Task {
-            try await harness.call(["recipient": .string("recipient@example.invalid")])
+            try await harness.call(["recipients": .string("recipient@example.invalid")])
         }
         try? await Task.sleep(for: .milliseconds(20))
         task.cancel()
@@ -1199,7 +1213,7 @@ final class MessageAttachmentSendTests: XCTestCase {
             matches: [uniqueDirectMatch, uniqueDirectMatch],
             selection: .success(try makeFile("Quarterly Report.pdf", byteCount: 2_048))
         )
-        _ = try await harness.call(["recipient": .string("recipient@example.invalid")])
+        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
 
         XCTAssertEqual(MessagesChatKind.direct.rawValue, "direct")
         XCTAssertEqual(MessagesChatKind.group.rawValue, "group")

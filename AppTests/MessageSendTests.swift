@@ -150,7 +150,7 @@ final class MessageSendTests: XCTestCase {
         let sender = RecordingMessagesSender()
         let requester = StubElicitationRequester(result: confirmedResult)
         let result = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
-            ["recipient": .string("recipient@example.invalid"), "body": .string("test-body")],
+            ["recipients": .string("recipient@example.invalid"), "body": .string("test-body")],
             context: ToolCallContext(elicitation: requester)
         )
 
@@ -181,7 +181,7 @@ final class MessageSendTests: XCTestCase {
                 chatRepository: repository
             )(
                 [
-                    "recipient": .string(recipient),
+                    "recipients": .string(recipient),
                     "body": .string("exact-seed-body"),
                 ],
                 context: ToolCallContext(elicitation: requester)
@@ -239,7 +239,7 @@ final class MessageSendTests: XCTestCase {
                     chatRepository: repository
                 )(
                     [
-                        "recipient": .string("brand-new@example.invalid"),
+                        "recipients": .string("brand-new@example.invalid"),
                         "body": .string("test-body"),
                     ],
                     context: ToolCallContext(elicitation: requester)
@@ -359,7 +359,7 @@ final class MessageSendTests: XCTestCase {
                 )
             )(
                 [
-                    "recipient": .string("recipient@example.invalid"),
+                    "recipients": .string("recipient@example.invalid"),
                     "body": .string("test-body"),
                 ],
                 context: ToolCallContext(
@@ -447,7 +447,7 @@ final class MessageSendTests: XCTestCase {
             composer: composer,
             chatRepository: RecordingSendChatRepository(results: [], matches: [.none])
         )(
-            ["recipient": .string(recipient), "body": .string("test-body")],
+            ["recipients": .string(recipient), "body": .string("test-body")],
             context: ToolCallContext(
                 elicitation: StubElicitationRequester(result: confirmedResult)
             )
@@ -465,7 +465,7 @@ final class MessageSendTests: XCTestCase {
 
         await assertSendError(.invalidRecipient) {
             _ = try await self.sendTool(sender: sender)(
-                ["recipient": .string("not-a-handle"), "body": .string("test-body")],
+                ["recipients": .string("not-a-handle"), "body": .string("test-body")],
                 context: ToolCallContext(elicitation: requester)
             )
         }
@@ -475,46 +475,45 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(submissionCount, 0)
     }
 
-    func testMissingBodyIsElicitedBeforeSeparateConfirmation() async throws {
+    func testMissingBodyFailsImmediatelyWithoutEverEliciting() async {
+        // The user explicitly rejected missing-body elicitation during manual
+        // testing: a missing body must fail before any destination lookup,
+        // confirmation request, composition, or dispatch, and must never issue an
+        // elicitation request of any kind.
         let sender = RecordingMessagesSender()
-        let requester = StubElicitationRequester(results: [
-            .init(
-                action: .accept,
-                content: [
-                    "body": .string("test-body")
-                ]
-            ),
-            confirmedResult,
-        ])
-
-        _ = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
-            ["recipient": .string("recipient@example.invalid")],
-            context: ToolCallContext(elicitation: requester)
-        )
-
-        XCTAssertEqual(requester.requestCount, 2)
-        let submissionCount = await sender.chatSubmissionCount
-        XCTAssertEqual(submissionCount, 1)
-    }
-
-    func testDeclinedMissingInputAndEmptyBodyNeverDispatch() async {
-        let missingSender = RecordingMessagesSender()
-        await assertSendError(.inputDeclined) {
-            _ = try await self.sendTool(sender: missingSender)(
-                ["recipient": .string("recipient@example.invalid")],
-                context: ToolCallContext(
-                    elicitation: StubElicitationRequester(result: .init(action: .decline))
-                )
+        let requester = StubElicitationRequester(result: confirmedResult)
+        await assertSendError(.missingInput) {
+            _ = try await self.sendTool(sender: sender, chatRepository: self.matchedDirectRepository())(
+                ["recipients": .string("recipients@example.invalid")],
+                context: ToolCallContext(elicitation: requester)
             )
         }
-        let missingSubmissionCount = await missingSender.submissionCount
-        XCTAssertEqual(missingSubmissionCount, 0)
+        XCTAssertEqual(requester.requestCount, 0)
+        let submissionCount = await sender.chatSubmissionCount
+        XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testMalformedAndEmptyBodyNeverDispatch() async {
+        let malformedSender = RecordingMessagesSender()
+        let malformedRequester = StubElicitationRequester(result: confirmedResult)
+        await assertSendError(.inputMalformed) {
+            _ = try await self.sendTool(sender: malformedSender)(
+                [
+                    "recipients": .string("recipients@example.invalid"),
+                    "body": .int(1),
+                ],
+                context: ToolCallContext(elicitation: malformedRequester)
+            )
+        }
+        XCTAssertEqual(malformedRequester.requestCount, 0)
+        let malformedSubmissionCount = await malformedSender.submissionCount
+        XCTAssertEqual(malformedSubmissionCount, 0)
 
         let emptySender = RecordingMessagesSender()
         let requester = StubElicitationRequester(result: confirmedResult)
         await assertSendError(.emptyBody) {
             _ = try await self.sendTool(sender: emptySender)(
-                ["recipient": .string("recipient@example.invalid"), "body": .string("")],
+                ["recipients": .string("recipients@example.invalid"), "body": .string("")],
                 context: ToolCallContext(elicitation: requester)
             )
         }
@@ -542,7 +541,7 @@ final class MessageSendTests: XCTestCase {
                     chatRepository: self.matchedDirectRepository()
                 )(
                     [
-                        "recipient": .string("recipient@example.invalid"),
+                        "recipients": .string("recipient@example.invalid"),
                         "body": .string("test-body"),
                     ],
                     context: ToolCallContext(
@@ -562,7 +561,7 @@ final class MessageSendTests: XCTestCase {
         do {
             _ = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
                 [
-                    "recipient": .string("recipient@example.invalid"),
+                    "recipients": .string("recipient@example.invalid"),
                     "body": .string("test-body"),
                 ],
                 context: ToolCallContext(elicitation: requester)
@@ -584,7 +583,7 @@ final class MessageSendTests: XCTestCase {
 
         _ = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
             [
-                "recipient": .string("recipient@example.invalid"),
+                "recipients": .string("recipient@example.invalid"),
                 "body": .string("test-body"),
             ],
             context: ToolCallContext(elicitation: requester)
@@ -594,30 +593,6 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(requester.requestCount, 1)
         let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 1)
-    }
-
-    func testMissingInputElicitationIsNeverTreatedAsFinalConfirmation() async {
-        // A client that supplies the body but cannot show a form must dispatch zero: the
-        // input round trip is not authorization.
-        let sender = RecordingMessagesSender()
-        let requester = StubElicitationRequester(
-            results: [.init(action: .accept, content: ["body": .string("test-body")])]
-        )
-
-        await assertSendError(.inputMalformed) {
-            _ = try await self.sendTool(
-                sender: sender,
-                chatRepository: self.matchedDirectRepository()
-            )(
-                ["recipient": .string("recipient@example.invalid")],
-                context: ToolCallContext(elicitation: requester)
-            )
-        }
-
-        // Two requests: one for the missing body, one for the separate final confirmation.
-        XCTAssertEqual(requester.requestCount, 2)
-        let submissionCount = await sender.chatSubmissionCount
-        XCTAssertEqual(submissionCount, 0)
     }
 
     func testNoProductionCodePathCanBypassSendConfirmation() throws {
@@ -672,7 +647,7 @@ final class MessageSendTests: XCTestCase {
                 chatRepository: self.matchedDirectRepository()
             )(
                 [
-                    "recipient": .string("recipient@example.invalid"),
+                    "recipients": .string("recipient@example.invalid"),
                     "body": .string("test-body"),
                 ],
                 context: ToolCallContext(
@@ -691,7 +666,7 @@ final class MessageSendTests: XCTestCase {
         let task = Task {
             try await tool(
                 [
-                    "recipient": .string("recipient@example.invalid"),
+                    "recipients": .string("recipient@example.invalid"),
                     "body": .string("test-body"),
                 ],
                 context: ToolCallContext(elicitation: SlowElicitationRequester())
@@ -746,7 +721,7 @@ final class MessageSendTests: XCTestCase {
         await assertSendError(.invalidDestination) {
             _ = try await self.sendTool(sender: sender, chatRepository: repository)(
                 [
-                    "recipient": .string("recipient@example.invalid"),
+                    "recipients": .string("recipient@example.invalid"),
                     "chat_id": .string("imcp-chat-v1_synthetic"),
                     "body": .string("test-body"),
                 ],
@@ -990,12 +965,7 @@ final class MessageSendTests: XCTestCase {
         }
         let combinations: [[String: Value]] = [
             [
-                "recipient": .string("one@example.invalid"),
-                "recipients": .array([.string("one@example.invalid"), .string("two@example.invalid")]),
-                "body": .string("test-body"),
-            ],
-            [
-                "recipient": .string("one@example.invalid"),
+                "recipients": .string("one@example.invalid"),
                 "chat_id": .string("imcp-chat-v1_synthetic"),
                 "body": .string("test-body"),
             ],
@@ -1013,19 +983,19 @@ final class MessageSendTests: XCTestCase {
                 )
             }
         }
-        for recipients in [
-            ["one@example.invalid"],
-            ["ONE@example.invalid", "one@example.invalid"],
-        ] {
-            await assertSendError(.insufficientGroupParticipants) {
-                _ = try await self.sendTool(sender: sender)(
-                    [
-                        "recipients": .array(recipients.map(Value.string)),
-                        "body": .string("test-body"),
-                    ],
-                    context: ToolCallContext(elicitation: requester)
-                )
-            }
+        // Two or more raw entries that normalize-collide into fewer than two
+        // distinct handles fail closed rather than silently degenerating into a
+        // direct send.
+        await assertSendError(.insufficientGroupParticipants) {
+            _ = try await self.sendTool(sender: sender)(
+                [
+                    "recipients": .array([
+                        .string("ONE@example.invalid"), .string("one@example.invalid"),
+                    ]),
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
         }
         await assertSendError(.invalidRecipient) {
             _ = try await self.sendTool(sender: sender)(
@@ -1036,6 +1006,84 @@ final class MessageSendTests: XCTestCase {
                 context: ToolCallContext(elicitation: requester)
             )
         }
+        await assertSendError(.emptyRecipients) {
+            _ = try await self.sendTool(sender: sender)(
+                [
+                    "recipients": .array([]),
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        await assertSendError(.invalidRecipient) {
+            _ = try await self.sendTool(sender: sender)(
+                [
+                    "recipients": .array([.string("one@example.invalid"), .int(2)]),
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        await assertSendError(.invalidRecipient) {
+            _ = try await self.sendTool(sender: sender)(
+                [
+                    "recipients": .string("not-a-handle"),
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        let submissionCount = await sender.chatSubmissionCount
+        XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testScalarAndOneItemArrayRecipientsProduceEquivalentDirectBehavior() async throws {
+        // A scalar handle and a one-item array must be indistinguishable: both are
+        // direct-recipient intent, both hit the same existing-chat match, and both
+        // dispatch exactly once to it.
+        for recipientsValue: Value in [
+            .string("one@example.invalid"),
+            .array([.string("one@example.invalid")]),
+        ] {
+            let sender = RecordingMessagesSender()
+            let requester = StubElicitationRequester(result: confirmedResult)
+            _ = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
+                ["recipients": recipientsValue, "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+            let submissionCount = await sender.chatSubmissionCount
+            XCTAssertEqual(submissionCount, 1, "\(recipientsValue) did not dispatch once")
+        }
+    }
+
+    func testOneItemArrayRecipientVerifiedNewStillComposes() async throws {
+        // A one-item array with no existing conversation must still route to
+        // human-controlled composition, exactly like the scalar form.
+        let sender = RecordingMessagesSender()
+        let composer = RecordingMessagesComposer()
+        let repository = RecordingSendChatRepository(results: [], matches: [.none])
+        let requester = StubElicitationRequester(result: confirmedResult)
+
+        let result = try await sendTool(
+            sender: sender,
+            composer: composer,
+            chatRepository: repository
+        )(
+            [
+                "recipients": .array([.string("brand-new@example.invalid")]),
+                "body": .string("exact-seed-body"),
+            ],
+            context: ToolCallContext(elicitation: requester)
+        )
+
+        let compositions = await composer.compositionCount
+        let seedRecipient = await composer.lastSeedRecipient
+        XCTAssertEqual(compositions, 1)
+        XCTAssertEqual(seedRecipient, "brand-new@example.invalid")
+        XCTAssertEqual(
+            result.objectValue?["status"]?.stringValue,
+            "user_completed_composition"
+        )
     }
 
     func testUniqueDirectMatchUsesExistingChatAndRevalidates() async throws {
@@ -1047,7 +1095,7 @@ final class MessageSendTests: XCTestCase {
         let repository = RecordingSendChatRepository(results: [], matches: [match, match])
         let requester = StubElicitationRequester(result: confirmedResult)
         _ = try await sendTool(sender: sender, chatRepository: repository)(
-            ["recipient": .string("RECIPIENT@example.invalid"), "body": .string("test-body")],
+            ["recipients": .string("RECIPIENT@example.invalid"), "body": .string("test-body")],
             context: ToolCallContext(elicitation: requester)
         )
         XCTAssertEqual(repository.matchCount, 2)
@@ -1077,7 +1125,7 @@ final class MessageSendTests: XCTestCase {
                     composer: composer,
                     chatRepository: repository
                 )(
-                    ["recipient": .string("one@example.invalid"), "body": .string("test-body")],
+                    ["recipients": .string("one@example.invalid"), "body": .string("test-body")],
                     context: ToolCallContext(
                         elicitation: StubElicitationRequester(result: self.confirmedResult)
                     )
@@ -1104,7 +1152,7 @@ final class MessageSendTests: XCTestCase {
                 composer: unavailableComposer,
                 chatRepository: self.matchedDirectRepository()
             )(
-                ["recipient": .string("recipient@example.invalid"), "body": .string("test-body")],
+                ["recipients": .string("recipient@example.invalid"), "body": .string("test-body")],
                 context: ToolCallContext(
                     elicitation: StubElicitationRequester(result: self.confirmedResult)
                 )
@@ -1125,7 +1173,7 @@ final class MessageSendTests: XCTestCase {
                 composer: staleComposer,
                 chatRepository: RecordingSendChatRepository(results: [], matches: [match, .none])
             )(
-                ["recipient": .string("recipient@example.invalid"), "body": .string("test-body")],
+                ["recipients": .string("recipient@example.invalid"), "body": .string("test-body")],
                 context: ToolCallContext(
                     elicitation: StubElicitationRequester(result: self.confirmedResult)
                 )
@@ -1224,7 +1272,7 @@ final class MessageSendTests: XCTestCase {
             composer: existingComposer,
             chatRepository: matchedDirectRepository()
         )(
-            ["recipient": .string("recipient@example.invalid"), "body": .string("test-body")],
+            ["recipients": .string("recipient@example.invalid"), "body": .string("test-body")],
             context: ToolCallContext(elicitation: existingRequester)
         )
         XCTAssertEqual(existingRequester.requestCount, 1)
@@ -1232,25 +1280,21 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(existingCompositions, 0)
         XCTAssertFalse(existingLog.events.contains("compose"))
 
-        // New recipient: exactly one composition, zero confirmations, and the
-        // missing-input round trip stays distinct from either authorization surface.
+        // New recipient: exactly one composition, zero confirmations, and zero
+        // elicitations — the body is supplied directly, never elicited.
         let newLog = SendEventLog()
         let newComposer = RecordingMessagesComposer(eventLog: newLog)
         let newSender = RecordingMessagesSender(eventLog: newLog)
-        let newRequester = StubElicitationRequester(
-            results: [.init(action: .accept, content: ["body": .string("test-body")])]
-        )
+        let newRequester = StubElicitationRequester(result: confirmedResult, eventLog: newLog)
         _ = try await sendTool(
             sender: newSender,
             composer: newComposer,
             chatRepository: RecordingSendChatRepository(results: [], matches: [.none])
         )(
-            ["recipient": .string("brand-new@example.invalid")],
+            ["recipients": .string("brand-new@example.invalid"), "body": .string("test-body")],
             context: ToolCallContext(elicitation: newRequester)
         )
-        // One elicitation only: the missing body. It gathered input, it did not
-        // authorize anything.
-        XCTAssertEqual(newRequester.requestCount, 1)
+        XCTAssertEqual(newRequester.requestCount, 0)
         let newCompositions = await newComposer.compositionCount
         XCTAssertEqual(newCompositions, 1)
         XCTAssertEqual(newLog.events, ["compose"])
@@ -1265,7 +1309,7 @@ final class MessageSendTests: XCTestCase {
 
         await assertSendError(.incompleteDirectMembership) {
             _ = try await self.sendTool(sender: sender, chatRepository: repository)(
-                ["recipient": .string("unknown@example.invalid"), "body": .string("test-body")],
+                ["recipients": .string("unknown@example.invalid"), "body": .string("test-body")],
                 context: ToolCallContext(elicitation: requester)
             )
         }
@@ -1307,7 +1351,7 @@ final class MessageSendTests: XCTestCase {
             await assertSendError(.staleMatchedConversation) {
                 _ = try await self.sendTool(sender: sender, chatRepository: repository)(
                     [
-                        "recipient": .string("recipient@example.invalid"),
+                        "recipients": .string("recipient@example.invalid"),
                         "body": .string("test-body"),
                     ],
                     context: ToolCallContext(
@@ -1911,7 +1955,7 @@ final class MessageSendTests: XCTestCase {
             chatRepository: repository,
             sendingMode: { .sendAutomatically }
         )(
-            ["recipient": .string("recipient@example.invalid"), "body": .string("test-body")],
+            ["recipients": .string("recipient@example.invalid"), "body": .string("test-body")],
             context: ToolCallContext(elicitation: requester)
         )
 
@@ -2105,7 +2149,7 @@ final class MessageSendTests: XCTestCase {
             sendingMode: { .sendAutomatically }
         )(
             [
-                "recipient": .string("brand-new@example.invalid"),
+                "recipients": .string("brand-new@example.invalid"),
                 "body": .string("exact-seed-body"),
             ],
             context: ToolCallContext(elicitation: requester)
@@ -2144,9 +2188,21 @@ final class MessageSendTests: XCTestCase {
         else {
             return XCTFail("expected an object schema")
         }
-        XCTAssertEqual(Set(properties.keys), ["recipient", "recipients", "chat_id", "body"])
+        XCTAssertEqual(Set(properties.keys), ["recipients", "chat_id", "body"])
         XCTAssertEqual(required, ["body"])
         XCTAssertEqual(additionalProperties, .boolean(false))
+
+        // No lingering path/file/mode/bypass-shaped input, and no singular
+        // `recipient` alias.
+        let schemaText = try XCTUnwrap(
+            String(data: try JSONEncoder().encode(tool.inputSchema), encoding: .utf8)
+        ).lowercased()
+        for forbidden in [
+            "\"recipient\"", "\"path\"", "\"file\"", "\"attachment\"", "\"url\"",
+            "\"mode\"", "\"sending_mode\"", "\"automatic\"", "\"bypass\"",
+        ] {
+            XCTAssertFalse(schemaText.contains(forbidden), "the schema exposes \(forbidden)")
+        }
     }
 
     func testAddressabilityIsIndependentOfChatServiceType() async throws {
@@ -2207,7 +2263,7 @@ final class MessageSendTests: XCTestCase {
             (
                 directChat,
                 [
-                    "recipient": Value.string("recipient@example.invalid"),
+                    "recipients": Value.string("recipient@example.invalid"),
                     "body": .string("test-body"),
                 ]
             ),

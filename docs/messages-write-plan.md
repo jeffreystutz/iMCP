@@ -15,7 +15,15 @@ same complete bounded-page scan.
 
 Attachment submission to an existing conversation is implemented as its own
 public tool, `message_send_attachment` (ADR 0009, carried forward by ADR
-0012), with a native file picker instead of any path-bearing argument.
+0012 and ADR 0013), with a native file picker instead of any path-bearing
+argument. That picker remains a deliberately temporary ordinary-attachment
+ingress mechanism: the user has already decided that ordinary attachment
+submission should eventually be programmatic (a persistent user-approved
+filesystem root with staging, plus bounded serialized content), with the
+picker retained only for Settings/onboarding grants. That redesign is future
+work with its own UX/security/entitlement acceptance boundary; see Hexa
+project knowledge `imessage-mcp/attachment-sending-design` for the settled
+direction.
 
 Contact search and conversation search now sit behind reusable domain operations
 with thin MCP adapters, and `messages_find_conversations` returns per-handle
@@ -36,10 +44,15 @@ The public Messages send surface briefly became one unified `messages_send`
 tool (ADR 0011), implemented and code-reviewed but never manually accepted;
 the user reversed that design before the runtime checkpoint. The public send
 surface is now, and is intended to remain, exactly two tools:
-`message_send_text` and `message_send_attachment` (ADR 0012). The deferred
+`message_send_text` and `message_send_attachment` (ADR 0012). ADR 0012's own
+shipped-but-not-fully-accepted destination-field shape (separate `recipient`/
+`recipients` properties) and its restored missing-body elicitation were in
+turn rejected at the 2026-08-17 manual checkpoint and corrected by ADR 0013:
+both tools now accept one `recipients` property (scalar or array), and
+`message_send_text.body` is required with no elicitation. The deferred
 picker-attachment manual checkpoint carries forward against
-`message_send_attachment`. See "Automatic-send authorization policy" and
-"Attachment submission" below.
+`message_send_attachment` in its current schema shape. See "Automatic-send
+authorization policy" and "Attachment submission" below.
 
 ## Verified baseline
 
@@ -176,9 +189,9 @@ programmatic path is authorized by an iMCP confirmation of values that cannot
 then change. The composition path is authorized by the human's own action in the
 system panel, so iMCP presents no confirmation in front of it: an earlier
 immutable confirmation could not truthfully authorize values that remain
-editable. Missing-input elicitation may still precede routing, because gathering
-an input is not authorizing a send. The confirmation-mode setting therefore
-governs the programmatic path only.
+editable. The confirmation-mode setting therefore governs the programmatic
+path only. `body` is required input on every call, supplied by the caller
+directly; iMCP does not elicit a missing body for either route (ADR 0013).
 
 Route selection for a new recipient is delegated to Messages. There is no
 caller-facing service selector, and an authorized experiment confirmed Messages
@@ -204,13 +217,14 @@ E.164-style phone handle or syntactically valid email handle.
 
 The tool:
 
-- may elicit missing input, then validates the effective values;
+- requires a non-empty `body` supplied directly by the caller; a missing,
+  non-string, or empty `body` fails immediately, before any destination
+  lookup, confirmation request, composition, or dispatch, and is never
+  elicited (ADR 0013);
 - always performs a separate final confirmation, for every destination form,
   with no opt-out of any kind;
 - shows the exact destination and exact body in that confirmation, because it is
   the surface on which the user authorizes an externally visible side effect;
-- treats missing-input elicitation as input gathering only, never as
-  authorization;
 - fails closed for unsupported, declined, cancelled, dismissed, malformed,
   timed-out, errored, or task-cancelled confirmation;
 - requests TCC only after a successful confirmation;
@@ -240,26 +254,36 @@ There is no contact lookup, attachment support, transport selection, fallback,
 or delivery tracking. Existing `messages_fetch` behavior is preserved.
 
 The existing-conversation resolver accepts exactly one effective destination:
-`recipient`, `recipients`, or `chat_id`. A chat ID must be the opaque value returned by
-`messages_list_chats`; raw GUIDs, group IDs, chat identifiers, service names,
-and scripting expressions are not accepted from callers.
+`recipients` or `chat_id` (ADR 0013; the resolver previously also accepted a
+separate singular `recipient` property, removed with no alias). A chat ID
+must be the opaque value returned by `messages_list_chats`; raw GUIDs, group
+IDs, chat identifiers, service names, and scripting expressions are not
+accepted from callers.
 
-An exact `recipient` is normalized only for matching: verified E.164 numbers
-remain byte-for-byte unchanged, and syntactically valid email addresses are
-trimmed and lowercased. No country code is inferred, and phone and email
-identities are never merged. One unique direct membership match uses the
-existing-chat path. A verified no-match uses system-owned composition; multiple
-direct matches fail and require `chat_id`. Group chats are never considered for
-this single-recipient lookup.
+`recipients` accepts either a scalar exact handle (string) or a non-empty
+array of exact handles, expressed in the schema as a `oneOf` union — the same
+scalar-or-array idiom already used by `showPointsOfInterest` in
+`App/Services/Maps.swift`. A scalar handle and a one-item array are
+identical direct-recipient intent; both are normalized only for matching:
+verified E.164 numbers remain byte-for-byte unchanged, and syntactically
+valid email addresses are trimmed and lowercased. No country code is
+inferred, and phone and email identities are never merged. One unique direct
+membership match uses the existing-chat path. A verified no-match uses
+system-owned composition; multiple direct matches fail and require
+`chat_id`. Group chats are never considered for this single-recipient
+lookup.
 
-`recipients` is the complete set of remote participants in an existing group.
-Input order and exact duplicate membership rows do not matter, but there must
-be at least two distinct normalized handles. Only exact set equality matches:
-subsets and supersets never match. iMCP cannot create a new group. No match,
-unavailable membership, or incomplete membership fails without dispatch;
-multiple matching groups require `chat_id`, which is preferred whenever the
-caller already knows the intended group. Contacts and message-history senders
-are not consulted.
+An array of two or more elements is the complete set of remote participants
+in an existing group. Input order and exact duplicate membership rows do not
+matter, but there must be at least two distinct normalized handles after
+duplicates/normalization collisions are folded — an array that collapses to
+fewer than two distinct handles fails closed rather than silently becoming a
+direct send. Only exact set equality matches: subsets and supersets never
+match. iMCP cannot create a new group. No match, unavailable membership, or
+incomplete membership fails without dispatch; multiple matching groups
+require `chat_id`, which is preferred whenever the caller already knows the
+intended group. An empty array fails outright. Contacts and message-history
+senders are not consulted.
 
 Chat sends resolve the opaque ID to current display/room, direct/group,
 participant, service, and database GUID metadata before confirmation. Their
@@ -481,7 +505,7 @@ would break the one-dispatch invariant. A caption is therefore its own
 Scope of this slice:
 
 - exactly one attachment, no caption or body, no multiple files;
-- existing conversations only, addressed by `recipient`, `recipients`, or
+- existing conversations only, addressed by `recipients` (scalar or array) or
   `chat_id` — the same mutually exclusive selectors, resolution, ambiguity,
   staleness, and addressability semantics as `message_send_text`, sharing the
   same code rather than a parallel implementation;
@@ -608,13 +632,15 @@ result — unconditionally, for both modes. There is no second dispatch path.
 Verified-new-recipient composition returns before the mode is ever consulted,
 so it is unaffected.
 
-The text tool's public description and its `recipient` parameter description
+The text tool's public description and its destination parameter description
 were updated to stop promising confirmation for every existing-chat send; they
 now explain that whether confirmation happens follows the user's Sending mode
 setting, which no caller can choose or override. The tool's input schema is
 unchanged — no mode/automatic/confirmation-bypass argument was added. (This
-tool was named `messages_send` at the time of this wiring slice; ADR 0012
-later renamed it `message_send_text` without changing this behavior.)
+tool was named `messages_send` and exposed a separate singular `recipient`
+property at the time of this wiring slice; ADR 0012 later renamed it
+`message_send_text`, and ADR 0013 later still folded `recipient` into
+`recipients`, neither changing this behavior.)
 
 ADR 0002's "confirmation for every submission, no opt-out" language is
 reconciled in place (not superseded wholesale) to describe this accepted
@@ -658,6 +684,17 @@ this Sending-mode wiring. The picker-attachment manual acceptance checkpoint
 deferred at the end of this wiring slice remains outstanding and now applies
 to `message_send_attachment`. See ADR 0012 and "Attachment submission" above
 for the current tool's full schema and behavior.
+
+The next day, ADR 0013 corrected two pieces of ADR 0012's shipped-but-not-
+fully-accepted public input: it folded the separate `recipient`/`recipients`
+destination properties into one scalar-or-array `recipients` property on
+both tools, and removed `message_send_text`'s missing-body elicitation in
+favor of a hard non-empty-`body` requirement. Neither change touched this
+Sending-mode wiring, the picker, or any downstream revalidation/Automation/
+dispatch invariant for either tool — both corrections are strictly upstream,
+in the destination/body parsing that feeds `sendText`/`sendAttachment`. The
+deferred picker-attachment manual acceptance checkpoint remains outstanding
+and applies to `message_send_attachment` in its current schema shape.
 
 ## Reference implementation
 

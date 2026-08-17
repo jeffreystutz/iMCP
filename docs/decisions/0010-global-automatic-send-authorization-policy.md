@@ -304,13 +304,23 @@ the authorization branch remains in the same place in each pipeline, and
 both tools remain gated by the same app-owned setting, now reached through
 two tool names instead of one shared payload selection.
 
-`message_send_text`'s public description and its `recipient` parameter
+`message_send_text`'s public description and its destination parameter
 description state that whether confirmation happens follows the user's
 Sending mode setting, which no caller can choose or override, and that the
 new-recipient compose route is unaffected by that setting.
 `message_send_attachment`'s public description states the same for the
 attachment path, and additionally that the native picker always runs
 regardless of mode.
+
+A fifth, later slice (ADR 0013) unified the singular `recipient` and plural
+`recipients` destination properties into one scalar-or-array `recipients`
+property on both tools, and removed `message_send_text`'s missing-body
+elicitation in favor of a hard non-empty-`body` requirement. Neither change
+touched this Sending-mode wiring: `sendingMode` remains read live per call,
+the authorization branch remains in the same place in each pipeline, and the
+removed elicitation was strictly upstream of it — a missing body now fails
+before destination resolution is ever reached, exactly as an invalid
+destination already did.
 
 ## References
 

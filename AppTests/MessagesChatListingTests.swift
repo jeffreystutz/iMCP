@@ -1175,7 +1175,7 @@ final class MessagesChatListingTests: XCTestCase {
         )
         XCTAssertEqual(
             Set((sendSchema["properties"] as? [String: Any] ?? [:]).keys),
-            Set(["recipient", "recipients", "chat_id", "body"])
+            Set(["recipients", "chat_id", "body"])
         )
         XCTAssertEqual(sendSchema["required"] as? [String], ["body"])
     }
