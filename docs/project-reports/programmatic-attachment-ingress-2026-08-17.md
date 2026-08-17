@@ -64,6 +64,74 @@ no picker language remaining. `MessagesAttachmentSelecting` and
 validator, its facts type, its categorical error type, and the
 security-scope RAII wrapper are unchanged and reused by both new sources.
 
+## Correction (2026-08-17, review iteration)
+
+Supervising review of head `a16be7721bf1287f1f933adc74157afa895f448c` found
+three issues, published as `docs/project-prompts/current-task.md` at
+prompt-only commit `5e2f4c07e1492ba8ca4a1764891c38a168fa39e8`
+("docs: publish attachment ingress review correction"). All three are
+corrected additively on top of that head, without rewriting any reviewed
+commit.
+
+1. **Initial-validation resource leak.** `resolveAttachmentSourceHandle`
+   acquired a filesystem grant's security scope, or staged a serialized
+   temp file, before the very first validator call — but the cleanup
+   closure only existed on the `ResolvedAttachmentSourceHandle` returned
+   *after* that validation succeeded. If initial validation threw, the
+   just-acquired security scope was never released, and the just-staged
+   temp directory was never removed. Fixed with a `do`/`catch` around each
+   branch's initial `validator.validate(...)` call that releases the
+   access, or removes the temp directory, before rethrowing — the existing
+   outer `defer { sourceHandle.release() }` behavior for every exit after
+   a successful handle is returned is unchanged, so there is no
+   double-release/double-delete on the success path.
+2. **Test asserted the wrong failure for the wrong reason.**
+   `testSerializedTempCleanupOccursOnValidationFailure` (and, found during
+   the fix, the same flaw in `testEmptyDecodedSerializedFileFails`) supplied
+   meaningful `filename` with **blank** `content_base64` and expected
+   `.emptyFile`. Under the settled blank-scalar-omission rule, blank
+   `content_base64` is omission-equivalent, so that input is an
+   **incomplete serialized source** and fails with
+   `.incompleteSerializedSource` before decoding or staging — it can never
+   reach `.emptyFile`, and could never have exercised validation-failure
+   cleanup. The parser semantics were not changed. Both tests were
+   corrected: the blank-content case is now its own explicit
+   parser-and-pipeline test proving `.incompleteSerializedSource` with zero
+   downstream side effect
+   (`testMeaningfulFilenameWithBlankContentBase64FailsAsIncompleteSourceWithZeroSideEffects`,
+   plus a parser-level case added to `testPartialSerializedSourceFails`),
+   and the cleanup test now supplies complete, nonempty, synthetic
+   base64 content with an unsupported-type filename, actually reaches
+   staging and the normal validator, and asserts the staged temp directory
+   count returns to its pre-call value.
+3. **Unsynchronized compound persistence across store instances.**
+   Production constructs a separate `UserDefaultsAllowedFolderGrantStore`
+   instance for Settings and for the send-side resolver, both over the same
+   `UserDefaults` storage. `UserDefaults` itself being thread-safe does not
+   make a load-modify-save sequence atomic, so a send-side stale-bookmark
+   refresh could race a Settings-side remove and resurrect a just-removed
+   grant, or otherwise lose an update. Fixed with one `static` `NSLock`
+   shared by every instance of the class, with every public operation
+   (`listGrants`, `addGrant`, `removeGrant`, `replaceGrant`,
+   `refreshBookmark`) now a single transaction under that lock; unlocked
+   private `unlockedLoadStored`/`unlockedSave` helpers exist only to be
+   called from inside an already-held lock, so no path locks recursively.
+   The storage key, serialized format, dedup semantics, and the Messages
+   database bookmark's separate state are all unchanged.
+
+Focused regression coverage added: `testFilesystemInitialValidationFailureReleasesTheAcquiredAccess`
+and `testFilesystemSuccessfulHandleReleasesEachResolvedAccessExactlyOnce`
+prove the filesystem-branch fix via a new `onRelease` test seam on
+`AllowedFolderFileAccess` (production-optional, defaulted to `nil`, wired
+only by the test double) — necessary because `MessagesAttachmentAccess.release()`
+is a silent no-op for the unbookmarked URLs tests use, which made "was
+`release()` actually called" otherwise unobservable. The corrected
+`testSerializedTempCleanupOccursOnValidationFailure` proves the serialized-
+branch fix directly. `testStaleRefreshFromOneInstanceCannotResurrectAGrantRemovedByAnother`
+and `testConcurrentAddsAcrossTwoInstancesLoseNoGrants` (real concurrent
+`DispatchQueue` access across two store instances sharing one
+`UserDefaults` domain) cover the persistence-synchronization fix.
+
 ## Files and symbols changed
 
 - `App/Services/MessagesAttachmentSource.swift` (new): `AttachmentSourceInput`,
@@ -197,39 +265,47 @@ approval, `clientInfo.name` handling) — none of it was touched.
   entitlement set is unchanged from every earlier signed build in this
   project's Messages-write history — this milestone added no entitlement.
 
-### Unresolved verification gap: automated XCTest execution did not run
+### Unresolved verification gap: automated XCTest execution still did not run
 
-**`xcodebuild ... test` could not be executed in this session.** Every
-attempt — with and without `-only-testing`, with the default and the
-CI-style explicit `-derivedDataPath`, with the sandbox tool's
-`dangerouslyDisableSandbox` — failed identically with `IDELaunchErrorDomain`
-code 20, "Could not launch imcp-serverTests... The LaunchServices launcher
-has returned an error." This was confirmed **environment-wide, not caused
-by this change**: an unmodified, pre-existing test file
-(`MessagesSendingModeTests`) fails to launch with the exact same error. The
-test *target* builds successfully (`build-for-testing` succeeds cleanly),
-so this is a launch-time infrastructure limitation of this session, not a
-compile or logic defect. Per `engineering/review-and-validation`'s guidance
-against repeatedly troubleshooting runner/launch infrastructure, this was
-not pursued further beyond confirming it is environment-wide.
+**`xcodebuild ... test` was retried in this correction session and still
+could not launch.** Two consecutive attempts against the focused test
+classes (`MessageAttachmentSendTests`, `AllowedFolderGrantStoreTests`)
+failed identically with `IDELaunchErrorDomain` code 20, "Could not launch
+imcp-serverTests... The LaunchServices launcher has returned an error" —
+the same failure mode reported for the original implementation session,
+now re-confirmed once as the correction task instructed rather than
+investigated further. The test *target* builds successfully
+(`build-for-testing` succeeds cleanly against the corrected code and every
+new/changed test), so this remains a launch-time infrastructure limitation
+of this session, not a compile or logic defect introduced by this
+correction. Per this correction task's explicit instruction ("If the exact
+same environment-wide LaunchServices test-launch failure persists after
+one normal retry, do not spend the session trying to redesign tests or
+repair unrelated runner infrastructure"), this was not pursued further.
 
 **Consequently: no automated test *execution* count (e.g. "N/N passed") is
-claimed anywhere in this report.** The prior milestone's 282/282 figure is
-the last actual execution result and predates this change entirely. Running
-the full `imcp-serverTests` suite — ideally in the interactive session
-where the prior milestone's 282/282 was obtained — is a **prerequisite**
-for supervising acceptance of this slice, not merely the deferred manual
-UI checkpoint below. Every test file this report describes was written to
-compile and was reasoned through manually against the production code it
-exercises, but that is not a substitute for actually running it.
+claimed anywhere in this report, for either the original implementation or
+this correction.** The prior milestone's 282/282 figure remains the last
+actual execution result and predates both this milestone and this
+correction entirely. Running the full `imcp-serverTests` suite — ideally in
+the interactive session where that 282/282 result was obtained — remains a
+**prerequisite** for supervising acceptance, not merely the deferred manual
+UI checkpoint below. Every test file this report describes, including the
+corrected and newly added tests, was written to compile and was reasoned
+through manually against the production code it exercises, but that is not
+a substitute for actually running it.
 
 - Adversarial self-review performed against: filesystem path escaping a
   grant via prefix tricks, `..`, or symlinks (dedicated resolver tests for
-  each); a security scope started but not stopped (the original `access`
-  object's scope is held via `defer` for the whole `sendAttachment` call
-  and released exactly once; the revalidation closure opens and releases
-  its own short-lived second scope only to re-check current authority);
-  grant state colliding with the Messages database bookmark (distinct
+  each); a security scope started but not stopped, on both the success
+  path (the original `access` object's scope is held via `defer` for the
+  whole `sendAttachment` call and released exactly once; the revalidation
+  closure opens and releases its own short-lived second scope only to
+  re-check current authority) and the initial-validation-failure path
+  found by review and fixed in the correction above (a dedicated test now
+  asserts the acquired access is released exactly once even when the very
+  first validation call throws); grant state colliding with the Messages
+  database bookmark (distinct
   `UserDefaults` key, distinct store type, no shared code path); a
   serialized temp file surviving failure/cancellation/success (unconditional
   `defer` installed immediately after staging, with dedicated tests for
@@ -295,7 +371,7 @@ Run the full `imcp-serverTests` suite in an interactive session (the
 launch-infrastructure limitation above did not exist for the prior
 milestone's 282/282 result, so this is expected to be a session-specific
 gap, not a defect to fix in code). Then supervising review of the exact
-pushed head on `feat/messages-write-foundation`, then the manual checkpoint
-above under the user's own explicit, separate authorization for any real
-send. No further implementation is expected until the test suite has
-actually been executed and that review/checkpoint complete.
+pushed correction head on `feat/messages-write-foundation`, then the manual
+checkpoint above under the user's own explicit, separate authorization for
+any real send. No further implementation is expected until the test suite
+has actually been executed and that review/checkpoint complete.
