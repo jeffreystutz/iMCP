@@ -41,9 +41,12 @@ final class MessageAttachmentSendTests: XCTestCase {
         let description = tool.description.lowercased()
         XCTAssertTrue(description.contains("exactly one file"))
         XCTAssertTrue(description.contains("existing messages conversation"))
-        XCTAssertTrue(description.contains("no file path"))
-        XCTAssertTrue(description.contains("native file picker"))
+        XCTAssertTrue(description.contains("file_path"))
+        XCTAssertTrue(description.contains("content_base64"))
+        XCTAssertTrue(description.contains("no file picker"))
+        XCTAssertTrue(description.contains("allowed folder"))
         XCTAssertTrue(description.contains("25 mib"))
+        XCTAssertTrue(description.contains("5 mib"))
         XCTAssertTrue(description.contains("caption"))
         XCTAssertTrue(description.contains("sends no message text"))
         // Submission is never described as delivery.
@@ -51,7 +54,7 @@ final class MessageAttachmentSendTests: XCTestCase {
         XCTAssertFalse(description.contains("delivers"))
     }
 
-    func testSchemaAcceptsOnlyDestinationSelectorsAndNoFileOrBodyParameter() throws {
+    func testSchemaAcceptsOnlyDestinationAndSourceSelectors() throws {
         let tool = try attachmentTool()
         let encoded = try JSONEncoder().encode(tool.inputSchema)
         let schema = try XCTUnwrap(
@@ -59,23 +62,26 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
 
-        XCTAssertEqual(Set(properties.keys), ["recipients", "chat_id"])
+        XCTAssertEqual(
+            Set(properties.keys),
+            ["recipients", "chat_id", "file_path", "filename", "content_base64"]
+        )
         XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
-        // Nothing is required at the schema level: exactly-one-of is enforced in code.
+        // Nothing is required at the schema level: exactly-one-of is enforced in code,
+        // both for the destination and for the source.
         XCTAssertNil(schema["required"])
 
-        // No file or message input may exist on this tool in any spelling, no singular
-        // `recipient` alias, and no caller-facing sending-mode/confirmation-bypass
-        // argument either: the global Sending mode is app-owned and unreachable from any
+        // No singular `recipient` alias, no path/URL under another spelling, no staging
+        // identifier, no delete flag, and no caller-facing sending-mode/confirmation-
+        // bypass argument: the global Sending mode is app-owned and unreachable from any
         // MCP argument.
         let schemaText = try XCTUnwrap(String(data: encoded, encoding: .utf8)).lowercased()
         for forbidden in [
-            "\"recipient\"", "\"path\"", "\"file\"", "\"file_path\"", "\"filepath\"", "\"url\"",
-            "\"body\"",
-            "\"text\"", "\"caption\"", "\"filename\"", "\"file_name\"", "\"bytes\"", "\"data\"",
+            "\"recipient\"", "\"path\"", "\"file\"", "\"filepath\"", "\"url\"", "\"body\"",
+            "\"text\"", "\"caption\"", "\"file_name\"", "\"bytes\"", "\"data\"",
             "\"attachment\"", "\"attachment_id\"", "\"content\"", "\"mime_type\"", "\"uti\"",
             "\"mode\"", "\"sending_mode\"", "\"automatic\"", "\"bypass\"", "\"confirm\"",
-            "\"confirmation\"",
+            "\"confirmation\"", "\"root\"", "\"grant\"", "\"staging\"", "\"delete\"",
         ] {
             XCTAssertFalse(
                 schemaText.contains(forbidden),
@@ -97,10 +103,163 @@ final class MessageAttachmentSendTests: XCTestCase {
         let sendSchema = try XCTUnwrap(
             String(data: try JSONEncoder().encode(sendTool.inputSchema), encoding: .utf8)
         ).lowercased()
-        for forbidden in ["\"path\"", "\"file\"", "\"attachment\"", "\"url\""] {
+        for forbidden in [
+            "\"path\"", "\"file\"", "\"attachment\"", "\"url\"", "\"file_path\"", "\"filename\"",
+            "\"content_base64\"",
+        ] {
             XCTAssertFalse(sendSchema.contains(forbidden), "message_send_text exposes \(forbidden)")
         }
         XCTAssertTrue(sendSchema.contains("\"body\""))
+    }
+
+    // MARK: - Source parsing
+
+    func testFilesystemSourceAcceptedWithOnlyMeaningfulFilePath() throws {
+        let source = try resolveAttachmentSource(["file_path": .string("/tmp/allowed/note.txt")])
+        XCTAssertEqual(source, .filesystem(path: "/tmp/allowed/note.txt"))
+    }
+
+    func testSerializedSourceAcceptedWithMeaningfulFilenameAndContent() throws {
+        let source = try resolveAttachmentSource([
+            "filename": .string("note.txt"), "content_base64": .string("aGVsbG8="),
+        ])
+        XCTAssertEqual(source, .serialized(filename: "note.txt", contentBase64: "aGVsbG8="))
+    }
+
+    func testNoSourceFails() {
+        XCTAssertThrowsError(try resolveAttachmentSource([:])) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .missingSource)
+        }
+        XCTAssertThrowsError(
+            try resolveAttachmentSource(["file_path": .string(""), "filename": .string("   ")])
+        ) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .missingSource)
+        }
+    }
+
+    func testBothSourceFormsMeaningfullySuppliedFails() {
+        let combinations: [[String: Value]] = [
+            [
+                "file_path": .string("/tmp/allowed/note.txt"), "filename": .string("note.txt"),
+            ],
+            [
+                "file_path": .string("/tmp/allowed/note.txt"),
+                "content_base64": .string("aGVsbG8="),
+            ],
+            [
+                "file_path": .string("/tmp/allowed/note.txt"), "filename": .string("note.txt"),
+                "content_base64": .string("aGVsbG8="),
+            ],
+        ]
+        for arguments in combinations {
+            XCTAssertThrowsError(try resolveAttachmentSource(arguments)) { error in
+                XCTAssertEqual(error as? MessagesAttachmentSourceError, .conflictingSource)
+            }
+        }
+    }
+
+    func testPartialSerializedSourceFails() {
+        XCTAssertThrowsError(try resolveAttachmentSource(["filename": .string("note.txt")])) {
+            error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .incompleteSerializedSource)
+        }
+        XCTAssertThrowsError(
+            try resolveAttachmentSource(["content_base64": .string("aGVsbG8=")])
+        ) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .incompleteSerializedSource)
+        }
+    }
+
+    func testBlankOptionalSourceControlsAreOmissionEquivalentOnlyForFormSelection() throws {
+        // A blank file_path does not conflict with a valid serialized source.
+        let serialized = try resolveAttachmentSource([
+            "file_path": .string("   "), "filename": .string("note.txt"),
+            "content_base64": .string("aGVsbG8="),
+        ])
+        XCTAssertEqual(serialized, .serialized(filename: "note.txt", contentBase64: "aGVsbG8="))
+
+        // Blank filename/content_base64 do not conflict with a valid filesystem source.
+        let filesystem = try resolveAttachmentSource([
+            "file_path": .string("/tmp/allowed/note.txt"), "filename": .string(""),
+            "content_base64": .string("   "),
+        ])
+        XCTAssertEqual(filesystem, .filesystem(path: "/tmp/allowed/note.txt"))
+
+        // A meaningful file_path plus one meaningful serialized field, the other blank,
+        // is still a conflict.
+        XCTAssertThrowsError(
+            try resolveAttachmentSource([
+                "file_path": .string("/tmp/allowed/note.txt"), "filename": .string("note.txt"),
+                "content_base64": .string(""),
+            ])
+        ) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .conflictingSource)
+        }
+    }
+
+    func testMalformedNonStringSourceFieldsRemainSuppliedAndFailClosed() {
+        XCTAssertThrowsError(try resolveAttachmentSource(["file_path": .int(1)])) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .invalidFilePath)
+        }
+        XCTAssertThrowsError(
+            try resolveAttachmentSource(["filename": .int(1), "content_base64": .string("aGk=")])
+        ) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .incompleteSerializedSource)
+        }
+        // A non-string file_path alongside a meaningful serialized field must still be
+        // treated as a supplied (conflicting) filesystem selector, not silently ignored.
+        XCTAssertThrowsError(
+            try resolveAttachmentSource([
+                "file_path": .int(1), "filename": .string("note.txt"),
+                "content_base64": .string("aGk="),
+            ])
+        ) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .conflictingSource)
+        }
+    }
+
+    func testFilePathMustBeAbsolute() {
+        XCTAssertThrowsError(try resolveAttachmentSource(["file_path": .string("relative.txt")])) {
+            error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .invalidFilePath)
+        }
+    }
+
+    func testSerializedFilenameRejectsPathsAndTraversal() {
+        for unsafe in ["../escape.txt", "a/b.txt", "a:b.txt", "", "   ", ".", ".."] {
+            XCTAssertThrowsError(try validateSerializedAttachmentFilename(unsafe)) { error in
+                XCTAssertEqual(error as? MessagesAttachmentSourceError, .invalidFilename)
+            }
+        }
+        XCTAssertEqual(try validateSerializedAttachmentFilename("  note.txt  "), "note.txt")
+    }
+
+    func testSerializedContentDecodesValidBase64() throws {
+        let data = try decodeSerializedAttachmentContent("aGVsbG8=")
+        XCTAssertEqual(data, Data("hello".utf8))
+    }
+
+    func testSerializedContentRejectsMalformedBase64() {
+        XCTAssertThrowsError(try decodeSerializedAttachmentContent("not base64!!!")) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .invalidContentBase64)
+        }
+    }
+
+    func testSerializedContentRejectsOversizeInputBeforeAndAfterDecoding() {
+        // Encoded length alone implies a decoded size over the cap: rejected without
+        // decoding.
+        let hugeEncodedLength = Data(repeating: 0x41, count: (maximumSerializedAttachmentByteSize + 1) * 2)
+        let hugeEncoded = String(data: hugeEncodedLength, encoding: .utf8)!
+        XCTAssertThrowsError(try decodeSerializedAttachmentContent(hugeEncoded)) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .serializedContentTooLarge)
+        }
+
+        // A validly-formed but too-large payload is still rejected after decoding.
+        let overSizedData = Data(repeating: 0x41, count: maximumSerializedAttachmentByteSize + 1)
+        let overSizedEncoded = overSizedData.base64EncodedString()
+        XCTAssertThrowsError(try decodeSerializedAttachmentContent(overSizedEncoded)) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .serializedContentTooLarge)
+        }
     }
 
     // MARK: - Destination resolution
@@ -134,7 +293,8 @@ final class MessageAttachmentSendTests: XCTestCase {
             ],
         ]
 
-        for arguments in combinations {
+        for var arguments in combinations {
+            arguments["file_path"] = .string("/tmp/allowed/note.txt")
             let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
             await harness.assertFailure(MessageSendError.invalidDestination, arguments: arguments)
             await harness.assertNothingHappened()
@@ -145,12 +305,12 @@ final class MessageAttachmentSendTests: XCTestCase {
         let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
         await harness.assertFailure(
             MessageSendError.invalidChatIdentifier,
-            arguments: ["chat_id": .int(1)]
+            arguments: ["chat_id": .int(1), "file_path": .string("/tmp/allowed/note.txt")]
         )
         await harness.assertNothingHappened()
     }
 
-    func testInvalidAndInexactDestinationsFailBeforeThePicker() async throws {
+    func testInvalidAndInexactDestinationsFailBeforeTheSourceResolves() async throws {
         let cases: [([String: Value], MessageSendError)] = [
             (["recipients": .string("not a handle")], .invalidRecipient),
             (["recipients": .string("5551234567")], .invalidRecipient),
@@ -168,6 +328,8 @@ final class MessageAttachmentSendTests: XCTestCase {
         ]
 
         for (arguments, expected) in cases {
+            var arguments = arguments
+            arguments["file_path"] = .string("/tmp/allowed/note.txt")
             let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
             await harness.assertFailure(expected, arguments: arguments)
             await harness.assertNothingHappened()
@@ -178,27 +340,24 @@ final class MessageAttachmentSendTests: XCTestCase {
         // A blank or whitespace-only scalar selector value — the kind a form
         // client may submit for an untouched optional field — must not count as
         // a supplied destination selector, and must not block the other one.
+        let file = try makeFile("note.txt", byteCount: 8)
         for chatID: Value in [.string(""), .string("   ")] {
-            let harness = Harness(
-                matches: [uniqueDirectMatch, uniqueDirectMatch],
-                selection: .success(try makeFile("note.txt", byteCount: 8))
-            )
+            let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
             _ = try await harness.call([
                 "recipients": .string("recipient@example.invalid"),
                 "chat_id": chatID,
+                "file_path": .string(file.path),
             ])
             let dispatches = await harness.sender.attachmentSubmissionCount
             XCTAssertEqual(dispatches, 1, "blank chat_id \(chatID) blocked the recipients path")
         }
 
         for recipientsValue: Value in [.string(""), .string("   ")] {
-            let harness = Harness(
-                results: [.success(directChat), .success(directChat)],
-                selection: .success(try makeFile("note.txt", byteCount: 8))
-            )
+            let harness = Harness(results: [.success(directChat), .success(directChat)])
             _ = try await harness.call([
                 "recipients": recipientsValue,
                 "chat_id": .string("imcp-chat-v1_synthetic"),
+                "file_path": .string(file.path),
             ])
             let dispatches = await harness.sender.attachmentSubmissionCount
             XCTAssertEqual(
@@ -209,11 +368,14 @@ final class MessageAttachmentSendTests: XCTestCase {
         }
 
         // Both blank: no meaningful selector remains, and this must fail before
-        // the picker, confirmation, Automation, or dispatch.
+        // source resolution, confirmation, Automation, or dispatch.
         let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
         await harness.assertFailure(
             MessageSendError.invalidDestination,
-            arguments: ["recipients": .string("   "), "chat_id": .string("")]
+            arguments: [
+                "recipients": .string("   "), "chat_id": .string(""),
+                "file_path": .string(file.path),
+            ]
         )
         await harness.assertNothingHappened()
     }
@@ -221,21 +383,21 @@ final class MessageAttachmentSendTests: XCTestCase {
     func testOneItemArrayRecipientsBehavesIdenticallyToScalar() async throws {
         // A one-item array and a scalar handle must be indistinguishable: both express
         // direct-recipient intent and dispatch identically.
+        let file = try makeFile("note.txt", byteCount: 8)
         for recipientsValue: Value in [
             .string("recipient@example.invalid"),
             .array([.string("recipient@example.invalid")]),
         ] {
-            let harness = Harness(
-                matches: [uniqueDirectMatch, uniqueDirectMatch],
-                selection: .success(try makeFile("note.txt", byteCount: 8))
-            )
-            _ = try await harness.call(["recipients": recipientsValue])
+            let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+            _ = try await harness.call([
+                "recipients": recipientsValue, "file_path": .string(file.path),
+            ])
             let dispatches = await harness.sender.attachmentSubmissionCount
             XCTAssertEqual(dispatches, 1, "\(recipientsValue) did not dispatch once")
         }
     }
 
-    func testUnresolvedDestinationsFailClosedWithoutPickerOrDispatch() async throws {
+    func testUnresolvedDestinationsFailClosedWithoutSourceResolutionOrDispatch() async throws {
         let cases: [(MessagesConversationMatch, [String: Value], MessageSendError)] = [
             (.ambiguous, ["recipients": .string("one@example.invalid")], .ambiguousDirectConversation),
             (.incomplete, ["recipients": .string("one@example.invalid")], .incompleteDirectMembership),
@@ -257,21 +419,25 @@ final class MessageAttachmentSendTests: XCTestCase {
         ]
 
         for (match, arguments, expected) in cases {
+            var arguments = arguments
+            arguments["file_path"] = .string("/tmp/allowed/note.txt")
             let harness = Harness(matches: [match])
             await harness.assertFailure(expected, arguments: arguments)
             await harness.assertNothingHappened()
         }
     }
 
-    func testVerifiedNewRecipientFailsWithoutComposerPickerOrDispatch() async throws {
+    func testVerifiedNewRecipientFailsWithoutComposerSourceResolutionOrDispatch() async throws {
         for recipient in ["+" + "1555" + "0100002", "brand-new@example.invalid"] {
             let harness = Harness(matches: [.none])
             await harness.assertFailure(
                 MessageSendError.attachmentRequiresExistingConversation,
-                arguments: ["recipients": .string(recipient)]
+                arguments: [
+                    "recipients": .string(recipient), "file_path": .string("/tmp/allowed/note.txt"),
+                ]
             )
 
-            // No sharing composer, no picker, no confirmation, no dispatch.
+            // No sharing composer, no source resolution, no confirmation, no dispatch.
             let compositions = await harness.composer.compositionCount
             XCTAssertEqual(compositions, 0, "\(recipient) reached system composition")
             await harness.assertNothingHappened()
@@ -285,49 +451,262 @@ final class MessageAttachmentSendTests: XCTestCase {
         }
     }
 
-    func testStaleOrUnresolvableChatIdentifierFailsBeforeThePicker() async throws {
+    func testStaleOrUnresolvableChatIdentifierFailsBeforeTheSourceResolves() async throws {
         let harness = Harness(results: [.failure(MessagesChatRepositoryError.staleIdentifier)])
         await harness.assertFailure(
             MessageSendError.staleChatIdentifier,
-            arguments: ["chat_id": .string("imcp-chat-v1_synthetic")]
+            arguments: [
+                "chat_id": .string("imcp-chat-v1_synthetic"),
+                "file_path": .string("/tmp/allowed/note.txt"),
+            ]
         )
         await harness.assertNothingHappened()
     }
 
-    // MARK: - Picker
+    // MARK: - Filesystem source: allowed-folder access
 
-    func testPickerCancellationSendsNothing() async throws {
+    func testFilesystemSourceOutsideEveryAllowedFolderFailsBeforeConfirmation() async throws {
+        let file = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .failure(MessagesAttachmentError.selectionCancelled)
+            folderAccessResults: [.failure(MessagesAttachmentSourceError.pathNotAllowed)]
         )
-        await harness.assertAttachmentFailure(
-            .selectionCancelled,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+        await harness.assertSourceFailure(
+            .pathNotAllowed,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(file.path),
+            ]
         )
-
-        let selections = await harness.selector.selectionCount
-        XCTAssertEqual(selections, 1)
-        XCTAssertEqual(harness.elicitation.requestCount, 0, "cancellation still asked to confirm")
+        XCTAssertEqual(harness.elicitation.requestCount, 0)
         let dispatches = await harness.sender.attachmentSubmissionCount
-        let authorizations = await harness.sender.authorizationRequestCount
         XCTAssertEqual(dispatches, 0)
-        XCTAssertEqual(authorizations, 0)
     }
 
-    func testPickerIsPresentedOnlyAfterTheDestinationResolves() async throws {
+    func testSourceIsResolvedOnlyAfterTheDestinationResolves() async throws {
         let log = AttachmentEventLog()
+        let file = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note.txt", byteCount: 8)),
             eventLog: log
         )
-        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(file.path),
+        ])
 
         let events = log.events
         let matchIndex = try XCTUnwrap(events.firstIndex(of: "match"))
-        let selectIndex = try XCTUnwrap(events.firstIndex(of: "select"))
-        XCTAssertLessThan(matchIndex, selectIndex, "the picker ran before the destination resolved")
+        let resolveIndex = try XCTUnwrap(events.firstIndex(of: "source-resolve"))
+        XCTAssertLessThan(matchIndex, resolveIndex, "the source resolved before the destination")
+    }
+
+    func testRevokedGrantAfterConfirmationCannotAuthorizeDispatch() async throws {
+        // The grant is available at initial resolution (confirmation is shown), but has
+        // been revoked by the time revalidation runs immediately before dispatch.
+        let file = try makeFile("note.txt", byteCount: 8)
+        let harness = Harness(
+            matches: [uniqueDirectMatch, uniqueDirectMatch],
+            folderAccessResults: [
+                .success(()), .failure(MessagesAttachmentSourceError.pathNotAllowed),
+            ]
+        )
+        await harness.assertSourceFailure(
+            .pathNotAllowed,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(file.path),
+            ]
+        )
+        XCTAssertEqual(harness.elicitation.requestCount, 1, "the grant was valid at confirmation time")
+        let dispatches = await harness.sender.attachmentSubmissionCount
+        let authorizations = await harness.sender.authorizationRequestCount
+        XCTAssertEqual(dispatches, 0)
+        XCTAssertEqual(authorizations, 0, "a revoked grant must never reach Automation")
+    }
+
+    // MARK: - Serialized source
+
+    func testValidSerializedContentMaterializesAndReachesConfirmation() async throws {
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        let content = Data("hello, synthetic world".utf8).base64EncodedString()
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"),
+            "filename": .string("note.txt"),
+            "content_base64": .string(content),
+        ])
+
+        XCTAssertEqual(harness.elicitation.requestCount, 1)
+        XCTAssertTrue(harness.elicitation.lastMessage.contains("Attachment: note.txt"))
+        let dispatches = await harness.sender.attachmentSubmissionCount
+        XCTAssertEqual(dispatches, 1)
+    }
+
+    func testInvalidBase64FailsWithZeroDownstreamSendSideEffect() async throws {
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        await harness.assertSourceFailure(
+            .invalidContentBase64,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"),
+                "filename": .string("note.txt"),
+                "content_base64": .string("not base64!!!"),
+            ]
+        )
+        await harness.assertNothingHappened()
+    }
+
+    func testEmptyDecodedSerializedFileFails() async throws {
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        await harness.assertAttachmentFailure(
+            .emptyFile,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"),
+                "filename": .string("empty.txt"),
+                "content_base64": .string(""),
+            ]
+        )
+        XCTAssertEqual(harness.elicitation.requestCount, 0)
+    }
+
+    func testOversizeDecodedSerializedContentFails() async throws {
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        let oversized = Data(repeating: 0x41, count: maximumSerializedAttachmentByteSize + 1)
+        await harness.assertSourceFailure(
+            .serializedContentTooLarge,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"),
+                "filename": .string("big.txt"),
+                "content_base64": .string(oversized.base64EncodedString()),
+            ]
+        )
+        await harness.assertNothingHappened()
+    }
+
+    func testUnsafeSerializedFilenameFails() async throws {
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        let content = Data("hi".utf8).base64EncodedString()
+        for unsafe in ["../escape.txt", "a/b.txt"] {
+            await harness.assertSourceFailure(
+                .invalidFilename,
+                arguments: [
+                    "recipients": .string("recipient@example.invalid"),
+                    "filename": .string(unsafe),
+                    "content_base64": .string(content),
+                ]
+            )
+        }
+        await harness.assertNothingHappened()
+    }
+
+    func testUnsupportedSerializedTypeStillFailsThroughTheNormalValidator() async throws {
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        let content = Data("MZ-fake-executable-bytes".utf8).base64EncodedString()
+        await harness.assertAttachmentFailure(
+            .unsupportedType,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"),
+                "filename": .string("tool.dylib"),
+                "content_base64": .string(content),
+            ]
+        )
+        XCTAssertEqual(harness.elicitation.requestCount, 0)
+    }
+
+    private var stagedAttachmentsRoot: URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("me.mattt.iMCP.attachments", isDirectory: true)
+    }
+
+    private func stagedSubdirectoryCount() -> Int {
+        (try? FileManager.default.contentsOfDirectory(
+            at: stagedAttachmentsRoot,
+            includingPropertiesForKeys: nil
+        ))?.count ?? 0
+    }
+
+    func testSerializedTempCleanupOccursOnSuccessSeam() async throws {
+        let before = stagedSubdirectoryCount()
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        let content = Data("hello".utf8).base64EncodedString()
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"),
+            "filename": .string("note.txt"),
+            "content_base64": .string(content),
+        ])
+        XCTAssertEqual(stagedSubdirectoryCount(), before, "a staged temp directory survived success")
+    }
+
+    func testSerializedTempCleanupOccursOnConfirmationDecline() async throws {
+        let before = stagedSubdirectoryCount()
+        let harness = Harness(
+            matches: [uniqueDirectMatch, uniqueDirectMatch],
+            confirmation: .init(action: .decline)
+        )
+        let content = Data("hello".utf8).base64EncodedString()
+        await harness.assertFailure(
+            MessageSendError.confirmationDeclined,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"),
+                "filename": .string("note.txt"),
+                "content_base64": .string(content),
+            ]
+        )
+        XCTAssertEqual(stagedSubdirectoryCount(), before, "a staged temp directory survived decline")
+    }
+
+    func testSerializedTempCleanupOccursOnValidationFailure() async throws {
+        let before = stagedSubdirectoryCount()
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        await harness.assertAttachmentFailure(
+            .emptyFile,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"),
+                "filename": .string("empty.txt"),
+                "content_base64": .string(""),
+            ]
+        )
+        XCTAssertEqual(
+            stagedSubdirectoryCount(),
+            before,
+            "a staged temp directory survived validation failure"
+        )
+    }
+
+    func testSerializedTempCleanupOccursOnSendFailure() async throws {
+        let before = stagedSubdirectoryCount()
+        let harness = Harness(
+            matches: [uniqueDirectMatch, uniqueDirectMatch],
+            submissionError: MessageSendError.automationFailed
+        )
+        let content = Data("hello".utf8).base64EncodedString()
+        await harness.assertFailure(
+            MessageSendError.automationFailed,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"),
+                "filename": .string("note.txt"),
+                "content_base64": .string(content),
+            ]
+        )
+        XCTAssertEqual(
+            stagedSubdirectoryCount(),
+            before,
+            "a staged temp directory survived a send failure"
+        )
+    }
+
+    func testNoCallerOwnedFilesystemPathIsEverCleanedUp() async throws {
+        let file = try makeFile("note.txt", byteCount: 8)
+        let harness = Harness(
+            matches: [uniqueDirectMatch, uniqueDirectMatch],
+            submissionError: MessageSendError.automationFailed
+        )
+        await harness.assertFailure(
+            MessageSendError.automationFailed,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(file.path),
+            ]
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: file.path),
+            "a caller-owned filesystem source must never be deleted"
+        )
     }
 
     // MARK: - Bounded file policy
@@ -402,7 +781,6 @@ final class MessageAttachmentSendTests: XCTestCase {
         // Unknown generic data: no registered type, so no supported category.
         assertRejected(.unsupportedType, try makeFile("blob.imcpunknownfixture", byteCount: 16))
         assertRejected(.unsupportedType, try makeFile("extensionless", byteCount: 16))
-
         assertRejected(.unsupportedType, try makeFile("bundle.zip", byteCount: 16))
         assertRejected(.unsupportedType, try makeFile("disk.dmg", byteCount: 16))
         assertRejected(.unsupportedType, try makeFile("sheet.numbers", byteCount: 16))
@@ -426,13 +804,12 @@ final class MessageAttachmentSendTests: XCTestCase {
         ]
 
         for (url, expected) in rejected {
-            let harness = Harness(
-                matches: [uniqueDirectMatch, uniqueDirectMatch],
-                selection: .success(url)
-            )
+            let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
             await harness.assertAttachmentFailure(
                 expected,
-                arguments: ["recipients": .string("recipient@example.invalid")]
+                arguments: [
+                    "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+                ]
             )
             XCTAssertEqual(
                 harness.elicitation.requestCount,
@@ -450,11 +827,10 @@ final class MessageAttachmentSendTests: XCTestCase {
 
     func testConfirmationShowsDestinationAndFileFactsButNeverThePath() async throws {
         let url = try makeFile("Quarterly Report.pdf", byteCount: 2_048)
-        let harness = Harness(
-            matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(url)
-        )
-        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
 
         XCTAssertEqual(harness.elicitation.requestCount, 1)
         let message = harness.elicitation.lastMessage
@@ -490,14 +866,13 @@ final class MessageAttachmentSendTests: XCTestCase {
             publicChatID: "imcp-chat-v1_synthetic-group",
             destination: groupChat
         )
-        let harness = Harness(
-            matches: [match, match],
-            selection: .success(try makeFile("photo.png", byteCount: 128))
-        )
+        let url = try makeFile("photo.png", byteCount: 128)
+        let harness = Harness(matches: [match, match])
         _ = try await harness.call([
             "recipients": .array([
                 .string("second@example.invalid"), .string("first@example.invalid"),
-            ])
+            ]),
+            "file_path": .string(url.path),
         ])
 
         let message = harness.elicitation.lastMessage
@@ -509,13 +884,15 @@ final class MessageAttachmentSendTests: XCTestCase {
 
     func testNoAutomationPermissionIsRequestedBeforeTheFinalConfirmation() async throws {
         let log = AttachmentEventLog()
+        let url = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note.txt", byteCount: 8)),
             authorization: .consentRequired,
             eventLog: log
         )
-        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
 
         let events = log.events
         let confirmation = try XCTUnwrap(events.firstIndex(of: "elicitation"))
@@ -534,55 +911,63 @@ final class MessageAttachmentSendTests: XCTestCase {
         XCTAssertLessThan(request, dispatch)
     }
 
-    func testAlreadyAuthorizedAutomationPreflightsAddressabilityBeforeThePicker() async throws {
+    func testAlreadyAuthorizedAutomationPreflightsAddressabilityBeforeTheSourceResolves()
+        async throws
+    {
         let log = AttachmentEventLog()
+        let url = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note.txt", byteCount: 8)),
             authorization: .authorized,
             eventLog: log
         )
-        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
 
         let events = log.events
         let preflight = try XCTUnwrap(events.firstIndex(of: "addressability"))
-        let selection = try XCTUnwrap(events.firstIndex(of: "select"))
-        XCTAssertLessThan(preflight, selection)
+        let resolve = try XCTUnwrap(events.firstIndex(of: "source-resolve"))
+        XCTAssertLessThan(preflight, resolve)
         // A non-prompting preflight never requests permission.
         XCTAssertFalse(events[..<preflight].contains("automation-request"))
     }
 
-    func testUnaddressableChatFailsBeforeThePickerWhenAlreadyAuthorized() async throws {
+    func testUnaddressableChatFailsBeforeTheSourceResolvesWhenAlreadyAuthorized() async throws {
+        let url = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note.txt", byteCount: 8)),
             authorization: .authorized,
             addressability: [false]
         )
         await harness.assertFailure(
             MessageSendError.chatUnavailableInAutomation,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
 
-        let selections = await harness.selector.selectionCount
-        XCTAssertEqual(selections, 0, "the user was asked for a file that could not be sent")
+        let resolves = harness.folderGrantResolver.resolveCount
+        XCTAssertEqual(resolves, 0, "the source was resolved for a file that could not be sent")
         XCTAssertEqual(harness.elicitation.requestCount, 0)
         let dispatches = await harness.sender.attachmentSubmissionCount
         XCTAssertEqual(dispatches, 0)
     }
 
-    func testDeniedAutomationFailsBeforeThePicker() async throws {
+    func testDeniedAutomationFailsBeforeTheSourceResolves() async throws {
+        let url = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note.txt", byteCount: 8)),
             authorization: .denied
         )
         await harness.assertFailure(
             MessageSendError.automationDenied,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
-        let selections = await harness.selector.selectionCount
-        XCTAssertEqual(selections, 0)
+        let resolves = harness.folderGrantResolver.resolveCount
+        XCTAssertEqual(resolves, 0)
         XCTAssertEqual(harness.elicitation.requestCount, 0)
     }
 
@@ -595,13 +980,15 @@ final class MessageAttachmentSendTests: XCTestCase {
         ]
 
         for outcome in outcomes {
+            let url = try makeFile("note.txt", byteCount: 8)
             let harness = Harness(
                 matches: [uniqueDirectMatch, uniqueDirectMatch],
-                selection: .success(try makeFile("note.txt", byteCount: 8)),
                 confirmation: outcome
             )
             do {
-                _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
+                _ = try await harness.call([
+                    "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+                ])
                 XCTFail("Expected the attachment submission to fail")
             } catch is MessageSendError {
                 // Expected.
@@ -623,9 +1010,9 @@ final class MessageAttachmentSendTests: XCTestCase {
 
     func testNativeConfirmationCancellationDispatchesZero() async throws {
         let native = RecordingAttachmentNativePresenter(outcome: .cancelled)
+        let url = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note.txt", byteCount: 8)),
             confirmationRequester: MessagesFinalSendConfirmationRequester(
                 mode: { .appDialog },
                 appPresenter: native
@@ -633,7 +1020,9 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertFailure(
             MessageSendError.confirmationCancelled,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
 
         XCTAssertEqual(native.requestCount, 1)
@@ -654,13 +1043,13 @@ final class MessageAttachmentSendTests: XCTestCase {
             destination: groupChat
         )
         for second in [MessagesConversationMatch.none, .ambiguous, .incomplete, changed] {
-            let harness = Harness(
-                matches: [uniqueDirectMatch, second],
-                selection: .success(try makeFile("note.txt", byteCount: 8))
-            )
+            let url = try makeFile("note.txt", byteCount: 8)
+            let harness = Harness(matches: [uniqueDirectMatch, second])
             await harness.assertFailure(
                 MessageSendError.staleMatchedConversation,
-                arguments: ["recipients": .string("recipient@example.invalid")]
+                arguments: [
+                    "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+                ]
             )
             XCTAssertEqual(harness.elicitation.requestCount, 1)
             let dispatches = await harness.sender.attachmentSubmissionCount
@@ -671,13 +1060,13 @@ final class MessageAttachmentSendTests: XCTestCase {
     }
 
     func testExplicitChatIsRevalidatedAfterConfirmation() async throws {
-        let harness = Harness(
-            results: [.success(directChat), .success(groupChat)],
-            selection: .success(try makeFile("note.txt", byteCount: 8))
-        )
+        let url = try makeFile("note.txt", byteCount: 8)
+        let harness = Harness(results: [.success(directChat), .success(groupChat)])
         await harness.assertFailure(
             MessageSendError.staleChatIdentifier,
-            arguments: ["chat_id": .string("imcp-chat-v1_synthetic")]
+            arguments: [
+                "chat_id": .string("imcp-chat-v1_synthetic"), "file_path": .string(url.path),
+            ]
         )
         XCTAssertEqual(harness.elicitation.requestCount, 1)
         let dispatches = await harness.sender.attachmentSubmissionCount
@@ -688,12 +1077,13 @@ final class MessageAttachmentSendTests: XCTestCase {
         let url = try makeFile("note.txt", byteCount: 32)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(url),
             onConfirmation: { try? FileManager.default.removeItem(at: url) }
         )
         await harness.assertAttachmentFailure(
             .unreadableSelection,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
         await harness.assertConfirmedButNeverDispatched()
     }
@@ -702,14 +1092,15 @@ final class MessageAttachmentSendTests: XCTestCase {
         let url = try makeFile("note.txt", byteCount: 32)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(url),
             onConfirmation: {
                 try? Data(repeating: 0x41, count: 64).write(to: url)
             }
         )
         await harness.assertAttachmentFailure(
             .attachmentChanged,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
         await harness.assertConfirmedButNeverDispatched()
     }
@@ -724,7 +1115,6 @@ final class MessageAttachmentSendTests: XCTestCase {
 
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(url),
             onConfirmation: {
                 // A different file of exactly the same size, name, type, and reported
                 // modification date, put in the same place.
@@ -743,7 +1133,9 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .attachmentChanged,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
         await harness.assertConfirmedButNeverDispatched()
 
@@ -756,7 +1148,6 @@ final class MessageAttachmentSendTests: XCTestCase {
         let url = try makeFile("note.txt", byteCount: 32)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(url),
             onConfirmation: {
                 let handle = try? FileHandle(forWritingTo: url)
                 try? handle?.truncate(atOffset: UInt64(maximumMessagesAttachmentByteSize + 1))
@@ -765,7 +1156,9 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .fileTooLarge,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
         await harness.assertConfirmedButNeverDispatched()
     }
@@ -775,7 +1168,6 @@ final class MessageAttachmentSendTests: XCTestCase {
         let fixtures = self.fixtures!
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(url),
             onConfirmation: {
                 // The same path now names a directory rather than an ordinary file.
                 try? FileManager.default.removeItem(at: url)
@@ -787,17 +1179,19 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .notRegularFile,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
         await harness.assertConfirmedButNeverDispatched()
     }
 
     func testUnchangedFileIsNotFalselyRejected() async throws {
-        let harness = Harness(
-            matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note.txt", byteCount: 32))
-        )
-        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        let url = try makeFile("note.txt", byteCount: 32)
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
         let dispatches = await harness.sender.attachmentSubmissionCount
         XCTAssertEqual(dispatches, 1)
     }
@@ -806,11 +1200,10 @@ final class MessageAttachmentSendTests: XCTestCase {
 
     func testAcceptedSubmissionDispatchesExactlyOnceAndReturnsARedactedResult() async throws {
         let url = try makeFile("Quarterly Report.pdf", byteCount: 2_048)
-        let harness = Harness(
-            matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(url)
-        )
-        let result = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        let result = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
 
         let dispatches = await harness.sender.attachmentSubmissionCount
         let messageDispatches = await harness.sender.chatSubmissionCount
@@ -821,7 +1214,7 @@ final class MessageAttachmentSendTests: XCTestCase {
 
         // The file the Apple Event carries is the one that was revalidated.
         let dispatchedURL = await harness.sender.lastAttachmentURL
-        XCTAssertEqual(dispatchedURL, url)
+        XCTAssertEqual(dispatchedURL?.path, url.path)
         let dispatchedGUID = await harness.sender.lastChatGUID
         XCTAssertEqual(dispatchedGUID, directChat.chatGuid)
 
@@ -848,8 +1241,10 @@ final class MessageAttachmentSendTests: XCTestCase {
         let url = try makeFile("Still Confirmed.pdf", byteCount: 1_024)
         // No sendingMode argument: the default must behave exactly like the explicit
         // .askBeforeSending case, matching the accepted behavior at eb64ee2d.
-        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch], selection: .success(url))
-        let result = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        let result = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
 
         XCTAssertEqual(harness.elicitation.requestCount, 1)
         let dispatches = await harness.sender.attachmentSubmissionCount
@@ -865,26 +1260,27 @@ final class MessageAttachmentSendTests: XCTestCase {
         let url = try makeFile("Automatic.pdf", byteCount: 1_024)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(url),
             eventLog: log,
             sendingMode: { .sendAutomatically }
         )
-        let result = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        let result = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
 
         XCTAssertEqual(
             harness.elicitation.requestCount,
             0,
             "Send Automatically must request zero final confirmations"
         )
-        let selections = await harness.selector.selectionCount
-        XCTAssertEqual(selections, 1, "the native picker still runs in automatic mode")
-        // Destination match, picker/selection, destination match again (revalidation),
+        let resolves = harness.folderGrantResolver.resolveCount
+        XCTAssertEqual(resolves, 2, "the source is resolved once and revalidated once")
+        // Destination match, source resolution, destination match again (revalidation),
         // TCC, addressability, and dispatch all still run, in the same order, just
         // without an elicitation step.
         XCTAssertEqual(
             log.events,
             [
-                "match", "automation-status", "select", "match", "automation-request",
+                "match", "automation-status", "source-resolve", "match", "automation-request",
                 "addressability", "attachment-submit",
             ]
         )
@@ -901,15 +1297,13 @@ final class MessageAttachmentSendTests: XCTestCase {
             publicChatID: "imcp-chat-v1_synthetic-group",
             destination: groupChat
         )
-        let harness = Harness(
-            matches: [match, match],
-            selection: .success(try makeFile("photo.png", byteCount: 128)),
-            sendingMode: { .sendAutomatically }
-        )
+        let url = try makeFile("photo.png", byteCount: 128)
+        let harness = Harness(matches: [match, match], sendingMode: { .sendAutomatically })
         let result = try await harness.call([
             "recipients": .array([
                 .string("first@example.invalid"), .string("second@example.invalid"),
-            ])
+            ]),
+            "file_path": .string(url.path),
         ])
 
         XCTAssertEqual(harness.elicitation.requestCount, 0)
@@ -937,11 +1331,12 @@ final class MessageAttachmentSendTests: XCTestCase {
             matches: [
                 uniqueDirectMatch, uniqueDirectMatch, uniqueDirectMatch, uniqueDirectMatch,
             ],
-            selection: .success(url),
             sendingMode: { box.mode }
         )
 
-        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
         XCTAssertEqual(
             harness.elicitation.requestCount,
             1,
@@ -950,7 +1345,9 @@ final class MessageAttachmentSendTests: XCTestCase {
 
         box.mode = .sendAutomatically
 
-        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
         XCTAssertEqual(
             harness.elicitation.requestCount,
             1,
@@ -961,19 +1358,22 @@ final class MessageAttachmentSendTests: XCTestCase {
         XCTAssertEqual(dispatches, 2)
     }
 
-    func testPickerCancellationInAutomaticModeSendsNothing() async throws {
+    func testFilesystemSourceFailureInAutomaticModeSendsNothing() async throws {
+        let url = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .failure(MessagesAttachmentError.selectionCancelled),
+            folderAccessResults: [.failure(MessagesAttachmentSourceError.pathNotAllowed)],
             sendingMode: { .sendAutomatically }
         )
-        await harness.assertAttachmentFailure(
-            .selectionCancelled,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+        await harness.assertSourceFailure(
+            .pathNotAllowed,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
 
-        let selections = await harness.selector.selectionCount
-        XCTAssertEqual(selections, 1, "automatic mode must never bypass the picker")
+        let resolves = harness.folderGrantResolver.resolveCount
+        XCTAssertEqual(resolves, 1, "automatic mode must still resolve and check the source")
         XCTAssertEqual(harness.elicitation.requestCount, 0)
         let dispatches = await harness.sender.attachmentSubmissionCount
         let authorizations = await harness.sender.authorizationRequestCount
@@ -986,14 +1386,16 @@ final class MessageAttachmentSendTests: XCTestCase {
             publicChatID: "imcp-chat-v1_other",
             destination: groupChat
         )
+        let url = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, changed],
-            selection: .success(try makeFile("note.txt", byteCount: 8)),
             sendingMode: { .sendAutomatically }
         )
         await harness.assertFailure(
             MessageSendError.staleMatchedConversation,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
 
         XCTAssertEqual(harness.elicitation.requestCount, 0, "confirmation was correctly skipped")
@@ -1011,7 +1413,6 @@ final class MessageAttachmentSendTests: XCTestCase {
         let url = try makeFile("note.txt", byteCount: 32)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(url),
             // Fires on the revalidation read, the only checkpoint shared by both modes,
             // simulating the file changing after selection/validation but before dispatch
             // even though there is no confirmation step to hook into here.
@@ -1022,7 +1423,9 @@ final class MessageAttachmentSendTests: XCTestCase {
         )
         await harness.assertAttachmentFailure(
             .attachmentChanged,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
 
         XCTAssertEqual(harness.elicitation.requestCount, 0)
@@ -1039,31 +1442,36 @@ final class MessageAttachmentSendTests: XCTestCase {
     {
         // Denied at the non-prompting preflight, which runs unconditionally before the
         // mode is ever consulted.
+        let deniedURL = try makeFile("note.txt", byteCount: 8)
         let deniedHarness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note.txt", byteCount: 8)),
             authorization: .denied,
             sendingMode: { .sendAutomatically }
         )
         await deniedHarness.assertFailure(
             MessageSendError.automationDenied,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(deniedURL.path),
+            ]
         )
         let deniedDispatches = await deniedHarness.sender.attachmentSubmissionCount
         XCTAssertEqual(deniedDispatches, 0)
 
         // Unavailable at the post-authorization addressability check, which still runs
         // after the skipped confirmation.
+        let unavailableURL = try makeFile("note2.txt", byteCount: 8)
         let unavailableHarness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note2.txt", byteCount: 8)),
             authorization: .consentRequired,
             addressability: [false],
             sendingMode: { .sendAutomatically }
         )
         await unavailableHarness.assertFailure(
             MessageSendError.chatUnavailableInAutomation,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"),
+                "file_path": .string(unavailableURL.path),
+            ]
         )
         let unavailableDispatches = await unavailableHarness.sender.attachmentSubmissionCount
         XCTAssertEqual(unavailableDispatches, 0)
@@ -1073,7 +1481,10 @@ final class MessageAttachmentSendTests: XCTestCase {
         let harness = Harness(matches: [.none], sendingMode: { .sendAutomatically })
         await harness.assertFailure(
             MessageSendError.attachmentRequiresExistingConversation,
-            arguments: ["recipients": .string("brand-new@example.invalid")]
+            arguments: [
+                "recipients": .string("brand-new@example.invalid"),
+                "file_path": .string("/tmp/allowed/note.txt"),
+            ]
         )
 
         let compositions = await harness.composer.compositionCount
@@ -1082,11 +1493,11 @@ final class MessageAttachmentSendTests: XCTestCase {
     }
 
     func testExplicitChatAndGroupDestinationsDispatchExactlyOnce() async throws {
-        let chatHarness = Harness(
-            results: [.success(directChat), .success(directChat)],
-            selection: .success(try makeFile("note.txt", byteCount: 8))
-        )
-        _ = try await chatHarness.call(["chat_id": .string("imcp-chat-v1_synthetic")])
+        let chatURL = try makeFile("note.txt", byteCount: 8)
+        let chatHarness = Harness(results: [.success(directChat), .success(directChat)])
+        _ = try await chatHarness.call([
+            "chat_id": .string("imcp-chat-v1_synthetic"), "file_path": .string(chatURL.path),
+        ])
         let chatDispatches = await chatHarness.sender.attachmentSubmissionCount
         XCTAssertEqual(chatDispatches, 1)
 
@@ -1094,14 +1505,13 @@ final class MessageAttachmentSendTests: XCTestCase {
             publicChatID: "imcp-chat-v1_synthetic-group",
             destination: groupChat
         )
-        let groupHarness = Harness(
-            matches: [match, match],
-            selection: .success(try makeFile("photo.png", byteCount: 128))
-        )
+        let groupURL = try makeFile("photo.png", byteCount: 128)
+        let groupHarness = Harness(matches: [match, match])
         _ = try await groupHarness.call([
             "recipients": .array([
                 .string("first@example.invalid"), .string("second@example.invalid"),
-            ])
+            ]),
+            "file_path": .string(groupURL.path),
         ])
         let groupDispatches = await groupHarness.sender.attachmentSubmissionCount
         let groupGUID = await groupHarness.sender.lastChatGUID
@@ -1110,14 +1520,16 @@ final class MessageAttachmentSendTests: XCTestCase {
     }
 
     func testAddressabilityIsRecheckedImmediatelyBeforeDispatch() async throws {
+        let url = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note.txt", byteCount: 8)),
             addressability: [false]
         )
         await harness.assertFailure(
             MessageSendError.chatUnavailableInAutomation,
-            arguments: ["recipients": .string("recipient@example.invalid")]
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
         )
         let dispatches = await harness.sender.attachmentSubmissionCount
         let probes = await harness.sender.addressabilityCount
@@ -1130,25 +1542,27 @@ final class MessageAttachmentSendTests: XCTestCase {
             .ambiguousSubmission, .automationFailed, .messagesUnavailable, .automationDenied,
         ]
         for failure in failures {
+            let url = try makeFile("note.txt", byteCount: 8)
             let harness = Harness(
                 matches: [uniqueDirectMatch, uniqueDirectMatch],
-                selection: .success(try makeFile("note.txt", byteCount: 8)),
                 submissionError: failure
             )
             await harness.assertFailure(
                 failure,
-                arguments: ["recipients": .string("recipient@example.invalid")]
+                arguments: [
+                    "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+                ]
             )
 
             // Exactly one dispatch attempt, and nothing else was tried afterwards.
             let dispatches = await harness.sender.attachmentSubmissionCount
             let messageDispatches = await harness.sender.chatSubmissionCount
             let compositions = await harness.composer.compositionCount
-            let selections = await harness.selector.selectionCount
+            let resolves = harness.folderGrantResolver.resolveCount
             XCTAssertEqual(dispatches, 1, "\(failure) retried the attachment dispatch")
             XCTAssertEqual(messageDispatches, 0, "\(failure) fell back to a text submission")
             XCTAssertEqual(compositions, 0, "\(failure) fell back to system composition")
-            XCTAssertEqual(selections, 1, "\(failure) asked for another file")
+            XCTAssertEqual(resolves, 2, "\(failure) re-resolved the source more than once")
             XCTAssertEqual(harness.elicitation.requestCount, 1)
         }
     }
@@ -1160,13 +1574,15 @@ final class MessageAttachmentSendTests: XCTestCase {
     }
 
     func testCancelledToolCallDispatchesZero() async throws {
+        let url = try makeFile("note.txt", byteCount: 8)
         let harness = Harness(
             matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("note.txt", byteCount: 8)),
             confirmationRequester: SlowAttachmentConfirmationRequester()
         )
         let task = Task {
-            try await harness.call(["recipients": .string("recipient@example.invalid")])
+            try await harness.call([
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ])
         }
         try? await Task.sleep(for: .milliseconds(20))
         task.cancel()
@@ -1257,7 +1673,7 @@ final class MessageAttachmentSendTests: XCTestCase {
     func testAttachmentErrorsAreCategoricalAndCarryNoFileDetail() throws {
         let url = try makeFile("Quarterly Report.pdf", byteCount: 2_048)
         let everyError: [MessagesAttachmentError] = [
-            .selectionCancelled, .unreadableSelection, .notRegularFile, .emptyFile, .fileTooLarge,
+            .unreadableSelection, .notRegularFile, .emptyFile, .fileTooLarge,
             .unsupportedType, .attachmentChanged,
         ]
 
@@ -1275,14 +1691,33 @@ final class MessageAttachmentSendTests: XCTestCase {
         }
     }
 
+    func testAttachmentSourceErrorsAreCategoricalAndCarryNoPathOrByteDetail() throws {
+        let path = "/Users/synthetic/Private/secret-report.pdf"
+        let filename = "secret-report.pdf"
+        let content = Data(repeating: 0x41, count: 64).base64EncodedString()
+        let everyError: [MessagesAttachmentSourceError] = [
+            .missingSource, .conflictingSource, .incompleteSerializedSource, .invalidFilePath,
+            .invalidFilename, .invalidContentBase64, .serializedContentTooLarge, .pathNotAllowed,
+            .stagingFailed,
+        ]
+
+        for error in everyError {
+            let message = try XCTUnwrap(error.errorDescription)
+            for leaked in [path, filename, content, "/Users/synthetic"] {
+                XCTAssertFalse(message.contains(leaked), "\(error) leaked \(leaked)")
+            }
+            XCTAssertTrue(message.contains("Nothing was sent."), "\(error) omits the send status")
+        }
+    }
+
     func testLoggableSubmissionFactsAreCategoricalOnly() async throws {
         // The only per-submission fact production logs is the categorical destination
         // shape, which is asserted here through the values that compose it.
-        let harness = Harness(
-            matches: [uniqueDirectMatch, uniqueDirectMatch],
-            selection: .success(try makeFile("Quarterly Report.pdf", byteCount: 2_048))
-        )
-        _ = try await harness.call(["recipients": .string("recipient@example.invalid")])
+        let url = try makeFile("Quarterly Report.pdf", byteCount: 2_048)
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
 
         XCTAssertEqual(MessagesChatKind.direct.rawValue, "direct")
         XCTAssertEqual(MessagesChatKind.group.rawValue, "group")
@@ -1372,14 +1807,14 @@ final class MessageAttachmentSendTests: XCTestCase {
 private struct Harness {
     let sender: RecordingAttachmentSender
     let composer: RecordingAttachmentComposer
-    let selector: StubAttachmentSelector
+    let folderGrantResolver: StubAllowedFolderGrantResolver
     let elicitation: StubAttachmentElicitation
     private let tool: iMCP.Tool
 
     init(
         results: [Result<MessagesResolvedChatDestination, Error>] = [],
         matches: [MessagesConversationMatch] = [],
-        selection: Result<URL, Error> = .failure(MessagesAttachmentError.selectionCancelled),
+        folderAccessResults: [Result<Void, Error>] = [],
         authorization: MessagesAutomationAuthorization = .consentRequired,
         addressability: [Bool] = [],
         submissionError: Error? = nil,
@@ -1400,7 +1835,10 @@ private struct Harness {
             eventLog: eventLog
         )
         self.composer = RecordingAttachmentComposer()
-        self.selector = StubAttachmentSelector(selection: selection, eventLog: eventLog)
+        self.folderGrantResolver = StubAllowedFolderGrantResolver(
+            accessResults: folderAccessResults,
+            eventLog: eventLog
+        )
         self.elicitation = StubAttachmentElicitation(
             result: confirmation,
             onRequest: onConfirmation,
@@ -1417,8 +1855,8 @@ private struct Harness {
             ),
             sendConfirmationRequester: confirmationRequester
                 ?? MessagesFinalSendConfirmationRequester(mode: { .mcpForm }),
-            attachmentSelector: selector,
             attachmentValidator: FileManagerMessagesAttachmentValidator(),
+            attachmentFolderGrantResolver: folderGrantResolver,
             chatDatabasePathOverride: "/synthetic/chat.db",
             sendingMode: sendingMode
         )
@@ -1466,17 +1904,34 @@ private struct Harness {
         }
     }
 
-    /// No picker, no confirmation, no permission request, and no dispatch of any kind.
+    func assertSourceFailure(
+        _ expected: MessagesAttachmentSourceError,
+        arguments: [String: Value],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await call(arguments)
+            XCTFail("Expected the attachment submission to fail", file: file, line: line)
+        } catch let error as MessagesAttachmentSourceError {
+            XCTAssertEqual(error, expected, file: file, line: line)
+        } catch {
+            XCTFail("Unexpected error: \(error)", file: file, line: line)
+        }
+    }
+
+    /// No source resolution, no confirmation, no permission request, and no dispatch of
+    /// any kind.
     func assertNothingHappened(
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
-        let selections = await selector.selectionCount
+        let resolves = folderGrantResolver.resolveCount
         let attachments = await sender.attachmentSubmissionCount
         let messages = await sender.chatSubmissionCount
         let authorizations = await sender.authorizationRequestCount
         let compositions = await composer.compositionCount
-        XCTAssertEqual(selections, 0, "a file picker was presented", file: file, line: line)
+        XCTAssertEqual(resolves, 0, "an attachment source was resolved", file: file, line: line)
         XCTAssertEqual(attachments, 0, file: file, line: line)
         XCTAssertEqual(messages, 0, file: file, line: line)
         XCTAssertEqual(authorizations, 0, file: file, line: line)
@@ -1494,11 +1949,11 @@ private struct Harness {
         let attachments = await sender.attachmentSubmissionCount
         let messages = await sender.chatSubmissionCount
         let authorizations = await sender.authorizationRequestCount
-        let selections = await selector.selectionCount
+        let resolves = folderGrantResolver.resolveCount
         XCTAssertEqual(attachments, 0, file: file, line: line)
         XCTAssertEqual(messages, 0, file: file, line: line)
         XCTAssertEqual(authorizations, 0, file: file, line: line)
-        XCTAssertEqual(selections, 1, "the flow asked for a second file", file: file, line: line)
+        XCTAssertEqual(resolves, 2, "the flow re-resolved the source", file: file, line: line)
     }
 }
 
@@ -1574,20 +2029,35 @@ private actor RecordingAttachmentComposer: MessagesNewRecipientComposing {
     }
 }
 
-private actor StubAttachmentSelector: MessagesAttachmentSelecting {
-    private(set) var selectionCount = 0
-    private let selection: Result<URL, Error>
+/// A fake `AllowedFolderGrantResolving` for pipeline-level tests. Containment,
+/// traversal, and symlink-escape behavior are covered directly against the real
+/// `AllowedFolderGrantResolver` in `AllowedFolderGrantStoreTests`; this double only
+/// records call order/count and returns the configured outcomes for source-pipeline
+/// coverage (confirmation, revalidation, cleanup, dispatch).
+private final class StubAllowedFolderGrantResolver: AllowedFolderGrantResolving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedResolveCount = 0
+    private var accessResults: [Result<Void, Error>]
     private let eventLog: AttachmentEventLog?
 
-    init(selection: Result<URL, Error>, eventLog: AttachmentEventLog?) {
-        self.selection = selection
+    var resolveCount: Int { lock.withLock { storedResolveCount } }
+
+    init(accessResults: [Result<Void, Error>], eventLog: AttachmentEventLog?) {
+        self.accessResults = accessResults
         self.eventLog = eventLog
     }
 
-    func selectAttachment() throws -> URL {
-        selectionCount += 1
-        eventLog?.record("select")
-        return try selection.get()
+    func resolvedGrants() -> [ResolvedAllowedFolderGrant] { [] }
+
+    func resolveAccess(forRequestedPath path: String) throws -> AllowedFolderFileAccess {
+        let outcome: Result<Void, Error> = lock.withLock {
+            storedResolveCount += 1
+            return accessResults.isEmpty ? .success(()) : accessResults.removeFirst()
+        }
+        eventLog?.record("source-resolve")
+        try outcome.get()
+        let url = URL(fileURLWithPath: path)
+        return AllowedFolderFileAccess(fileURL: url, rootAccess: MessagesAttachmentAccess(url: url))
     }
 }
 
@@ -1610,10 +2080,10 @@ private final class RecordingAttachmentChatRepository: MessagesChatListing, @unc
     private var callCount = 0
     /// Fires once, on the second destination read only. That read is always the
     /// revalidation read — the first happens during `prepareDestination`, before the
-    /// picker even runs — so this simulates "the world changed between authorization
-    /// and dispatch" identically in Ask Before Sending (where `onConfirmation` also
-    /// fires at that same logical moment) and Send Automatically (which has no
-    /// confirmation step to hook into).
+    /// source is even resolved — so this simulates "the world changed between
+    /// authorization and dispatch" identically in Ask Before Sending (where
+    /// `onConfirmation` also fires at that same logical moment) and Send Automatically
+    /// (which has no confirmation step to hook into).
     private let onSecondResolve: (@Sendable () -> Void)?
 
     init(
