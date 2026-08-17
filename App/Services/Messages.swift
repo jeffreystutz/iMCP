@@ -906,11 +906,12 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
     private func resolveDestination(
         _ arguments: [String: Value]
     ) throws -> SendDestination {
-        let recipientsValue = arguments["recipients"]
-        let chatIDValue = arguments["chat_id"]
-        // Exclusivity is decided by which properties were supplied, not by whether a
-        // supplied value happens to parse. A malformed extra selector must never be
-        // silently treated as absent.
+        let recipientsValue = Self.meaningfulSelectorValue(arguments["recipients"])
+        let chatIDValue = Self.meaningfulSelectorValue(arguments["chat_id"])
+        // Exclusivity is decided by which properties were meaningfully supplied, not by
+        // whether a supplied value happens to parse. A malformed extra selector must
+        // never be silently treated as absent; a blank optional scalar field, the kind a
+        // form client may submit untouched, is omission-equivalent and must not count.
         let suppliedDestinationCount = [recipientsValue != nil, chatIDValue != nil]
             .filter { $0 }.count
         guard suppliedDestinationCount == 1 else {
@@ -926,6 +927,23 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             throw MessageSendError.invalidChatIdentifier
         }
         return .chat(chatID)
+    }
+
+    /// Normalizes a raw destination-selector argument for exclusivity counting.
+    ///
+    /// A blank or whitespace-only scalar string is omission-equivalent to an absent
+    /// argument — the kind of empty optional field a form client may submit untouched —
+    /// and must not count as a supplied destination selector. Every other present value
+    /// still counts as supplied, including a non-string scalar and an empty array: those
+    /// remain malformed input for the selector's own parser to reject, not omissions.
+    private static func meaningfulSelectorValue(_ value: Value?) -> Value? {
+        guard let value else { return nil }
+        if let scalar = value.stringValue,
+            scalar.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return nil
+        }
+        return value
     }
 
     /// Parses the unified `recipients` field into destination intent.

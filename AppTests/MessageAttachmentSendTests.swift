@@ -154,8 +154,10 @@ final class MessageAttachmentSendTests: XCTestCase {
         let cases: [([String: Value], MessageSendError)] = [
             (["recipients": .string("not a handle")], .invalidRecipient),
             (["recipients": .string("5551234567")], .invalidRecipient),
-            (["recipients": .string("")], .invalidRecipient),
-            (["chat_id": .string("   ")], .invalidChatIdentifier),
+            // A blank/whitespace-only scalar selector, alone, is omission-equivalent:
+            // no meaningful selector remains at all.
+            (["recipients": .string("")], .invalidDestination),
+            (["chat_id": .string("   ")], .invalidDestination),
             (["recipients": .array([])], .emptyRecipients),
             (["recipients": .array([.string("not a handle")])], .invalidRecipient),
             (
@@ -170,6 +172,50 @@ final class MessageAttachmentSendTests: XCTestCase {
             await harness.assertFailure(expected, arguments: arguments)
             await harness.assertNothingHappened()
         }
+    }
+
+    func testBlankOptionalScalarSelectorsAreOmissionEquivalent() async throws {
+        // A blank or whitespace-only scalar selector value — the kind a form
+        // client may submit for an untouched optional field — must not count as
+        // a supplied destination selector, and must not block the other one.
+        for chatID: Value in [.string(""), .string("   ")] {
+            let harness = Harness(
+                matches: [uniqueDirectMatch, uniqueDirectMatch],
+                selection: .success(try makeFile("note.txt", byteCount: 8))
+            )
+            _ = try await harness.call([
+                "recipients": .string("recipient@example.invalid"),
+                "chat_id": chatID,
+            ])
+            let dispatches = await harness.sender.attachmentSubmissionCount
+            XCTAssertEqual(dispatches, 1, "blank chat_id \(chatID) blocked the recipients path")
+        }
+
+        for recipientsValue: Value in [.string(""), .string("   ")] {
+            let harness = Harness(
+                results: [.success(directChat), .success(directChat)],
+                selection: .success(try makeFile("note.txt", byteCount: 8))
+            )
+            _ = try await harness.call([
+                "recipients": recipientsValue,
+                "chat_id": .string("imcp-chat-v1_synthetic"),
+            ])
+            let dispatches = await harness.sender.attachmentSubmissionCount
+            XCTAssertEqual(
+                dispatches,
+                1,
+                "blank recipients \(recipientsValue) blocked the chat_id path"
+            )
+        }
+
+        // Both blank: no meaningful selector remains, and this must fail before
+        // the picker, confirmation, Automation, or dispatch.
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        await harness.assertFailure(
+            MessageSendError.invalidDestination,
+            arguments: ["recipients": .string("   "), "chat_id": .string("")]
+        )
+        await harness.assertNothingHappened()
     }
 
     func testOneItemArrayRecipientsBehavesIdenticallyToScalar() async throws {

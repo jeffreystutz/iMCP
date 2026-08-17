@@ -728,7 +728,9 @@ final class MessageSendTests: XCTestCase {
                 context: ToolCallContext(elicitation: requester)
             )
         }
-        await assertSendError(.invalidChatIdentifier) {
+        // A blank/whitespace-only chat_id with nothing else supplied is
+        // omission-equivalent, so no meaningful selector remains at all.
+        await assertSendError(.invalidDestination) {
             _ = try await self.sendTool(sender: sender, chatRepository: repository)(
                 ["chat_id": .string("  "), "body": .string("test-body")],
                 context: ToolCallContext(elicitation: requester)
@@ -1033,6 +1035,100 @@ final class MessageSendTests: XCTestCase {
                 context: ToolCallContext(elicitation: requester)
             )
         }
+        // A non-string sole recipients value is supplied malformed input, not an
+        // omission, and fails its own recipient validation.
+        await assertSendError(.invalidRecipient) {
+            _ = try await self.sendTool(sender: sender)(
+                [
+                    "recipients": .int(5),
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        let submissionCount = await sender.chatSubmissionCount
+        XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testBlankOptionalScalarSelectorsAreOmissionEquivalent() async throws {
+        // A blank or whitespace-only scalar selector value — the kind a form
+        // client may submit for an untouched optional field — must not count as
+        // a supplied destination selector.
+        for chatID: Value in [.string(""), .string("   ")] {
+            let sender = RecordingMessagesSender()
+            let requester = StubElicitationRequester(result: confirmedResult)
+            _ = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
+                [
+                    "recipients": .string("one@example.invalid"),
+                    "chat_id": chatID,
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
+            let submissionCount = await sender.chatSubmissionCount
+            XCTAssertEqual(submissionCount, 1, "blank chat_id \(chatID) blocked the recipients path")
+        }
+
+        for recipientsValue: Value in [.string(""), .string("   ")] {
+            let sender = RecordingMessagesSender()
+            let repository = RecordingSendChatRepository(results: [
+                .success(directChat), .success(directChat),
+            ])
+            let requester = StubElicitationRequester(result: confirmedResult)
+            _ = try await sendTool(sender: sender, chatRepository: repository)(
+                [
+                    "recipients": recipientsValue,
+                    "chat_id": .string("imcp-chat-v1_synthetic"),
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
+            let submissionCount = await sender.chatSubmissionCount
+            XCTAssertEqual(
+                submissionCount,
+                1,
+                "blank recipients \(recipientsValue) blocked the chat_id path"
+            )
+        }
+
+        // Both blank: no meaningful selector remains.
+        let sender = RecordingMessagesSender()
+        let requester = StubElicitationRequester(result: confirmedResult)
+        await assertSendError(.invalidDestination) {
+            _ = try await self.sendTool(sender: sender)(
+                [
+                    "recipients": .string("   "),
+                    "chat_id": .string(""),
+                    "body": .string("test-body"),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        XCTAssertEqual(requester.requestCount, 0)
+        let submissionCount = await sender.chatSubmissionCount
+        XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testInspectorShapedBlankChatIdPayloadFailsOnEmptyBodyNotDestination() async throws {
+        // The exact payload MCP Inspector submitted: a valid scalar recipient, an
+        // untouched optional chat_id form field, and an empty body. This must fail
+        // on the body, not invalidDestination, and must never elicit.
+        let sender = RecordingMessagesSender()
+        let requester = StubElicitationRequester(result: confirmedResult)
+        await assertSendError(.emptyBody) {
+            _ = try await self.sendTool(
+                sender: sender,
+                chatRepository: self.matchedDirectRepository()
+            )(
+                [
+                    "recipients": .string("+14158867421"),
+                    "chat_id": .string(""),
+                    "body": .string(""),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        XCTAssertEqual(requester.requestCount, 0)
         let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 0)
     }
