@@ -839,7 +839,18 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                 forRequestedPath: path
             )
             let validator = self.attachmentValidator
-            let facts = try validator.validate(access.fileURL)
+            // The access is acquired before it is known to be valid. If initial
+            // validation throws, the just-acquired security scope must still be
+            // released before the error propagates — a handle whose own `release`
+            // would have done that is never returned on this path, so releasing here
+            // is the only place it can happen.
+            let facts: MessagesAttachmentFacts
+            do {
+                facts = try validator.validate(access.fileURL)
+            } catch {
+                access.release()
+                throw error
+            }
             return ResolvedAttachmentSourceHandle(
                 facts: facts,
                 revalidate: {
@@ -858,7 +869,17 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             let decoded = try decodeSerializedAttachmentContent(contentBase64)
             let staged = try Self.stageSerializedAttachment(decoded, filename: safeFilename)
             let validator = self.attachmentValidator
-            let facts = try validator.validate(staged.fileURL)
+            // Symmetric with the filesystem branch above: the temp file already exists
+            // on disk by this point, so an initial-validation throw must remove it
+            // itself, since no handle whose `release` would have done that is ever
+            // returned on this path.
+            let facts: MessagesAttachmentFacts
+            do {
+                facts = try validator.validate(staged.fileURL)
+            } catch {
+                try? FileManager.default.removeItem(at: staged.temporaryDirectory)
+                throw error
+            }
             return ResolvedAttachmentSourceHandle(
                 facts: facts,
                 revalidate: {

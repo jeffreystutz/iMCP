@@ -123,6 +123,79 @@ final class AllowedFolderGrantStoreTests: XCTestCase {
         }
     }
 
+    // MARK: - Cross-instance synchronization
+
+    /// Production constructs a separate `UserDefaultsAllowedFolderGrantStore` instance for
+    /// Settings and for the send-side resolver, both over the same `UserDefaults` storage.
+    /// `refreshBookmark` only updates an existing row by id; it never re-inserts one. A
+    /// stale-bookmark refresh issued by one instance for a grant another instance already
+    /// removed must therefore stay a no-op, never resurrecting the removed grant.
+    func testStaleRefreshFromOneInstanceCannotResurrectAGrantRemovedByAnother() throws {
+        let sendSideStore = makeStore()
+        let settingsStore = UserDefaultsAllowedFolderGrantStore(
+            defaults: defaults,
+            storageKey: "grants",
+            bookmarkOptions: [.withSecurityScope, .securityScopeAllowOnlyReadAccess]
+        )
+        let folder = try makeDirectory("resurrect-me")
+        let grant = try sendSideStore.addGrant(for: folder)
+
+        settingsStore.removeGrant(id: grant.id)
+        XCTAssertTrue(sendSideStore.listGrants().isEmpty)
+
+        sendSideStore.refreshBookmark(id: grant.id, bookmarkData: grant.bookmarkData)
+
+        XCTAssertTrue(
+            sendSideStore.listGrants().isEmpty,
+            "a stale refresh resurrected a removed grant"
+        )
+        XCTAssertTrue(settingsStore.listGrants().isEmpty)
+    }
+
+    /// Exercises the production cross-instance lock under real concurrent access: many
+    /// adds, issued concurrently from two separate store instances sharing the same
+    /// `UserDefaults` storage, must all be observed in the final persisted state. A
+    /// per-instance (rather than shared `static`) lock would make this flaky under
+    /// contention, since an unsynchronized load-modify-save sequence from one instance can
+    /// silently overwrite a concurrent write from the other.
+    func testConcurrentAddsAcrossTwoInstancesLoseNoGrants() throws {
+        let storeA = makeStore()
+        let storeB = UserDefaultsAllowedFolderGrantStore(
+            defaults: defaults,
+            storageKey: "grants",
+            bookmarkOptions: [.withSecurityScope, .securityScopeAllowOnlyReadAccess]
+        )
+        let folderCount = 24
+        let folders = try (0 ..< folderCount).map { try makeDirectory("concurrent-\($0)") }
+
+        let group = DispatchGroup()
+        let queue = DispatchQueue(label: "test.allowedFolderGrants.concurrent", attributes: .concurrent)
+        for (index, folder) in folders.enumerated() {
+            let store = index.isMultiple(of: 2) ? storeA : storeB
+            group.enter()
+            queue.async {
+                defer { group.leave() }
+                _ = try? store.addGrant(for: folder)
+            }
+        }
+        group.wait()
+
+        let finalGrants = storeA.listGrants()
+        XCTAssertEqual(
+            finalGrants.count,
+            folderCount,
+            "concurrent adds across instances lost or duplicated grants"
+        )
+        let resolvedPaths = Set(
+            finalGrants.compactMap { try? AllowedFolderBookmark.resolve($0.bookmarkData).standardizedFileURL.path }
+        )
+        XCTAssertEqual(
+            resolvedPaths.count,
+            folderCount,
+            "persisted state was corrupted by an interleaved write"
+        )
+    }
+
     // MARK: - Resolver containment
 
     func testFileInsideAnAllowedRootResolves() throws {

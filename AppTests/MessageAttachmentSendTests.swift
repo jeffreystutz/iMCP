@@ -168,6 +168,17 @@ final class MessageAttachmentSendTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? MessagesAttachmentSourceError, .incompleteSerializedSource)
         }
+        // A meaningful filename with a *present but blank* content_base64 is the same
+        // incomplete-source failure as an absent one, not an empty-content serialized
+        // source: the blank scalar is omission-equivalent before completeness is checked,
+        // so this must fail here, before any decoding or staging is even reachable.
+        XCTAssertThrowsError(
+            try resolveAttachmentSource([
+                "filename": .string("empty.txt"), "content_base64": .string(""),
+            ])
+        ) { error in
+            XCTAssertEqual(error as? MessagesAttachmentSourceError, .incompleteSerializedSource)
+        }
     }
 
     func testBlankOptionalSourceControlsAreOmissionEquivalentOnlyForFormSelection() throws {
@@ -522,6 +533,54 @@ final class MessageAttachmentSendTests: XCTestCase {
         XCTAssertEqual(authorizations, 0, "a revoked grant must never reach Automation")
     }
 
+    /// The access is acquired before the file is known to be valid. If the very first
+    /// validation call throws (here, an empty file), the just-acquired security scope
+    /// must still be released rather than leaking, even though no handle carrying a
+    /// `release` closure is ever returned on this path.
+    func testFilesystemInitialValidationFailureReleasesTheAcquiredAccess() async throws {
+        let url = try makeFile("empty.txt", byteCount: 0)
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        await harness.assertAttachmentFailure(
+            .emptyFile,
+            arguments: [
+                "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+            ]
+        )
+        XCTAssertEqual(
+            harness.folderGrantResolver.resolveCount,
+            1,
+            "only the initial resolution should run"
+        )
+        XCTAssertEqual(
+            harness.folderGrantResolver.releaseCount,
+            1,
+            "the security scope acquired for initial validation must be released, not leaked, when validation fails"
+        )
+        XCTAssertEqual(harness.elicitation.requestCount, 0)
+    }
+
+    /// The success path must still release exactly once per resolved access: the
+    /// original access (via the outer `defer` after a successful handle is returned) and
+    /// the short-lived revalidation access (via its own `defer` inside the revalidation
+    /// closure) — never zero, and never more than once each.
+    func testFilesystemSuccessfulHandleReleasesEachResolvedAccessExactlyOnce() async throws {
+        let url = try makeFile("note.txt", byteCount: 8)
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        _ = try await harness.call([
+            "recipients": .string("recipient@example.invalid"), "file_path": .string(url.path),
+        ])
+        XCTAssertEqual(
+            harness.folderGrantResolver.resolveCount,
+            2,
+            "the initial resolution plus one post-confirmation revalidation resolution"
+        )
+        XCTAssertEqual(
+            harness.folderGrantResolver.releaseCount,
+            2,
+            "each of the two resolved accesses must be released exactly once"
+        )
+    }
+
     // MARK: - Serialized source
 
     func testValidSerializedContentMaterializesAndReachesConfirmation() async throws {
@@ -552,10 +611,19 @@ final class MessageAttachmentSendTests: XCTestCase {
         await harness.assertNothingHappened()
     }
 
-    func testEmptyDecodedSerializedFileFails() async throws {
+    /// A blank `content_base64` is omission-equivalent for source-form selection, so a
+    /// meaningful `filename` alongside it is an incomplete serialized source, not a
+    /// serialized source that happens to decode to zero bytes. This must fail before any
+    /// decoding or staging occurs, with `.incompleteSerializedSource`, and with zero
+    /// downstream side effect — never `.emptyFile`, since an empty base64 string is not a
+    /// meaningful serialized content field under the accepted form-compatibility rule.
+    func testMeaningfulFilenameWithBlankContentBase64FailsAsIncompleteSourceWithZeroSideEffects()
+        async throws
+    {
+        let before = stagedSubdirectoryCount()
         let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
-        await harness.assertAttachmentFailure(
-            .emptyFile,
+        await harness.assertSourceFailure(
+            .incompleteSerializedSource,
             arguments: [
                 "recipients": .string("recipient@example.invalid"),
                 "filename": .string("empty.txt"),
@@ -563,6 +631,13 @@ final class MessageAttachmentSendTests: XCTestCase {
             ]
         )
         XCTAssertEqual(harness.elicitation.requestCount, 0)
+        let dispatches = await harness.sender.attachmentSubmissionCount
+        XCTAssertEqual(dispatches, 0)
+        XCTAssertEqual(
+            stagedSubdirectoryCount(),
+            before,
+            "an incomplete source must never stage a temp file"
+        )
     }
 
     func testOversizeDecodedSerializedContentFails() async throws {
@@ -651,15 +726,21 @@ final class MessageAttachmentSendTests: XCTestCase {
         XCTAssertEqual(stagedSubdirectoryCount(), before, "a staged temp directory survived decline")
     }
 
+    /// The source here must actually be complete and nonempty so it reaches staging and
+    /// the normal attachment validator, rather than failing earlier at source-selection
+    /// parsing (which a blank `content_base64` would, and which cannot exercise this
+    /// cleanup path at all — see
+    /// `testMeaningfulFilenameWithBlankContentBase64FailsAsIncompleteSourceWithZeroSideEffects`).
     func testSerializedTempCleanupOccursOnValidationFailure() async throws {
         let before = stagedSubdirectoryCount()
         let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        let content = Data("MZ-fake-executable-bytes".utf8).base64EncodedString()
         await harness.assertAttachmentFailure(
-            .emptyFile,
+            .unsupportedType,
             arguments: [
                 "recipients": .string("recipient@example.invalid"),
-                "filename": .string("empty.txt"),
-                "content_base64": .string(""),
+                "filename": .string("tool.dylib"),
+                "content_base64": .string(content),
             ]
         )
         XCTAssertEqual(
@@ -2037,10 +2118,16 @@ private actor RecordingAttachmentComposer: MessagesNewRecipientComposing {
 private final class StubAllowedFolderGrantResolver: AllowedFolderGrantResolving, @unchecked Sendable {
     private let lock = NSLock()
     private var storedResolveCount = 0
+    /// Every `AllowedFolderFileAccess` this resolver has ever vended wires its `onRelease`
+    /// hook back to this counter, since `MessagesAttachmentAccess.release()` is a silent
+    /// no-op for an unbookmarked test URL and would otherwise make "was `release()` called"
+    /// unobservable — this is what proves the initial-validation-failure resource-leak fix.
+    private var storedReleaseCount = 0
     private var accessResults: [Result<Void, Error>]
     private let eventLog: AttachmentEventLog?
 
     var resolveCount: Int { lock.withLock { storedResolveCount } }
+    var releaseCount: Int { lock.withLock { storedReleaseCount } }
 
     init(accessResults: [Result<Void, Error>], eventLog: AttachmentEventLog?) {
         self.accessResults = accessResults
@@ -2057,7 +2144,13 @@ private final class StubAllowedFolderGrantResolver: AllowedFolderGrantResolving,
         eventLog?.record("source-resolve")
         try outcome.get()
         let url = URL(fileURLWithPath: path)
-        return AllowedFolderFileAccess(fileURL: url, rootAccess: MessagesAttachmentAccess(url: url))
+        return AllowedFolderFileAccess(
+            fileURL: url,
+            rootAccess: MessagesAttachmentAccess(url: url),
+            onRelease: { [weak self] in
+                self?.lock.withLock { self?.storedReleaseCount += 1 }
+            }
+        )
     }
 }
 

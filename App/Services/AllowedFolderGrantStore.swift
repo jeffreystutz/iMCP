@@ -75,9 +75,22 @@ protocol AllowedFolderGrantStoring: Sendable {
 /// conform to `Sendable` at this SDK version, so this class opts out of automatic checking
 /// rather than storing no reference to it at all (unlike `MessagesSendingMode.load(from:)`,
 /// this store's dedup/replace operations need the same instance across calls).
+///
+/// `UserDefaults` being thread-safe does not make a load-modify-save sequence atomic, and
+/// production creates more than one instance of this class over the same storage (Settings
+/// and the send-side resolver each construct their own). Every public operation is therefore
+/// a full transaction under one `static` lock shared by every instance, so a stale-bookmark
+/// refresh from one instance can never interleave with, and silently undo, a remove or
+/// replace from another. `unlockedLoadStored`/`unlockedSave` exist only to be called from
+/// inside an already-held lock, so no operation here ever locks recursively.
 final class UserDefaultsAllowedFolderGrantStore: AllowedFolderGrantStoring, @unchecked Sendable {
 
     static let defaultStorageKey = "me.mattt.iMCP.messagesAttachmentAllowedFolders.v1"
+
+    /// Shared across every instance, not per-instance: two separately constructed stores
+    /// over the same (or even different) storage key must still serialize against each
+    /// other, since they may share the same underlying `UserDefaults` domain.
+    private static let lock = NSLock()
 
     private struct StoredGrant: Codable {
         let id: UUID
@@ -101,65 +114,75 @@ final class UserDefaultsAllowedFolderGrantStore: AllowedFolderGrantStoring, @unc
     }
 
     func listGrants() -> [AllowedFolderGrant] {
-        loadStored().map(Self.grant(from:))
+        Self.lock.withLock {
+            unlockedLoadStored().map(Self.grant(from:))
+        }
     }
 
     @discardableResult
     func addGrant(for url: URL) throws -> AllowedFolderGrant {
         let standardizedNewPath = url.standardizedFileURL.path
-        var stored = loadStored()
+        return try Self.lock.withLock {
+            var stored = unlockedLoadStored()
 
-        if let existing = stored.first(where: { candidate in
-            guard let resolvedURL = try? AllowedFolderBookmark.resolve(candidate.bookmarkData)
-            else { return false }
-            return resolvedURL.standardizedFileURL.path == standardizedNewPath
-        }) {
-            return Self.grant(from: existing)
+            if let existing = stored.first(where: { candidate in
+                guard let resolvedURL = try? AllowedFolderBookmark.resolve(candidate.bookmarkData)
+                else { return false }
+                return resolvedURL.standardizedFileURL.path == standardizedNewPath
+            }) {
+                return Self.grant(from: existing)
+            }
+
+            let bookmarkData = try Self.makeBookmark(for: url, options: bookmarkOptions)
+            let record = StoredGrant(
+                id: UUID(),
+                displayName: url.lastPathComponent,
+                bookmarkData: bookmarkData
+            )
+            stored.append(record)
+            unlockedSave(stored)
+            return Self.grant(from: record)
         }
-
-        let bookmarkData = try Self.makeBookmark(for: url, options: bookmarkOptions)
-        let record = StoredGrant(
-            id: UUID(),
-            displayName: url.lastPathComponent,
-            bookmarkData: bookmarkData
-        )
-        stored.append(record)
-        save(stored)
-        return Self.grant(from: record)
     }
 
     func removeGrant(id: UUID) {
-        var stored = loadStored()
-        stored.removeAll { $0.id == id }
-        save(stored)
+        Self.lock.withLock {
+            var stored = unlockedLoadStored()
+            stored.removeAll { $0.id == id }
+            unlockedSave(stored)
+        }
     }
 
     @discardableResult
     func replaceGrant(id: UUID, with url: URL) throws -> AllowedFolderGrant {
-        var stored = loadStored()
-        guard let index = stored.firstIndex(where: { $0.id == id }) else {
-            throw AllowedFolderGrantError.grantNotFound
+        try Self.lock.withLock {
+            var stored = unlockedLoadStored()
+            guard let index = stored.firstIndex(where: { $0.id == id }) else {
+                throw AllowedFolderGrantError.grantNotFound
+            }
+            let bookmarkData = try Self.makeBookmark(for: url, options: bookmarkOptions)
+            let record = StoredGrant(
+                id: id,
+                displayName: url.lastPathComponent,
+                bookmarkData: bookmarkData
+            )
+            stored[index] = record
+            unlockedSave(stored)
+            return Self.grant(from: record)
         }
-        let bookmarkData = try Self.makeBookmark(for: url, options: bookmarkOptions)
-        let record = StoredGrant(
-            id: id,
-            displayName: url.lastPathComponent,
-            bookmarkData: bookmarkData
-        )
-        stored[index] = record
-        save(stored)
-        return Self.grant(from: record)
     }
 
     func refreshBookmark(id: UUID, bookmarkData: Data) {
-        var stored = loadStored()
-        guard let index = stored.firstIndex(where: { $0.id == id }) else { return }
-        stored[index] = StoredGrant(
-            id: id,
-            displayName: stored[index].displayName,
-            bookmarkData: bookmarkData
-        )
-        save(stored)
+        Self.lock.withLock {
+            var stored = unlockedLoadStored()
+            guard let index = stored.firstIndex(where: { $0.id == id }) else { return }
+            stored[index] = StoredGrant(
+                id: id,
+                displayName: stored[index].displayName,
+                bookmarkData: bookmarkData
+            )
+            unlockedSave(stored)
+        }
     }
 
     private static func makeBookmark(
@@ -185,12 +208,14 @@ final class UserDefaultsAllowedFolderGrantStore: AllowedFolderGrantStoring, @unc
         )
     }
 
-    private func loadStored() -> [StoredGrant] {
+    /// Must only be called while `Self.lock` is held.
+    private func unlockedLoadStored() -> [StoredGrant] {
         guard let data = defaults.data(forKey: storageKey) else { return [] }
         return (try? JSONDecoder().decode([StoredGrant].self, from: data)) ?? []
     }
 
-    private func save(_ grants: [StoredGrant]) {
+    /// Must only be called while `Self.lock` is held.
+    private func unlockedSave(_ grants: [StoredGrant]) {
         guard let data = try? JSONEncoder().encode(grants) else { return }
         defaults.set(data, forKey: storageKey)
     }
@@ -226,14 +251,24 @@ enum AllowedFolderBookmark {
 struct AllowedFolderFileAccess: Sendable {
     let fileURL: URL
     private let rootAccess: MessagesAttachmentAccess
+    /// Test seam only: production never supplies this. `MessagesAttachmentAccess.release()`
+    /// is a silent no-op for an unbookmarked URL (the common case in tests), which makes
+    /// "was `release()` actually called" otherwise unobservable from outside this type.
+    private let onRelease: (@Sendable () -> Void)?
 
-    init(fileURL: URL, rootAccess: MessagesAttachmentAccess) {
+    init(
+        fileURL: URL,
+        rootAccess: MessagesAttachmentAccess,
+        onRelease: (@Sendable () -> Void)? = nil
+    ) {
         self.fileURL = fileURL
         self.rootAccess = rootAccess
+        self.onRelease = onRelease
     }
 
     func release() {
         rootAccess.release()
+        onRelease?()
     }
 }
 
