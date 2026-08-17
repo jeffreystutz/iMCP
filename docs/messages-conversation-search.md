@@ -23,7 +23,8 @@ Four responsibilities stay separate:
 3. **The LLM interprets.** It combines contact candidates, conversation
    evidence, and conversational context to decide who was meant and which
    contact method to use, and asks the user when that stays ambiguous.
-4. **`messages_send` acts** on one exact destination.
+4. **`message_send_text`/`message_send_attachment` act** on one exact
+   destination each.
 
 Conversation evidence is not proof of identity. The only same-name contact with
 an open thread is not automatically the intended person, and this tool
@@ -99,8 +100,9 @@ Each result carries:
 ### Lookup completeness
 
 `lookupCompleteness` is a read-data-quality concept. It is unrelated to the
-internal unique/none/ambiguous/incomplete states `messages_send` uses to decide
-whether a send is safe, and it must not be read as a send decision.
+internal unique/none/ambiguous/incomplete states `message_send_text` and
+`message_send_attachment` use to decide whether a send is safe, and it must
+not be read as a send decision.
 
 - `complete`: every stored participant identity relevant to this handle was
   exactly comparable. `complete` with `conversations: []` means no conversation
@@ -128,9 +130,10 @@ was returned while uncertain matches may remain.
 
 Deliberately smaller than a `messages_list_chats` record:
 
-- `chatId`: the opaque public chat identifier, the same value `messages_send`
-  accepts. No raw chat GUID, `chat_identifier`, room name, group ID, or SQLite
-  ROWID is exposed.
+- `chatId`: the opaque public chat identifier, the same value
+  `message_send_text` and `message_send_attachment` both accept as `chat_id`.
+  No raw chat GUID, `chat_identifier`, room name, group ID, or SQLite ROWID is
+  exposed.
 - `kind`: `direct` or `group`, from the same normalized-identity rule the
   conversation index uses.
 - `displayName`: the conversation's stored name, or the index's synthesized
@@ -150,7 +153,7 @@ within the per-handle limit, and group participants come back so the context is
 legible. That a candidate shares a group with someone does **not** mean a later
 request to message that candidate should target the group. The tool selects no
 destination; a caller that wants to send still supplies one exact destination to
-`messages_send`.
+`message_send_text` or `message_send_attachment`.
 
 ## Ordering
 

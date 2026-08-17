@@ -20,6 +20,15 @@ forward explicitly by ADR 0011. This record's own "Runtime wiring" section
 tool it originally described and is superseded only insofar as that tool no
 longer exists as a separate public entry point.
 
+**Note (ADR 0012).** ADR 0011 was itself superseded before manual
+acceptance: the user reversed its unified-tool design and restored a
+separate attachment tool, now named `message_send_attachment`, under ADR
+0012. This record's supersession chain is left exactly as above — it
+accurately records that ADR 0011 superseded this record's public-tool-surface
+decision — rather than rewritten to point at ADR 0012 directly. ADR 0012
+independently carries forward this record's full security/validation
+contract for the restored `message_send_attachment` tool.
+
 ## Context
 
 **Amended by ADR 0010 (accepted).** This record originally required one

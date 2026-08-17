@@ -9,16 +9,18 @@
 Accepted on 2026-08-16 after the user's manual Settings UX acceptance of the
 binary `MessagesSendingMode` model (Ask Before Sending / Send Automatically)
 described below. Runtime wiring for existing-conversation plain-text sends
-honored this policy first, then picker-based attachment sends; both now live
-behind the single, consolidated public `messages_send` tool (ADR 0011),
-which routes internally to the same two pipelines described here — see the
-"Runtime wiring" section near the end of this record and ADR 0009's own
-"Runtime wiring" section for the pipeline-level history predating that
-consolidation. The native picker remains mandatory for attachments in both
-modes, so attachment sending is not fully unattended even under Send
-Automatically. Verified-new-recipient
-sending, for both text and attachments, remains human-completed regardless of
-the selected mode.
+honored this policy first, then picker-based attachment sends. Those two
+pipelines briefly lived behind one consolidated public `messages_send` tool
+(ADR 0011), which was implemented and code-reviewed but never manually
+accepted before the user reversed that consolidation; they now live behind
+the two public tools `message_send_text` and `message_send_attachment` (ADR
+0012), each routing to the same pipeline described here — see the "Runtime
+wiring" section near the end of this record and ADR 0009's own "Runtime
+wiring" section for the pipeline-level history predating both the
+consolidation and its reversal. The native picker remains mandatory for
+attachments in both modes, so attachment sending is not fully unattended
+even under Send Automatically. Verified-new-recipient sending, for both text
+and attachments, remains human-completed regardless of the selected mode.
 
 ## Context
 
@@ -286,19 +288,29 @@ verification, and the single dispatch remain shared, unconditional code after
 the branch, exactly as for text. See ADR 0009's "Runtime wiring" section for
 the full record of that slice.
 
-A third, later slice (ADR 0011) consolidated the two public tools those
-paragraphs describe into one public `messages_send` tool routing internally to
-`sendText`/`sendAttachment`. Neither pipeline's Sending-mode behavior changed:
-`sendingMode` is still read live per call, the authorization branch still sits
-in exactly the same place in each pipeline, and both remain reachable only
-through the unified tool's `body`/`attachment` payload selection rather than
-through separate tool names.
+A third, later slice (ADR 0011) briefly consolidated the two public tools
+those paragraphs describe into one public `messages_send` tool routing
+internally to `sendText`/`sendAttachment`. Neither pipeline's Sending-mode
+behavior changed while that design stood: `sendingMode` was still read live
+per call and the authorization branch still sat in exactly the same place in
+each pipeline. That consolidation was implemented and code-reviewed but
+never manually accepted; the user reversed it before the runtime checkpoint.
 
-`messages_send`'s public description and its `recipient` parameter description
-were updated so they no longer promise confirmation for every existing-chat
-send; they now state that whether confirmation happens follows the user's
+A fourth, later slice (ADR 0012) restored two public tools,
+`message_send_text` and `message_send_attachment`, each again calling
+exactly one of `sendText`/`sendAttachment` directly. This restoration did not
+touch Sending-mode behavior either: `sendingMode` remains read live per call,
+the authorization branch remains in the same place in each pipeline, and
+both tools remain gated by the same app-owned setting, now reached through
+two tool names instead of one shared payload selection.
+
+`message_send_text`'s public description and its `recipient` parameter
+description state that whether confirmation happens follows the user's
 Sending mode setting, which no caller can choose or override, and that the
 new-recipient compose route is unaffected by that setting.
+`message_send_attachment`'s public description states the same for the
+attachment path, and additionally that the native picker always runs
+regardless of mode.
 
 ## References
 
@@ -306,8 +318,9 @@ new-recipient compose route is unaffected by that setting.
   bypass for eligible existing-conversation sends, reconciled there to reflect
   this acceptance
 - ADR 0006, for the human-completed new-recipient path this mode does not cover
-- ADR 0009, for the existing-conversation attachment path this mode does not
-  yet apply to
+- ADR 0009, for the existing-conversation attachment path and its still-binding
+  security/validation contract, which this mode's authorization branch sits
+  inside without altering
 - `App/Services/MessagesSendConfirmation.swift`, for the independent
   presentation-mode setting this mode does not replace, and for the `automatic`
   case whose UI label this correction changed to "Best available" without

@@ -13,9 +13,9 @@ semantics over `MessagesHandleIdentity`: every requested identity must be presen
 additional conversation participants are allowed, and `kind` composes with the
 same complete bounded-page scan.
 
-Attachment submission to an existing conversation is implemented as the
-`attachment` payload of the unified `messages_send` tool (ADR 0011), with a
-native file picker instead of any path-bearing argument.
+Attachment submission to an existing conversation is implemented as its own
+public tool, `message_send_attachment` (ADR 0009, carried forward by ADR
+0012), with a native file picker instead of any path-bearing argument.
 
 Contact search and conversation search now sit behind reusable domain operations
 with thin MCP adapters, and `messages_find_conversations` returns per-handle
@@ -26,16 +26,20 @@ while both the Contacts and Messages services are enabled.
 A global, binary Messages sending mode (Ask Before Sending / Send Automatically)
 and its Settings UI are implemented and manually accepted (ADR 0010, now
 Accepted), replacing an earlier four-category design that failed manual UX
-acceptance. Existing-conversation plain-text `messages_send` honors this mode
-and passed its own real-runtime manual checkpoint; the picker-based
-`attachment` payload now honors it too, pending its own manual checkpoint.
-Verified-new-recipient composition remains unaffected by the mode in either
-payload. The former standalone `messages_send_attachment` tool has since been
-consolidated into `messages_send` as a mutually exclusive `attachment`
-payload alongside `body` (ADR 0011); the picker-attachment manual checkpoint
-carries forward against the unified tool rather than the removed standalone
-one. See "Automatic-send authorization policy" and "Attachment submission"
-below.
+acceptance. Existing-conversation plain-text sending honors this mode and
+passed its own real-runtime manual checkpoint; picker-based attachment
+sending now honors it too, pending its own manual checkpoint.
+Verified-new-recipient composition remains unaffected by the mode for either
+tool.
+
+The public Messages send surface briefly became one unified `messages_send`
+tool (ADR 0011), implemented and code-reviewed but never manually accepted;
+the user reversed that design before the runtime checkpoint. The public send
+surface is now, and is intended to remain, exactly two tools:
+`message_send_text` and `message_send_attachment` (ADR 0012). The deferred
+picker-attachment manual checkpoint carries forward against
+`message_send_attachment`. See "Automatic-send authorization policy" and
+"Attachment submission" below.
 
 ## Verified baseline
 
@@ -150,9 +154,9 @@ and no account, chat, participant, contact, or history enumeration occurred.
 
 ## Hybrid routing
 
-`messages_send` has two deliberately different routes, chosen by destination
-resolution before any authorization, with **no automatic fallback in either
-direction**.
+`message_send_text` has two deliberately different routes, chosen by
+destination resolution before any authorization, with **no automatic
+fallback in either direction**.
 
 **Existing conversation — semantic programmatic send.** Resolve the destination
 in the Messages database, present the immutable iMCP confirmation of the exact
@@ -195,7 +199,7 @@ The underlying error is sanitized in every case.
 
 ## First send behavior
 
-`messages_send` initially accepts plain text and one exact canonical
+`message_send_text` initially accepts plain text and one exact canonical
 E.164-style phone handle or syntactically valid email handle.
 
 The tool:
@@ -331,9 +335,10 @@ and Proposed ADR 0005 for the current schema, field, aggregate, performance,
 availability, privacy, and identifier semantics.
 
 The selected tool name is `messages_list_chats`, following the existing
-`messages_fetch` and `messages_send` service prefix. It performs only a
-read-only SQLite query and does not invoke Apple Events, launch Messages, or
-change any send behavior.
+`messages_fetch` read-side service prefix (the send-side tools instead use
+the singular `message_send_*` naming settled by ADR 0012). It performs only
+a read-only SQLite query and does not invoke Apple Events, launch Messages,
+or change any send behavior.
 
 Input schema:
 
@@ -405,7 +410,8 @@ unavailable and requests the permission when invoked.
 
 Discovery keeps four responsibilities apart: Contacts finds people, Messages
 finds conversations, the LLM interprets identity and destination, and
-`messages_send` acts on one exact destination. An earlier
+`message_send_text`/`message_send_attachment` act on one exact destination
+each. An earlier
 `messages_match_recipients` proposal, which would have published the send
 matcher's `unique` / `none` / `ambiguous` / `incomplete` states as the discovery
 model, was superseded before implementation; those remain private send-safety
@@ -455,28 +461,30 @@ The remaining discovery question is the separate Contacts-side one below.
 
 ## Attachment submission
 
-`messages_send`'s `attachment` payload submits exactly one file to one exact
-**existing** conversation. It was originally shipped as a separate tool,
-`messages_send_attachment`, not an option on `messages_send`; ADR 0011
-consolidated it into the same public `messages_send` tool as a mutually
-exclusive `attachment` payload alongside `body`, without changing the
-pipeline described in this section. See Proposed ADR 0009 for the original
-attachment-handling decision and Accepted ADR 0011 for the consolidation.
+`message_send_attachment` submits exactly one file to one exact **existing**
+conversation. It is a separate public tool from `message_send_text`, not an
+option on it. It shipped first as `messages_send_attachment` (ADR 0009); ADR
+0011 briefly folded it into a unified `messages_send` tool as an `attachment`
+payload, and ADR 0012 restored it as its own tool under its current name,
+`message_send_attachment`, without changing the pipeline described in this
+section at any point in that history. See Proposed ADR 0009 for the original
+attachment-handling decision and Accepted ADR 0012 for the current
+two-tool public API.
 
-A single dispatch still carries only a file or only text, never both. The
+A single dispatch carries only a file or only text, never both. The
 installed `/System/Applications/Messages.app/Contents/Resources/Messages.sdef`
 documents `send` with a single direct parameter typed as either `file` or
 `text`, so a file plus a caption would be two dispatches for one approval and
 would break the one-dispatch invariant. A caption is therefore its own
-`messages_send` call with a `body` payload and its own confirmation.
+`message_send_text` call with its own confirmation.
 
 Scope of this slice:
 
 - exactly one attachment, no caption or body, no multiple files;
 - existing conversations only, addressed by `recipient`, `recipients`, or
   `chat_id` — the same mutually exclusive selectors, resolution, ambiguity,
-  staleness, and addressability semantics as `messages_send`, sharing the same
-  code rather than a parallel implementation;
+  staleness, and addressability semantics as `message_send_text`, sharing the
+  same code rather than a parallel implementation;
 - a recipient *verified* to have no existing conversation fails categorically; it
   does not fall through to `NSSharingService`, which cannot address a chosen
   existing chat. Verified-new-recipient attachment composition stays deferred.
@@ -584,8 +592,8 @@ ADR 0010 is now `Accepted`.
 
 ### Runtime wiring for existing-conversation text sends
 
-Following manual acceptance, existing-conversation plain-text `messages_send`
-now honors `MessagesSendingMode`. `MessageService` gained an injected
+Following manual acceptance, existing-conversation plain-text sending now
+honors `MessagesSendingMode`. `MessageService` gained an injected
 `sendingMode: @Sendable () -> MessagesSendingMode` closure defaulting to
 `MessagesSendingMode.load()`, evaluated fresh on every call rather than
 snapshotted at service construction, so a Settings change takes effect on the
@@ -600,11 +608,13 @@ result — unconditionally, for both modes. There is no second dispatch path.
 Verified-new-recipient composition returns before the mode is ever consulted,
 so it is unaffected.
 
-`messages_send`'s public description and its `recipient` parameter description
+The text tool's public description and its `recipient` parameter description
 were updated to stop promising confirmation for every existing-chat send; they
 now explain that whether confirmation happens follows the user's Sending mode
 setting, which no caller can choose or override. The tool's input schema is
-unchanged — no mode/automatic/confirmation-bypass argument was added.
+unchanged — no mode/automatic/confirmation-bypass argument was added. (This
+tool was named `messages_send` at the time of this wiring slice; ADR 0012
+later renamed it `message_send_text` without changing this behavior.)
 
 ADR 0002's "confirmation for every submission, no opt-out" language is
 reconciled in place (not superseded wholesale) to describe this accepted
@@ -629,22 +639,25 @@ attachment rejection happens before the picker is ever presented and is
 unaffected by the mode.
 
 The public description of that attachment path was updated the same way as
-`messages_send`'s text path: it no longer promises confirmation
-unconditionally, and now explains that whether confirmation happens follows
-the Sending mode setting while the native picker itself always runs. ADR
-0009's "confirmation for every attachment submission" language is reconciled
-in place (not superseded) the same way ADR 0002's was, for the same accepted
-exception. See ADR 0009 and ADR 0010 for the full record.
+the text path: it no longer promises confirmation unconditionally, and now
+explains that whether confirmation happens follows the Sending mode setting
+while the native picker itself always runs. ADR 0009's "confirmation for
+every attachment submission" language is reconciled in place (not
+superseded) the same way ADR 0002's was, for the same accepted exception.
+See ADR 0009 and ADR 0010 for the full record.
 
-Later the same day, ADR 0011 consolidated the then-separate
+Later the same day, ADR 0011 briefly consolidated the then-separate
 `messages_send_attachment` tool into `messages_send`'s `attachment` payload.
 That consolidation did not touch this Sending-mode wiring: the authorization
 branch, the unconditional picker, and every invariant above carried forward
-unchanged onto the unified tool's attachment path. The picker-attachment
-manual acceptance checkpoint deferred at the end of this wiring slice remains
-outstanding and now applies to `messages_send` with an `attachment` payload.
-See ADR 0011 and "Attachment submission" above for the unified tool's full
-schema and behavior.
+unchanged onto the unified tool's attachment path. It was implemented and
+code-reviewed but never manually accepted; the user reversed it before the
+runtime checkpoint. ADR 0012 then restored a separate attachment tool under
+its current name, `message_send_attachment`, again without touching any of
+this Sending-mode wiring. The picker-attachment manual acceptance checkpoint
+deferred at the end of this wiring slice remains outstanding and now applies
+to `message_send_attachment`. See ADR 0012 and "Attachment submission" above
+for the current tool's full schema and behavior.
 
 ## Reference implementation
 

@@ -1149,7 +1149,7 @@ final class MessagesChatListingTests: XCTestCase {
         )
         let list = try XCTUnwrap(service.tools.first { $0.name == "messages_list_chats" })
         let fetch = try XCTUnwrap(service.tools.first { $0.name == "messages_fetch" })
-        let send = try XCTUnwrap(service.tools.first { $0.name == "messages_send" })
+        let send = try XCTUnwrap(service.tools.first { $0.name == "message_send_text" })
         XCTAssertEqual(list.annotations.readOnlyHint, true)
         XCTAssertEqual(fetch.annotations.readOnlyHint, true)
         XCTAssertEqual(send.annotations.readOnlyHint, false)
@@ -1175,11 +1175,9 @@ final class MessagesChatListingTests: XCTestCase {
         )
         XCTAssertEqual(
             Set((sendSchema["properties"] as? [String: Any] ?? [:]).keys),
-            Set(["recipient", "recipients", "chat_id", "body", "attachment"])
+            Set(["recipient", "recipients", "chat_id", "body"])
         )
-        // Neither payload is required at the top level: exactly-one-of body/attachment
-        // is enforced in code, not by JSON Schema `required`.
-        XCTAssertNil(sendSchema["required"])
+        XCTAssertEqual(sendSchema["required"] as? [String], ["body"])
     }
 
     func testMessagesFetchLimitIsBoundedAndInvalidValuesAreRejected() throws {

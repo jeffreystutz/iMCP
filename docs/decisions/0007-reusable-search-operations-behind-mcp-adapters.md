@@ -21,8 +21,9 @@ conversation, but reads as "this is unambiguously the right person".
 ## Decision
 
 Four responsibilities stay separate. Contacts finds people, Messages finds
-conversations, the LLM interprets identity and destination, and `messages_send`
-acts on one exact destination.
+conversations, the LLM interprets identity and destination, and
+`message_send_text`/`message_send_attachment` act on one exact destination
+each.
 
 Business logic moves behind reusable domain operations, with MCP tools as thin
 adapters over them:
@@ -137,7 +138,7 @@ declares no dependency is gated exactly as it was before.
   exact identity was available to look up, and the tool description says so.
 - Group evidence could be mistaken for a group destination. Groups are returned
   with their participants and no destination is selected; sending still requires
-  an exact destination supplied to `messages_send`.
+  an exact destination supplied to `message_send_text` or `message_send_attachment`.
 
 ## Validation
 

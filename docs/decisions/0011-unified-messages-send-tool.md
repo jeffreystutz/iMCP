@@ -1,10 +1,22 @@
 # ADR 0011: Unified `messages_send` tool for text and picker attachments
 
-- Status: Accepted
+- Status: Superseded
 - Date: 2026-08-16
 - Deciders: iMCP maintainers
 - Supersedes: ADR 0009 (its public-API decision only; see "What this does not change")
-- Superseded by:
+- Superseded by: ADR 0012
+
+**Superseded by ADR 0012.** This record's unified `messages_send` tool was
+implemented and passed supervising structural/code review plus full
+automated verification, but it was **never manually accepted**: before the
+human runtime checkpoint for this design, the user explicitly reversed the
+decision and restored two public tools, `message_send_text` and
+`message_send_attachment`, under ADR 0012. Every security/validation
+boundary this record carried forward from ADR 0009, and every Sending-mode
+behavior it carried forward from ADR 0010, remains unchanged and is
+independently carried forward again by ADR 0012 — this supersession is a
+public-API-surface reversal, not a reopening of any safety or privacy
+invariant.
 
 ## Context
 

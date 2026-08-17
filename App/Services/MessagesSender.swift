@@ -50,10 +50,9 @@ protocol MessagesSending: Sendable {
 
 enum MessageSendError: LocalizedError, Sendable {
     case missingInput
+    case inputDeclined
+    case inputCancelled
     case inputMalformed
-    case missingSendPayload
-    case conflictingSendPayload
-    case invalidAttachmentPayload
     case invalidRecipient
     case invalidDestination
     case insufficientGroupParticipants
@@ -81,17 +80,12 @@ enum MessageSendError: LocalizedError, Sendable {
         switch self {
         case .missingInput:
             return "A recipient and non-empty message body are required."
+        case .inputDeclined:
+            return "Required message information was declined."
+        case .inputCancelled:
+            return "Required message information was cancelled."
         case .inputMalformed:
             return "Required message information was missing or malformed."
-        case .missingSendPayload:
-            return
-                "Exactly one of body or attachment is required. Nothing was sent."
-        case .conflictingSendPayload:
-            return
-                "Provide only one of body or attachment, not both. Nothing was sent."
-        case .invalidAttachmentPayload:
-            return
-                "The attachment payload must be exactly {\"source\": \"picker\"}, the only currently supported source. Nothing was sent."
         case .invalidRecipient:
             return "The recipient must be one exact E.164 phone number or email address."
         case .invalidDestination:

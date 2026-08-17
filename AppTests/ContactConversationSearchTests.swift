@@ -596,7 +596,7 @@ final class ContactConversationSearchTests: XCTestCase {
             messagesOnly.map(\.name),
             [
                 "messages_list_chats", "messages_find_conversations", "messages_fetch",
-                "messages_send",
+                "message_send_text", "message_send_attachment",
             ]
         )
 
@@ -707,7 +707,7 @@ final class ContactConversationSearchTests: XCTestCase {
         XCTAssertEqual(listChats.annotations.title, "List Messages Conversations")
         XCTAssertEqual(listChats.annotations.readOnlyHint, true)
 
-        let send = try XCTUnwrap(tools.first { $0.name == "messages_send" })
+        let send = try XCTUnwrap(tools.first { $0.name == "message_send_text" })
         XCTAssertEqual(send.annotations.title, "Send Message")
         XCTAssertEqual(send.annotations.readOnlyHint, false)
         XCTAssertEqual(send.annotations.destructiveHint, false)

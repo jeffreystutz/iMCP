@@ -259,3 +259,15 @@ Supervising review of the exact pushed head on `feat/messages-write-foundation`,
 then the unified manual checkpoint above under the user's own explicit,
 separate authorization for any real send. No further implementation is
 expected until that review and checkpoint complete.
+
+**Update:** the unified `messages_send` tool this report describes was
+implemented and passed supervising code review and full automated
+verification, but it was **never manually accepted**: before the human
+runtime checkpoint above was performed, the user explicitly reversed the
+consolidation decision (ADR 0011 marked Superseded). The public Messages
+send surface is now split again, under new names,
+`message_send_text`/`message_send_attachment` (ADR 0012, Accepted). This
+report's evidence above is unchanged and still accurately describes the
+unified tool as it existed at this slice's pushed head; see
+`docs/project-reports/split-messages-send-tools-2026-08-16.md` for the
+correction's full record.

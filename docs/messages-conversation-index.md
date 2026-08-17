@@ -199,9 +199,10 @@ macOS reboots, and database migrations remains unverified and is not promised.
 Raw row IDs are internal batching keys and are never returned.
 
 Chat IDs identify conversations. `messageGuid` identifies a message record;
-neither is authorization for a side effect. `messages_send` validates and
-resolves a chat ID before confirmation and again immediately before its
-separately authorized existing-chat submission. It may also resolve one raw
+neither is authorization for a side effect. `message_send_text` and
+`message_send_attachment` each validate and resolve a chat ID before
+confirmation and again immediately before their separately authorized
+existing-chat submission. Either may also resolve one raw
 handle to an exact direct membership or an unordered complete handle set to an
 exact group membership. These comparisons use a stricter rule than listing identity: only a
 verified E.164 value or a syntactically valid lowercased email may be matched,
