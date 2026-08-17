@@ -6,7 +6,9 @@ import XCTest
 
 @testable import iMCP
 
-/// Coverage for `messages_send_attachment`.
+/// Coverage for the picker attachment payload of the unified `messages_send` tool
+/// (`attachment: {"source": "picker"}`), formerly the standalone `messages_send_attachment`
+/// tool.
 ///
 /// Every value here is synthetic. No real contact, conversation, message, or personal
 /// file is referenced, and nothing in this suite performs a real Apple Event, presents
@@ -29,76 +31,34 @@ final class MessageAttachmentSendTests: XCTestCase {
 
     // MARK: - Public surface
 
-    func testToolAdvertisesAttachmentOnlyExistingConversationSemantics() throws {
-        let tool = try attachmentTool()
+    /// The public tool surface after consolidation: exactly one send-capable tool, and
+    /// its description still carries the attachment-specific guarantees the previously
+    /// separate `messages_send_attachment` advertised. Schema-shape and payload-routing
+    /// coverage now lives in `MessageSendTests`, which owns the unified tool; this suite
+    /// keeps only attachment-pipeline behavior.
+    func testUnifiedToolAdvertisesAttachmentGuaranteesAndNoSeparateAttachmentToolExists()
+        throws
+    {
+        let service = MessageService(sender: RecordingAttachmentSender())
+        XCTAssertNil(
+            service.tools.first { $0.name == "messages_send_attachment" },
+            "the standalone attachment tool must no longer be advertised"
+        )
+        let tool = try XCTUnwrap(service.tools.first { $0.name == "messages_send" })
 
-        XCTAssertEqual(tool.annotations.title, "Send Messages Attachment")
+        XCTAssertEqual(tool.annotations.title, "Send Message")
         XCTAssertEqual(tool.annotations.readOnlyHint, false)
         XCTAssertEqual(tool.annotations.destructiveHint, false)
         XCTAssertEqual(tool.annotations.idempotentHint, false)
         XCTAssertEqual(tool.annotations.openWorldHint, true)
 
         let description = tool.description.lowercased()
-        XCTAssertTrue(description.contains("exactly one file"))
-        XCTAssertTrue(description.contains("existing messages conversation"))
-        XCTAssertTrue(description.contains("no file path"))
         XCTAssertTrue(description.contains("native file picker"))
         XCTAssertTrue(description.contains("25 mib"))
-        XCTAssertTrue(description.contains("caption"))
-        XCTAssertTrue(description.contains("sends no message text"))
+        XCTAssertTrue(description.contains("never carries a caption"))
         // Submission is never described as delivery.
         XCTAssertTrue(description.contains("never that it was delivered"))
         XCTAssertFalse(description.contains("delivers"))
-    }
-
-    func testSchemaAcceptsOnlyDestinationSelectorsAndNoFileOrBodyParameter() throws {
-        let tool = try attachmentTool()
-        let encoded = try JSONEncoder().encode(tool.inputSchema)
-        let schema = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
-        )
-        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
-
-        XCTAssertEqual(Set(properties.keys), ["recipient", "recipients", "chat_id"])
-        XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
-        // Nothing is required at the schema level: exactly-one-of is enforced in code.
-        XCTAssertNil(schema["required"])
-
-        // No file or message input may exist on this tool in any spelling, and no
-        // caller-facing sending-mode/confirmation-bypass argument may exist either: the
-        // global Sending mode is app-owned and unreachable from any MCP argument.
-        let schemaText = try XCTUnwrap(String(data: encoded, encoding: .utf8)).lowercased()
-        for forbidden in [
-            "\"path\"", "\"file\"", "\"file_path\"", "\"filepath\"", "\"url\"", "\"body\"",
-            "\"text\"", "\"caption\"", "\"filename\"", "\"file_name\"", "\"bytes\"", "\"data\"",
-            "\"attachment\"", "\"attachment_id\"", "\"content\"", "\"mime_type\"", "\"uti\"",
-            "\"mode\"", "\"sending_mode\"", "\"automatic\"", "\"bypass\"", "\"confirm\"",
-            "\"confirmation\"",
-        ] {
-            XCTAssertFalse(
-                schemaText.contains(forbidden),
-                "the attachment schema exposes \(forbidden)"
-            )
-        }
-    }
-
-    func testMessagesSendRemainsSeparateAndTextOnly() throws {
-        let service = MessageService(sender: RecordingAttachmentSender())
-        let sendTool = try XCTUnwrap(service.tools.first { $0.name == "messages_send" })
-        let attachmentTool = try XCTUnwrap(
-            service.tools.first { $0.name == "messages_send_attachment" }
-        )
-        XCTAssertNotEqual(sendTool.name, attachmentTool.name)
-
-        // The text tool gained no file surface, so a file plus a caption cannot become
-        // one call that would need two dispatches.
-        let sendSchema = try XCTUnwrap(
-            String(data: try JSONEncoder().encode(sendTool.inputSchema), encoding: .utf8)
-        ).lowercased()
-        for forbidden in ["\"path\"", "\"file\"", "\"attachment\"", "\"url\""] {
-            XCTAssertFalse(sendSchema.contains(forbidden), "messages_send exposes \(forbidden)")
-        }
-        XCTAssertTrue(sendSchema.contains("\"body\""))
     }
 
     // MARK: - Destination resolution
@@ -1242,7 +1202,7 @@ final class MessageAttachmentSendTests: XCTestCase {
     private func attachmentTool() throws -> iMCP.Tool {
         try XCTUnwrap(
             MessageService(sender: RecordingAttachmentSender()).tools.first {
-                $0.name == "messages_send_attachment"
+                $0.name == "messages_send"
             }
         )
     }
@@ -1285,7 +1245,8 @@ final class MessageAttachmentSendTests: XCTestCase {
 
 // MARK: - Harness
 
-/// One fully wired `messages_send_attachment` call with every edge stubbed.
+/// One fully wired unified `messages_send` call, defaulting to the picker attachment
+/// payload, with every edge stubbed.
 private struct Harness {
     let sender: RecordingAttachmentSender
     let composer: RecordingAttachmentComposer
@@ -1339,21 +1300,32 @@ private struct Harness {
             chatDatabasePathOverride: "/synthetic/chat.db",
             sendingMode: sendingMode
         )
-        self.tool = service.tools.first { $0.name == "messages_send_attachment" }!
+        self.tool = service.tools.first { $0.name == "messages_send" }!
     }
 
-    func call(_ arguments: [String: Value]) async throws -> Value {
-        try await tool(arguments, context: ToolCallContext(elicitation: elicitation))
+    /// Calls the unified `messages_send` tool. Since this suite is entirely about the
+    /// attachment payload, the picker `attachment` payload is injected automatically
+    /// whenever the caller's arguments name neither `body` nor `attachment`, so every
+    /// existing destination/behavior test below needs no change to keep exercising the
+    /// attachment path. Pass `attachment`/`body` explicitly (or `autoAttach: false`) to
+    /// test payload-selection/validation itself.
+    func call(_ arguments: [String: Value], autoAttach: Bool = true) async throws -> Value {
+        var fullArguments = arguments
+        if autoAttach, fullArguments["attachment"] == nil, fullArguments["body"] == nil {
+            fullArguments["attachment"] = .object(["source": .string("picker")])
+        }
+        return try await tool(fullArguments, context: ToolCallContext(elicitation: elicitation))
     }
 
     func assertFailure(
         _ expected: MessageSendError,
         arguments: [String: Value],
+        autoAttach: Bool = true,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
         do {
-            _ = try await call(arguments)
+            _ = try await call(arguments, autoAttach: autoAttach)
             XCTFail("Expected the attachment submission to fail", file: file, line: line)
         } catch let error as MessageSendError {
             XCTAssertEqual(

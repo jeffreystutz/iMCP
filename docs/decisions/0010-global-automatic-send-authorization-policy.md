@@ -8,12 +8,15 @@
 
 Accepted on 2026-08-16 after the user's manual Settings UX acceptance of the
 binary `MessagesSendingMode` model (Ask Before Sending / Send Automatically)
-described below. Runtime wiring for existing-conversation plain-text
-`messages_send` now honors this policy, followed by picker-based
-`messages_send_attachment`; see the "Runtime wiring" section near the end of
-this record and ADR 0009's own "Runtime wiring" section. The native picker
-remains mandatory for attachments in both modes, so attachment sending is not
-fully unattended even under Send Automatically. Verified-new-recipient
+described below. Runtime wiring for existing-conversation plain-text sends
+honored this policy first, then picker-based attachment sends; both now live
+behind the single, consolidated public `messages_send` tool (ADR 0011),
+which routes internally to the same two pipelines described here — see the
+"Runtime wiring" section near the end of this record and ADR 0009's own
+"Runtime wiring" section for the pipeline-level history predating that
+consolidation. The native picker remains mandatory for attachments in both
+modes, so attachment sending is not fully unattended even under Send
+Automatically. Verified-new-recipient
 sending, for both text and attachments, remains human-completed regardless of
 the selected mode.
 
@@ -282,6 +285,14 @@ as authorization — and destination/file revalidation, Automation/addressabilit
 verification, and the single dispatch remain shared, unconditional code after
 the branch, exactly as for text. See ADR 0009's "Runtime wiring" section for
 the full record of that slice.
+
+A third, later slice (ADR 0011) consolidated the two public tools those
+paragraphs describe into one public `messages_send` tool routing internally to
+`sendText`/`sendAttachment`. Neither pipeline's Sending-mode behavior changed:
+`sendingMode` is still read live per call, the authorization branch still sits
+in exactly the same place in each pipeline, and both remain reachable only
+through the unified tool's `body`/`attachment` payload selection rather than
+through separate tool names.
 
 `messages_send`'s public description and its `recipient` parameter description
 were updated so they no longer promise confirmation for every existing-chat

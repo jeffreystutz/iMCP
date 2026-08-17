@@ -1,10 +1,24 @@
 # ADR 0009: Attachment-only submission to an existing conversation
 
-- Status: Proposed
+- Status: Superseded
 - Date: 2026-08-14
 - Deciders: iMCP maintainers
 - Supersedes:
-- Superseded by:
+- Superseded by: ADR 0011
+
+**Superseded by ADR 0011 for its public-tool-surface decision only.** The
+standalone `messages_send_attachment` tool this record introduced is removed;
+its attachment payload now lives at `messages_send` with
+`attachment: {"source": "picker"}`. Every security/validation boundary this
+record establishes — the mandatory native picker, bounded file validation,
+security-scoped access lifetime, destination and file revalidation
+immediately before dispatch, fixed-script typed-descriptor dispatch,
+one-dispatch/no-retry semantics, privacy redaction, and
+submitted-not-delivered truthfulness — remains unchanged and is carried
+forward explicitly by ADR 0011. This record's own "Runtime wiring" section
+(global Sending mode) also remains historically accurate for the standalone
+tool it originally described and is superseded only insofar as that tool no
+longer exists as a separate public entry point.
 
 ## Context
 

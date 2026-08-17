@@ -1175,9 +1175,11 @@ final class MessagesChatListingTests: XCTestCase {
         )
         XCTAssertEqual(
             Set((sendSchema["properties"] as? [String: Any] ?? [:]).keys),
-            Set(["recipient", "recipients", "chat_id", "body"])
+            Set(["recipient", "recipients", "chat_id", "body", "attachment"])
         )
-        XCTAssertEqual(sendSchema["required"] as? [String], ["body"])
+        // Neither payload is required at the top level: exactly-one-of body/attachment
+        // is enforced in code, not by JSON Schema `required`.
+        XCTAssertNil(sendSchema["required"])
     }
 
     func testMessagesFetchLimitIsBoundedAndInvalidValuesAreRejected() throws {

@@ -225,3 +225,12 @@ attachment automatic-mode wiring is now implemented in a later slice. See
 `docs/project-reports/existing-conversation-attachment-send-automatic-mode-wiring-2026-08-16.md`
 for that slice's full record; this report's evidence above is unchanged and
 still describes only the text-send wiring.
+
+**Update:** a still-later slice the same day (ADR 0011) consolidated
+`messages_send` and `messages_send_attachment` into one public `messages_send`
+tool with mutually exclusive `body`/`attachment` payloads. This report's
+`messages_send` references above now name the text (`body`-payload) path of
+that unified tool; the Sending-mode wiring, dispatch, and evidence described
+here are unchanged by the consolidation. See
+`docs/project-reports/unified-messages-send-tool-2026-08-16.md` for that
+slice's full record.

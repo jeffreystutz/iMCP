@@ -475,41 +475,7 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(submissionCount, 0)
     }
 
-    func testMissingBodyIsElicitedBeforeSeparateConfirmation() async throws {
-        let sender = RecordingMessagesSender()
-        let requester = StubElicitationRequester(results: [
-            .init(
-                action: .accept,
-                content: [
-                    "body": .string("test-body")
-                ]
-            ),
-            confirmedResult,
-        ])
-
-        _ = try await sendTool(sender: sender, chatRepository: matchedDirectRepository())(
-            ["recipient": .string("recipient@example.invalid")],
-            context: ToolCallContext(elicitation: requester)
-        )
-
-        XCTAssertEqual(requester.requestCount, 2)
-        let submissionCount = await sender.chatSubmissionCount
-        XCTAssertEqual(submissionCount, 1)
-    }
-
-    func testDeclinedMissingInputAndEmptyBodyNeverDispatch() async {
-        let missingSender = RecordingMessagesSender()
-        await assertSendError(.inputDeclined) {
-            _ = try await self.sendTool(sender: missingSender)(
-                ["recipient": .string("recipient@example.invalid")],
-                context: ToolCallContext(
-                    elicitation: StubElicitationRequester(result: .init(action: .decline))
-                )
-            )
-        }
-        let missingSubmissionCount = await missingSender.submissionCount
-        XCTAssertEqual(missingSubmissionCount, 0)
-
+    func testEmptyBodyStillFailsWithZeroDispatch() async {
         let emptySender = RecordingMessagesSender()
         let requester = StubElicitationRequester(result: confirmedResult)
         await assertSendError(.emptyBody) {
@@ -521,6 +487,113 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(requester.requestCount, 0)
         let emptySubmissionCount = await emptySender.submissionCount
         XCTAssertEqual(emptySubmissionCount, 0)
+    }
+
+    // MARK: - Unified payload validation (consolidation)
+
+    /// Consolidation deliberately does not elicit a missing payload: unlike a missing
+    /// body in the previous text-only tool, a missing payload here is structurally
+    /// ambiguous between "forgot body" and "forgot attachment," and guessing would be
+    /// exactly the invented payload-type elicitation the design avoids. It fails
+    /// immediately instead.
+    func testNeitherPayloadFailsBeforeAnythingElse() async {
+        let sender = RecordingMessagesSender()
+        let requester = StubElicitationRequester(result: confirmedResult)
+        await assertSendError(.missingSendPayload) {
+            _ = try await self.sendTool(sender: sender)(
+                ["recipient": .string("recipient@example.invalid")],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        XCTAssertEqual(requester.requestCount, 0)
+        let submissionCount = await sender.chatSubmissionCount
+        XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testBothPayloadsFailBeforeAnythingElse() async {
+        let sender = RecordingMessagesSender()
+        let requester = StubElicitationRequester(result: confirmedResult)
+        await assertSendError(.conflictingSendPayload) {
+            _ = try await self.sendTool(sender: sender)(
+                [
+                    "recipient": .string("recipient@example.invalid"),
+                    "body": .string("test-body"),
+                    "attachment": .object(["source": .string("picker")]),
+                ],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        XCTAssertEqual(requester.requestCount, 0)
+        let submissionCount = await sender.chatSubmissionCount
+        XCTAssertEqual(submissionCount, 0)
+    }
+
+    func testUnsupportedAttachmentSourceAndExtraOrMissingFieldsFailBeforeAnythingElse()
+        async throws
+    {
+        let cases: [Value] = [
+            .object(["source": .string("handoff-directory")]),
+            .object(["source": .string("picker"), "path": .string("/tmp/synthetic")]),
+            .object([:]),
+            .string("picker"),
+        ]
+        for attachmentValue in cases {
+            let sender = RecordingMessagesSender()
+            await assertSendError(.invalidAttachmentPayload) {
+                _ = try await self.sendTool(sender: sender)(
+                    [
+                        "recipient": .string("recipient@example.invalid"),
+                        "attachment": attachmentValue,
+                    ],
+                    context: ToolCallContext(
+                        elicitation: StubElicitationRequester(result: self.confirmedResult)
+                    )
+                )
+            }
+            let submissionCount = await sender.chatSubmissionCount
+            XCTAssertEqual(submissionCount, 0)
+        }
+    }
+
+    /// The same verified-new-recipient destination behaves differently by payload: text
+    /// still composes through the system panel; an attachment fails categorically before
+    /// ever reaching the native picker. This proves the router dispatches to the correct
+    /// internal pipeline without needing a stubbed picker.
+    func testTextAndAttachmentPayloadsRouteDifferentlyForAVerifiedNewRecipient() async throws {
+        let textSender = RecordingMessagesSender()
+        let composer = RecordingMessagesComposer()
+        let result = try await sendTool(
+            sender: textSender,
+            composer: composer,
+            chatRepository: RecordingSendChatRepository(results: [], matches: [.none])
+        )(
+            ["recipient": .string("brand-new@example.invalid"), "body": .string("hello")],
+            context: ToolCallContext(elicitation: StubElicitationRequester(result: confirmedResult))
+        )
+        XCTAssertEqual(
+            result.objectValue?["status"]?.stringValue,
+            "user_completed_composition"
+        )
+        let compositions = await composer.compositionCount
+        XCTAssertEqual(compositions, 1)
+
+        let attachmentSender = RecordingMessagesSender()
+        await assertSendError(.attachmentRequiresExistingConversation) {
+            _ = try await self.sendTool(
+                sender: attachmentSender,
+                chatRepository: RecordingSendChatRepository(results: [], matches: [.none])
+            )(
+                [
+                    "recipient": .string("brand-new@example.invalid"),
+                    "attachment": .object(["source": .string("picker")]),
+                ],
+                context: ToolCallContext(
+                    elicitation: StubElicitationRequester(result: self.confirmedResult)
+                )
+            )
+        }
+        let attachmentSubmissions = await attachmentSender.chatSubmissionCount
+        XCTAssertEqual(attachmentSubmissions, 0)
     }
 
     func testDeclineCancelAndMalformedConfirmationNeverDispatch() async {
@@ -594,30 +667,6 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(requester.requestCount, 1)
         let submissionCount = await sender.chatSubmissionCount
         XCTAssertEqual(submissionCount, 1)
-    }
-
-    func testMissingInputElicitationIsNeverTreatedAsFinalConfirmation() async {
-        // A client that supplies the body but cannot show a form must dispatch zero: the
-        // input round trip is not authorization.
-        let sender = RecordingMessagesSender()
-        let requester = StubElicitationRequester(
-            results: [.init(action: .accept, content: ["body": .string("test-body")])]
-        )
-
-        await assertSendError(.inputMalformed) {
-            _ = try await self.sendTool(
-                sender: sender,
-                chatRepository: self.matchedDirectRepository()
-            )(
-                ["recipient": .string("recipient@example.invalid")],
-                context: ToolCallContext(elicitation: requester)
-            )
-        }
-
-        // Two requests: one for the missing body, one for the separate final confirmation.
-        XCTAssertEqual(requester.requestCount, 2)
-        let submissionCount = await sender.chatSubmissionCount
-        XCTAssertEqual(submissionCount, 0)
     }
 
     func testNoProductionCodePathCanBypassSendConfirmation() throws {
@@ -1232,25 +1281,24 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(existingCompositions, 0)
         XCTAssertFalse(existingLog.events.contains("compose"))
 
-        // New recipient: exactly one composition, zero confirmations, and the
-        // missing-input round trip stays distinct from either authorization surface.
+        // New recipient: exactly one composition, zero confirmations. The system
+        // compose panel is the sole authorization surface for this route.
         let newLog = SendEventLog()
         let newComposer = RecordingMessagesComposer(eventLog: newLog)
         let newSender = RecordingMessagesSender(eventLog: newLog)
-        let newRequester = StubElicitationRequester(
-            results: [.init(action: .accept, content: ["body": .string("test-body")])]
-        )
+        let newRequester = StubElicitationRequester(result: confirmedResult)
         _ = try await sendTool(
             sender: newSender,
             composer: newComposer,
             chatRepository: RecordingSendChatRepository(results: [], matches: [.none])
         )(
-            ["recipient": .string("brand-new@example.invalid")],
+            [
+                "recipient": .string("brand-new@example.invalid"),
+                "body": .string("test-body"),
+            ],
             context: ToolCallContext(elicitation: newRequester)
         )
-        // One elicitation only: the missing body. It gathered input, it did not
-        // authorize anything.
-        XCTAssertEqual(newRequester.requestCount, 1)
+        XCTAssertEqual(newRequester.requestCount, 0, "composition needs no iMCP confirmation")
         let newCompositions = await newComposer.compositionCount
         XCTAssertEqual(newCompositions, 1)
         XCTAssertEqual(newLog.events, ["compose"])
@@ -2132,7 +2180,7 @@ final class MessageSendTests: XCTestCase {
         )
     }
 
-    func testToolSchemaHasNoModeOrConfirmationBypassInput() throws {
+    func testUnifiedToolSchemaExposesBodyAndAttachmentWithNoModeOrBypassInput() throws {
         let tool = try XCTUnwrap(
             MessageService(sender: RecordingMessagesSender()).tools.first {
                 $0.name == "messages_send"
@@ -2144,9 +2192,48 @@ final class MessageSendTests: XCTestCase {
         else {
             return XCTFail("expected an object schema")
         }
-        XCTAssertEqual(Set(properties.keys), ["recipient", "recipients", "chat_id", "body"])
-        XCTAssertEqual(required, ["body"])
+        XCTAssertEqual(
+            Set(properties.keys),
+            ["recipient", "recipients", "chat_id", "body", "attachment"]
+        )
+        // Neither payload is required at the top level: exactly-one-of is enforced in
+        // code, matching how the destination selectors already work.
+        XCTAssertTrue(required.isEmpty)
         XCTAssertEqual(additionalProperties, .boolean(false))
+
+        guard
+            case .object(
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                let attachmentProperties,
+                let attachmentRequired,
+                let attachmentAdditional
+            ) = properties["attachment"]
+        else {
+            return XCTFail("expected attachment to be an object schema")
+        }
+        XCTAssertEqual(Set(attachmentProperties.keys), ["source"])
+        XCTAssertEqual(attachmentRequired, ["source"])
+        XCTAssertEqual(attachmentAdditional, .boolean(false))
+
+        // No file path/bytes/filename or caller-facing sending-mode/confirmation-bypass
+        // input exists in any spelling: the global Sending mode is app-owned and
+        // unreachable from any MCP argument.
+        let encoded = try JSONEncoder().encode(tool.inputSchema)
+        let schemaText = try XCTUnwrap(String(data: encoded, encoding: .utf8)).lowercased()
+        for forbidden in [
+            "\"path\"", "\"file\"", "\"file_path\"", "\"filepath\"", "\"url\"", "\"text\"",
+            "\"caption\"", "\"filename\"", "\"file_name\"", "\"bytes\"", "\"data\"",
+            "\"attachment_id\"", "\"content\"", "\"mime_type\"", "\"uti\"", "\"mode\"",
+            "\"sending_mode\"", "\"automatic\"", "\"bypass\"", "\"confirm\"",
+            "\"confirmation\"",
+        ] {
+            XCTAssertFalse(schemaText.contains(forbidden), "the schema exposes \(forbidden)")
+        }
     }
 
     func testAddressabilityIsIndependentOfChatServiceType() async throws {

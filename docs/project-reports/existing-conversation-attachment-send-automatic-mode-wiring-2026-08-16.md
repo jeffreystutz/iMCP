@@ -257,3 +257,14 @@ Supervising review of the exact pushed head on `feat/messages-write-foundation`,
 then the manual checkpoint above under the user's own explicit, separate
 authorization for any real attachment send. No further implementation is
 expected until that review and checkpoint complete.
+
+**Update:** a later slice the same day (ADR 0011) consolidated
+`messages_send` and `messages_send_attachment` into one public `messages_send`
+tool with mutually exclusive `body`/`attachment` payloads;
+`messages_send_attachment` no longer exists as a separate tool name. This
+report's evidence above is unchanged and still describes the attachment
+pipeline and its Sending-mode wiring, which the consolidation carried forward
+without modification; the deferred manual checkpoint above now applies to
+`messages_send` called with an `attachment` payload. See
+`docs/project-reports/unified-messages-send-tool-2026-08-16.md` for that
+slice's full record.

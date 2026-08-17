@@ -596,7 +596,7 @@ final class ContactConversationSearchTests: XCTestCase {
             messagesOnly.map(\.name),
             [
                 "messages_list_chats", "messages_find_conversations", "messages_fetch",
-                "messages_send", "messages_send_attachment",
+                "messages_send",
             ]
         )
 
