@@ -907,8 +907,11 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         _ arguments: [String: Value]
     ) throws -> SendDestination {
         let recipientsValue = arguments["recipients"]
-        let chatID = arguments["chat_id"]?.stringValue
-        let suppliedDestinationCount = [recipientsValue != nil, chatID != nil]
+        let chatIDValue = arguments["chat_id"]
+        // Exclusivity is decided by which properties were supplied, not by whether a
+        // supplied value happens to parse. A malformed extra selector must never be
+        // silently treated as absent.
+        let suppliedDestinationCount = [recipientsValue != nil, chatIDValue != nil]
             .filter { $0 }.count
         guard suppliedDestinationCount == 1 else {
             throw MessageSendError.invalidDestination
@@ -917,8 +920,9 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         if let recipientsValue {
             return try Self.parseRecipients(recipientsValue)
         }
-        guard let chatID else { throw MessageSendError.invalidDestination }
-        guard !chatID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard let chatID = chatIDValue?.stringValue,
+            !chatID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
             throw MessageSendError.invalidChatIdentifier
         }
         return .chat(chatID)

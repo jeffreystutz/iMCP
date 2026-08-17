@@ -118,6 +118,20 @@ final class MessageAttachmentSendTests: XCTestCase {
                 ]),
                 "chat_id": .string("imcp-chat-v1_synthetic"),
             ],
+            // Selector exclusivity must be decided by which properties were
+            // supplied, not by whether a supplied value happens to parse: a
+            // non-string chat_id alongside valid recipients still counts as
+            // "both supplied" and must never silently fall through to recipients.
+            [
+                "recipients": .string("one@example.invalid"),
+                "chat_id": .int(1),
+            ],
+            [
+                "recipients": .array([
+                    .string("one@example.invalid"), .string("two@example.invalid"),
+                ]),
+                "chat_id": .int(1),
+            ],
         ]
 
         for arguments in combinations {
@@ -125,6 +139,15 @@ final class MessageAttachmentSendTests: XCTestCase {
             await harness.assertFailure(MessageSendError.invalidDestination, arguments: arguments)
             await harness.assertNothingHappened()
         }
+    }
+
+    func testNonStringChatIdAsSoleSelectorFailsClosed() async throws {
+        let harness = Harness(matches: [uniqueDirectMatch, uniqueDirectMatch])
+        await harness.assertFailure(
+            MessageSendError.invalidChatIdentifier,
+            arguments: ["chat_id": .int(1)]
+        )
+        await harness.assertNothingHappened()
     }
 
     func testInvalidAndInexactDestinationsFailBeforeThePicker() async throws {

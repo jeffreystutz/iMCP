@@ -1037,6 +1037,58 @@ final class MessageSendTests: XCTestCase {
         XCTAssertEqual(submissionCount, 0)
     }
 
+    func testMalformedChatIdNeverSilentlyTreatedAsAbsent() async throws {
+        // Selector exclusivity must be decided by which properties were supplied,
+        // not by whether a supplied value happens to parse. A non-string chat_id
+        // alongside valid recipients must still count as "both supplied" and fail
+        // invalidDestination, never silently fall through to the recipients value.
+        let combinations: [[String: Value]] = [
+            [
+                "recipients": .string("one@example.invalid"),
+                "chat_id": .int(1),
+                "body": .string("test-body"),
+            ],
+            [
+                "recipients": .array([.string("one@example.invalid"), .string("two@example.invalid")]),
+                "chat_id": .int(1),
+                "body": .string("test-body"),
+            ],
+        ]
+        for arguments in combinations {
+            let sender = RecordingMessagesSender()
+            let composer = RecordingMessagesComposer()
+            let requester = StubElicitationRequester(result: confirmedResult)
+            await assertSendError(.invalidDestination) {
+                _ = try await self.sendTool(sender: sender, composer: composer)(
+                    arguments,
+                    context: ToolCallContext(elicitation: requester)
+                )
+            }
+            XCTAssertEqual(requester.requestCount, 0)
+            let submissionCount = await sender.chatSubmissionCount
+            let compositionCount = await composer.compositionCount
+            XCTAssertEqual(submissionCount, 0)
+            XCTAssertEqual(compositionCount, 0)
+        }
+
+        // A non-string chat_id as the sole selector also fails closed, distinctly
+        // from the "neither/both supplied" case, before any destination lookup.
+        let sender = RecordingMessagesSender()
+        let composer = RecordingMessagesComposer()
+        let requester = StubElicitationRequester(result: confirmedResult)
+        await assertSendError(.invalidChatIdentifier) {
+            _ = try await self.sendTool(sender: sender, composer: composer)(
+                ["chat_id": .int(1), "body": .string("test-body")],
+                context: ToolCallContext(elicitation: requester)
+            )
+        }
+        XCTAssertEqual(requester.requestCount, 0)
+        let submissionCount = await sender.chatSubmissionCount
+        let compositionCount = await composer.compositionCount
+        XCTAssertEqual(submissionCount, 0)
+        XCTAssertEqual(compositionCount, 0)
+    }
+
     func testScalarAndOneItemArrayRecipientsProduceEquivalentDirectBehavior() async throws {
         // A scalar handle and a one-item array must be indistinguishable: both are
         // direct-recipient intent, both hit the same existing-chat match, and both
