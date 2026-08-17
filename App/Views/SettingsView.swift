@@ -66,6 +66,7 @@ struct SettingsView: View {
 
 struct GeneralSettingsView: View {
     @ObservedObject var serverController: ServerController
+    @StateObject private var attachmentGrants = AttachmentFolderGrantsController()
     @AppStorage(MessagesSendConfirmationMode.storageKey)
     private var sendConfirmationMode = MessagesSendConfirmationMode.defaultValue.rawValue
     @AppStorage(MessagesSendingMode.storageKey)
@@ -140,6 +141,85 @@ struct GeneralSettingsView: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            }
+
+            Section("Attachments") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Serialized attachments — Available")
+                        .font(.headline)
+                    Text(
+                        "An MCP client can supply attachment bytes directly with a message_send_attachment call. No folder access is required."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Files on this Mac")
+                            .font(.headline)
+                        Spacer()
+                        Button {
+                            attachmentGrants.addFolder()
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Add Folder…")
+                    }
+                    Text(
+                        "iMCP can send a file as an attachment only from a folder you explicitly allow here."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                if attachmentGrants.rows.isEmpty {
+                    HStack {
+                        Text("No folders allowed")
+                            .foregroundStyle(.secondary)
+                            .italic()
+                        Spacer()
+                    }
+                    .padding(.vertical, 8)
+                } else {
+                    ForEach(attachmentGrants.rows) { row in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(row.displayName)
+                                Text(row.locationText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                if row.isBroken {
+                                    Text("Needs access")
+                                        .font(.caption)
+                                        .foregroundStyle(.red)
+                                }
+                            }
+                            Spacer()
+                            if row.isBroken {
+                                Button("Reauthorize…") {
+                                    attachmentGrants.reauthorize(id: row.id)
+                                }
+                                .buttonStyle(.borderless)
+                            } else {
+                                Button("Show in Finder") {
+                                    attachmentGrants.showInFinder(id: row.id)
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                            Button {
+                                attachmentGrants.remove(id: row.id)
+                            } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.red)
+                            .help("Remove")
+                        }
+                    }
+                }
             }
 
             Section("Phone Number Region") {

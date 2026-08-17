@@ -123,8 +123,8 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
     private let chatRepository: any MessagesChatListing
     private let conversationSearch: any MessagesConversationSearching
     private let sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting
-    private let attachmentSelector: any MessagesAttachmentSelecting
     private let attachmentValidator: any MessagesAttachmentValidating
+    private let attachmentFolderGrantResolver: any AllowedFolderGrantResolving
     private let chatDatabasePathOverride: String?
     private let chatListingLog: @Sendable (Int) -> Void
     private let sendingMode: @Sendable () -> MessagesSendingMode
@@ -136,10 +136,10 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         conversationSearch: any MessagesConversationSearching = SQLiteMessagesChatRepository(),
         sendConfirmationRequester: any MessagesFinalSendConfirmationRequesting =
             MessagesFinalSendConfirmationRequester(),
-        attachmentSelector: any MessagesAttachmentSelecting =
-            OpenPanelMessagesAttachmentSelector(),
         attachmentValidator: any MessagesAttachmentValidating =
             FileManagerMessagesAttachmentValidator(),
+        attachmentFolderGrantResolver: any AllowedFolderGrantResolving =
+            AllowedFolderGrantResolver(store: UserDefaultsAllowedFolderGrantStore()),
         chatDatabasePathOverride: String? = nil,
         chatListingLog: @escaping @Sendable (Int) -> Void = { count in
             log.notice("Listed \(count) Messages conversations")
@@ -153,8 +153,8 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         self.chatRepository = chatRepository
         self.conversationSearch = conversationSearch
         self.sendConfirmationRequester = sendConfirmationRequester
-        self.attachmentSelector = attachmentSelector
         self.attachmentValidator = attachmentValidator
+        self.attachmentFolderGrantResolver = attachmentFolderGrantResolver
         self.chatDatabasePathOverride = chatDatabasePathOverride
         self.chatListingLog = chatListingLog
         self.sendingMode = sendingMode
@@ -573,13 +573,13 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         Tool(
             name: "message_send_attachment",
             description:
-                "Submit exactly one file as an attachment to one existing Messages conversation that you identify by recipients or chat_id. This tool takes no file path, no file name, and no file contents: after the destination resolves, iMCP always opens a native file picker on the user's Mac and the user chooses the file there. Whether the user must then separately confirm the exact conversation together with the file's name, type, and size before it sends, or it submits directly after the picker, follows the user's Sending mode setting in iMCP; there is no way for a caller to choose or override it, and the picker itself is never treated as that authorization. It sends no message text, so it cannot carry a caption or a body; send any accompanying text as its own message_send_text call. The file must be one ordinary image, video or audio, PDF, or plain-text file of at most 25 MiB. Unlike message_send_text, a recipient with no existing conversation fails instead of opening a compose window, and no new conversation or group is ever created, in either mode. Cancelling the picker, or the confirmation when one is presented, sends nothing. Success means Messages accepted one attachment submission, never that it was delivered.",
+                "Submit exactly one file as an attachment to one existing Messages conversation that you identify by recipients or chat_id. Supply exactly one attachment source: file_path, an absolute path to a file inside a folder the user has explicitly allowed in iMCP Settings, or filename together with content_base64, bounded base64-encoded bytes that iMCP stages into app-owned temporary storage and always deletes afterward. There is no file picker, no staging identifier, and no delete-after-send parameter: iMCP resolves the source itself, and a file_path outside every allowed folder fails, before anything is confirmed or sent, with instructions to add the containing folder in Settings. Whether the user must then separately confirm the exact conversation together with the file's name, type, and size before it sends, or it submits directly, follows the user's Sending mode setting in iMCP; there is no way for a caller to choose or override it. It sends no message text, so it cannot carry a caption or a body; send any accompanying text as its own message_send_text call. The file must be one ordinary image, video or audio, PDF, or plain-text file: at most 25 MiB for a filesystem source, or 5 MiB decoded for a serialized source. Unlike message_send_text, a recipient with no existing conversation fails instead of opening a compose window, and no new conversation or group is ever created, in either mode. Declining or cancelling the confirmation, when one is presented, sends nothing. Success means Messages accepted one attachment submission, never that it was delivered.",
             inputSchema: .object(
                 properties: [
                     "recipients": .oneOf([
                         .string(
                             description:
-                                "One exact E.164 phone number or email address that must already have exactly one existing direct conversation. A recipient with no existing conversation, or an ambiguous or unresolvable match, fails without opening the picker and without sending."
+                                "One exact E.164 phone number or email address that must already have exactly one existing direct conversation. A recipient with no existing conversation, or an ambiguous or unresolvable match, fails without sending."
                         ),
                         .array(
                             description:
@@ -595,6 +595,21 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
                             "Opaque chat ID returned by messages_list_chats that explicitly selects an existing direct or group conversation; preferred when the intended conversation is already known. Do not supply a database or scripting identifier.",
                         minLength: 1
                     ),
+                    "file_path": .string(
+                        description:
+                            "Absolute path to one file inside a folder you have explicitly allowed in iMCP Settings under Attachments. Mutually exclusive with filename/content_base64. A path outside every allowed folder fails before anything is confirmed or sent.",
+                        minLength: 1
+                    ),
+                    "filename": .string(
+                        description:
+                            "A plain file name, with no path, for a serialized attachment. Required together with content_base64; mutually exclusive with file_path.",
+                        minLength: 1
+                    ),
+                    "content_base64": .string(
+                        description:
+                            "Base64-encoded file bytes for a serialized attachment, at most 5 MiB once decoded. Required together with filename; mutually exclusive with file_path.",
+                        minLength: 1
+                    ),
                 ],
                 additionalProperties: false
             ),
@@ -607,8 +622,10 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             )
         ) { arguments, context in
             let destination = try self.resolveDestination(arguments)
+            let source = try resolveAttachmentSource(arguments)
             return try await self.sendAttachment(
                 destination: destination,
+                source: source,
                 context: context
             )
         }
@@ -709,14 +726,16 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         return MessageSendResult.submitted(service: "Messages")
     }
 
-    /// Existing-conversation picker-based attachment submission for `message_send_attachment`.
+    /// Existing-conversation attachment submission for `message_send_attachment`, from
+    /// either an allowed-folder filesystem source or a bounded serialized source.
     private func sendAttachment(
         destination: SendDestination,
+        source: AttachmentSourceInput,
         context: ToolCallContext
     ) async throws -> MessageSendResult {
-        // 1. The destination is resolved to one exact existing conversation before a
-        //    picker is ever presented. Nothing about the file is known yet, so a bad
-        //    destination costs the user no file selection.
+        // 1. The destination is resolved to one exact existing conversation before the
+        //    source is ever touched. Nothing about the file is known yet, so a bad
+        //    destination costs the user no filesystem access or staging work.
         let preparedDestination = try await self.prepareDestination(destination)
 
         // A verified-new recipient is out of scope for attachments. It fails here,
@@ -734,23 +753,21 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             throw MessageSendError.invalidDestination
         }
 
-        // 3. Only now is the picker presented, and the selection is validated against
-        //    the bounded file policy before the user is asked to authorize anything.
+        // 3. Resolve the source: containment-checked allowed-folder access, or a staged
+        //    and validated serialized temp file. `release()` runs on every exit path
+        //    from here on — declined/cancelled confirmation, revalidation failure,
+        //    Automation failure, or successful dispatch — so a filesystem grant's
+        //    security scope is always balanced and a serialized temp file never
+        //    survives past this call.
         try Task.checkCancellation()
-        let selectedURL = try await self.attachmentSelector.selectAttachment()
-        // Read access is held from validation through the synchronous submission, so
-        // the facts that were authorized are the facts the Apple Event carries.
-        let access = MessagesAttachmentAccess(url: selectedURL)
-        defer { access.release() }
-        let facts = try self.attachmentValidator.validate(selectedURL)
+        let sourceHandle = try self.resolveAttachmentSourceHandle(source)
+        defer { sourceHandle.release() }
+        let facts = sourceHandle.facts
 
         // 4. Authorization: either one immutable confirmation naming the exact
         //    conversation and the file's display name, public type, and size (never
-        //    its path or its contents), in Ask Before Sending mode, or the user's
-        //    persisted app-owned Send Automatically setting. The native picker above
-        //    is still the only file-input/selection mechanism in either mode — it is
-        //    never itself treated as authorization, and automatic mode does not add a
-        //    second confirmation after it.
+        //    its path, its bytes, or its temp location), in Ask Before Sending mode, or
+        //    the user's persisted app-owned Send Automatically setting.
         switch self.sendingMode() {
         case .askBeforeSending:
             try await self.sendConfirmationRequester.requestConfirmation(
@@ -772,10 +789,13 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
         try Task.checkCancellation()
         let revalidatedChat = try await self.revalidateDestination(preparedDestination)
 
-        // 6. The file must still be the same file with the same bounded properties. A
+        // 6. The source must still be the same file with the same bounded properties. A
         //    file that was removed, replaced, modified, enlarged, or has become an
-        //    unsupported type fails here, with zero dispatch.
-        let revalidatedFacts = try self.attachmentValidator.validate(selectedURL)
+        //    unsupported type fails here, with zero dispatch. For a filesystem source
+        //    this also re-checks allowed-folder containment; for a serialized source
+        //    the staged temp file is simply re-read, since only iMCP could have changed
+        //    it.
+        let revalidatedFacts = try sourceHandle.revalidate()
         guard revalidatedFacts == facts else {
             throw MessagesAttachmentError.attachmentChanged
         }
@@ -795,6 +815,100 @@ final class MessageService: NSObject, Service, NSOpenSavePanelDelegate,
             "Messages accepted one attachment submission \(preparedDestination.submissionLogFields, privacy: .public)"
         )
         return MessageSendResult.attachmentSubmitted(service: "Messages")
+    }
+
+    /// One resolved, not-yet-dispatched attachment source: its initially validated facts,
+    /// a closure to re-validate immediately before dispatch, and a closure that releases
+    /// whatever resource the source holds (a filesystem grant's security scope, or an
+    /// app-owned serialized temp file).
+    private struct ResolvedAttachmentSourceHandle {
+        let facts: MessagesAttachmentFacts
+        let revalidate: () throws -> MessagesAttachmentFacts
+        let release: () -> Void
+    }
+
+    /// Resolves `message_send_attachment`'s source into one validated, revalidatable,
+    /// releasable handle. This is the only place either source form touches the
+    /// filesystem.
+    private func resolveAttachmentSourceHandle(
+        _ source: AttachmentSourceInput
+    ) throws -> ResolvedAttachmentSourceHandle {
+        switch source {
+        case .filesystem(let path):
+            let access = try self.attachmentFolderGrantResolver.resolveAccess(
+                forRequestedPath: path
+            )
+            let validator = self.attachmentValidator
+            let facts = try validator.validate(access.fileURL)
+            return ResolvedAttachmentSourceHandle(
+                facts: facts,
+                revalidate: {
+                    // Re-checking containment, not only the file, matters here: a grant
+                    // can be revoked between confirmation and dispatch, and a stale
+                    // security scope must never be trusted to still be authorized.
+                    let revalidatedAccess = try self.attachmentFolderGrantResolver
+                        .resolveAccess(forRequestedPath: path)
+                    defer { revalidatedAccess.release() }
+                    return try validator.validate(revalidatedAccess.fileURL)
+                },
+                release: { access.release() }
+            )
+        case .serialized(let filename, let contentBase64):
+            let safeFilename = try validateSerializedAttachmentFilename(filename)
+            let decoded = try decodeSerializedAttachmentContent(contentBase64)
+            let staged = try Self.stageSerializedAttachment(decoded, filename: safeFilename)
+            let validator = self.attachmentValidator
+            let facts = try validator.validate(staged.fileURL)
+            return ResolvedAttachmentSourceHandle(
+                facts: facts,
+                revalidate: {
+                    // Only iMCP holds this temp file, so re-validating it directly (no
+                    // re-staging, no re-decoding) is sufficient and cannot itself be
+                    // fooled by an outside actor the way a caller-owned path could be.
+                    try validator.validate(staged.fileURL)
+                },
+                release: {
+                    try? FileManager.default.removeItem(at: staged.temporaryDirectory)
+                }
+            )
+        }
+    }
+
+    /// Materializes bounded serialized attachment bytes into a unique, app-owned
+    /// temporary directory with restrictive permissions.
+    ///
+    /// The directory, not just the file, is unique per call so `release()` can remove
+    /// the whole thing in one call and so two concurrent calls can never collide on a
+    /// caller-supplied filename.
+    private static func stageSerializedAttachment(
+        _ data: Data,
+        filename: String
+    ) throws -> (fileURL: URL, temporaryDirectory: URL) {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("me.mattt.iMCP.attachments", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: temporaryDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } catch {
+            throw MessagesAttachmentSourceError.stagingFailed
+        }
+
+        let fileURL = temporaryDirectory.appendingPathComponent(filename, isDirectory: false)
+        guard
+            FileManager.default.createFile(
+                atPath: fileURL.path,
+                contents: data,
+                attributes: [.posixPermissions: 0o600]
+            )
+        else {
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+            throw MessagesAttachmentSourceError.stagingFailed
+        }
+        return (fileURL, temporaryDirectory)
     }
 
     /// Resolves one exact existing conversation, or the verified absence of one.

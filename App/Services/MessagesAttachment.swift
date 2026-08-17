@@ -40,7 +40,6 @@ struct MessagesAttachmentFacts: Equatable, Sendable {
 /// filesystem error text. A rejected value is still a private value, and upper layers may
 /// put an error description in front of the model.
 enum MessagesAttachmentError: LocalizedError, Equatable, Sendable {
-    case selectionCancelled
     case unreadableSelection
     case notRegularFile
     case emptyFile
@@ -50,8 +49,6 @@ enum MessagesAttachmentError: LocalizedError, Equatable, Sendable {
 
     var errorDescription: String? {
         switch self {
-        case .selectionCancelled:
-            return "Attachment selection was cancelled. Nothing was sent."
         case .unreadableSelection:
             return "The selected item could not be read. Nothing was sent."
         case .notRegularFile:
@@ -71,49 +68,12 @@ enum MessagesAttachmentError: LocalizedError, Equatable, Sendable {
     }
 }
 
-/// Presents the native single-file picker that grants sandbox access to one attachment.
-///
-/// The picker is the only way a file reaches this flow: no path, URL, filename, or bytes
-/// ever arrive in an MCP argument. It stays behind a protocol so tests present no UI.
-protocol MessagesAttachmentSelecting: Sendable {
-    func selectAttachment() async throws -> URL
-}
-
 /// Reads the bounded facts about a selected file and rejects everything outside policy.
 ///
 /// It runs once before the final confirmation and again immediately before dispatch, so
 /// it must be a pure read: it opens no file, changes nothing, and reports only categories.
 protocol MessagesAttachmentValidating: Sendable {
     func validate(_ url: URL) throws -> MessagesAttachmentFacts
-}
-
-/// The AppKit edge of attachment selection.
-struct OpenPanelMessagesAttachmentSelector: MessagesAttachmentSelecting {
-    @MainActor
-    func selectAttachment() throws -> URL {
-        try Task.checkCancellation()
-        NSApplication.shared.activate(ignoringOtherApps: true)
-
-        let panel = NSOpenPanel()
-        panel.message = "Select one file to attach to the Messages conversation"
-        panel.prompt = "Choose Attachment"
-        panel.allowsMultipleSelection = false
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        // A package or bundle must stay one opaque item the panel refuses, never a
-        // directory the user can descend into and pick a component out of.
-        panel.treatsFilePackagesAsDirectories = false
-        // The chosen URL must be the item the user actually pointed at, so that the
-        // validator sees a symbolic link or alias rather than silently following it.
-        panel.resolvesAliases = false
-        panel.showsHiddenFiles = false
-        panel.allowedContentTypes = FileManagerMessagesAttachmentValidator.supportedTypes
-
-        guard panel.runModal() == .OK, let url = panel.url else {
-            throw MessagesAttachmentError.selectionCancelled
-        }
-        return url
-    }
 }
 
 /// The file system edge of attachment validation.
