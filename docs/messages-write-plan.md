@@ -485,6 +485,16 @@ The remaining discovery question is the separate Contacts-side one below.
 
 ## Attachment submission
 
+**Note (2026-08-17).** This section's native-picker ingress mechanism is
+superseded by "Programmatic attachment ingress" below, which replaces it
+with an allowed-folder `file_path` source and a bounded serialized
+`filename`/`content_base64` source. Every downstream boundary this section
+establishes — bounded file policy, security-scoped access lifetime,
+destination/file revalidation immediately before dispatch, the fixed
+script's typed file descriptor, one-dispatch/no-retry, privacy redaction,
+and submitted-not-delivered truthfulness — is carried forward unchanged and
+is not re-described there.
+
 `message_send_attachment` submits exactly one file to one exact **existing**
 conversation. It is a separate public tool from `message_send_text`, not an
 option on it. It shipped first as `messages_send_attachment` (ADR 0009); ADR
@@ -695,6 +705,67 @@ dispatch invariant for either tool — both corrections are strictly upstream,
 in the destination/body parsing that feeds `sendText`/`sendAttachment`. The
 deferred picker-attachment manual acceptance checkpoint remains outstanding
 and applies to `message_send_attachment` in its current schema shape.
+
+## Programmatic attachment ingress
+
+The per-send `NSOpenPanel` described in "Attachment submission" and "Runtime
+wiring for existing-conversation picker-based attachments" above was always
+a deliberately temporary ingress mechanism, useful only to prove out the
+downstream existing-chat attachment pipeline. As of 2026-08-17,
+`message_send_attachment` accepts exactly one of two programmatic sources
+instead of ever opening a picker:
+
+- **Filesystem**: `file_path`, an absolute path that must resolve inside at
+  least one folder the user has explicitly allowed in iMCP Settings under
+  **Attachments → Files on this Mac**. The caller cannot create new
+  filesystem authority; a path outside every allowed folder fails, before
+  confirmation, Automation, or dispatch, with an actionable Settings error.
+- **Serialized**: `filename` + `content_base64`, bounded to a provisional
+  5 MiB decoded cap, staged into app-owned temporary storage, validated
+  through the same downstream pipeline, and always cleaned up — on success,
+  on a declined/cancelled confirmation, on validation failure, and on send
+  failure.
+
+Blank optional source fields are omission-equivalent for form-selection
+purposes only, mirroring the destination selectors' blank-scalar rule
+(`imessage-mcp/messages-write-architecture`): a blank `file_path` does not
+conflict with a valid serialized source, and blank `filename`/
+`content_base64` do not conflict with a valid `file_path`, but a non-string
+or partially supplied source remains malformed input and fails closed.
+
+Allowed-folder grants are a new, separate persistent-authority concept from
+the existing Messages database directory bookmark (`AllowedFolderGrantStore.swift`),
+stored under their own `UserDefaults` key and never colliding with or
+overwriting the database grant. Each grant is a standard app-scoped
+security-scoped bookmark, created the same way as the existing Messages
+directory bookmark (`MessageService.readOnlySecurityScopedBookmarkOptions`),
+so no entitlement changed. Containment is path-component-aware, not a
+string prefix: a requested path is checked lexically (rejecting `..`
+traversal and prefix-confusable siblings) and, after the root's security
+scope opens, again against the symlink-resolved real path (rejecting an
+interior symlink that escapes the granted tree). The original, unresolved
+request URL — never the symlink-resolved one — is what reaches
+`FileManagerMessagesAttachmentValidator`, so its own symlink/alias/package
+rejection still applies to the requested leaf exactly as it did for the
+picker-selected file.
+
+`sendAttachment`'s pipeline is otherwise unchanged: destination resolution,
+non-prompting addressability preflight, one immutable confirmation (or the
+Send Automatically opt-out of only that step), destination revalidation,
+source revalidation (re-checking allowed-folder containment for a
+filesystem source, or re-reading the still-present temp file for a
+serialized one), Automation/addressability recheck, and exactly one
+dispatch. A revoked allowed-folder grant between confirmation and dispatch
+fails revalidation the same way a removed or modified file already did.
+
+Settings gained an inline **Attachments** section (no new navigation, no
+Manage screen, no filesystem-access master toggle) showing serialized
+attachments as always available and an **Allowed Folders** list with direct
+`Add Folder…`, `Show in Finder`, remove, and `Reauthorize…` controls for a
+broken grant.
+
+See ADR 0014, which supersedes ADR 0009's mandatory-picker ingress decision
+only, carrying forward its full security/validation contract.
 
 ## Reference implementation
 

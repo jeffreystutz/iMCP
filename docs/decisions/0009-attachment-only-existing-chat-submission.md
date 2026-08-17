@@ -4,7 +4,7 @@
 - Date: 2026-08-14
 - Deciders: iMCP maintainers
 - Supersedes:
-- Superseded by: ADR 0011
+- Superseded by: ADR 0011 (public tool surface); ADR 0014 (ingress mechanism)
 
 **Superseded by ADR 0011 for its public-tool-surface decision only.** The
 standalone `messages_send_attachment` tool this record introduced is removed;
@@ -28,6 +28,18 @@ accurately records that ADR 0011 superseded this record's public-tool-surface
 decision — rather than rewritten to point at ADR 0012 directly. ADR 0012
 independently carries forward this record's full security/validation
 contract for the restored `message_send_attachment` tool.
+
+**Note (ADR 0014).** This record's mandatory-native-picker ingress
+mechanism — always a deliberately temporary ordinary-attachment ingress,
+never accepted final product UX — is superseded by ADR 0014, which replaces
+it with an allowed-folder `file_path` source and a bounded serialized
+`filename`/`content_base64` source. Every other boundary this record
+establishes — bounded file policy, security-scoped access lifetime,
+destination and file revalidation immediately before dispatch, fixed-script
+typed-descriptor dispatch, one-dispatch/no-retry semantics, privacy
+redaction, and submitted-not-delivered truthfulness — remains unchanged and
+is carried forward explicitly by ADR 0014, exactly as ADR 0011 and ADR 0012
+already carried it forward for the public tool surface.
 
 ## Context
 

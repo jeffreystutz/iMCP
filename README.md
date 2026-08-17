@@ -45,7 +45,7 @@ and a [growing list of clients][mcp-clients] that support the
       <img src="Assets/messages.svg" width="48" height="48" alt="" role="presentation"/>
     </th>
     <td><strong>Messages</strong></td>
-    <td>Access message history with specific participants within customizable date ranges. Submit text or a single attachment (via a native picker) to an existing conversation, subject to your Sending mode setting, or open a Messages compose window for a new recipient that you review and send yourself.</td>
+    <td>Access message history with specific participants within customizable date ranges. Submit text or a single attachment (from an allowed folder, or supplied directly as bytes) to an existing conversation, subject to your Sending mode setting, or open a Messages compose window for a new recipient that you review and send yourself.</td>
   </tr>
   <tr>
     <th>
@@ -319,11 +319,14 @@ body for text, or the exact destination and the file's name, type, and size
 and only submits after you confirm; **Send Automatically** is an explicit
 opt-in that submits eligible existing-chat text messages and attachments
 without that per-send confirmation. No MCP client can enable or override
-Send Automatically itself — only you, in Settings. An attachment always
-still goes through the native file picker in both modes: selecting a file is
-never itself treated as confirmation, so attachment sending is not fully
-unattended even with Send Automatically on. iMCP reports messages as
-*submitted*, not as *delivered*.
+Send Automatically itself — only you, in Settings. An attachment comes from
+one of two sources: an absolute path inside a folder you've explicitly
+allowed under **Settings → Attachments**, or bounded bytes the MCP client
+supplies directly (no folder access required), which iMCP stages into
+app-owned temporary storage and always cleans up afterward. There is no
+per-send file picker; a path outside every allowed folder fails with
+instructions to add the containing folder in Settings. iMCP reports messages
+as *submitted*, not as *delivered*.
 
 **To a recipient you don't already have a conversation with**, iMCP opens
 the system Messages compose window, seeded with the recipient and your
