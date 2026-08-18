@@ -1,181 +1,292 @@
 # Current Claude Code Task
 
-**Status:** ready for implementation
+**Status:** root-cause investigation with bounded fix authority
 
 **Recommended session:** fresh Claude Code session  
 **Recommended model:** Sonnet  
 **Effort:** high
 
-Use a fresh session because the previous work was attachment-ingress-specific and this milestone is a compact SwiftUI/menu-bar UX change with a separate manual visual gate.
+Use a fresh session because this task is a platform-sensitive Xcode/XCTest infrastructure investigation, not continuation of the SwiftUI feature work. Start with Sonnet/high effort; do not escalate models merely because the first hypothesis is false.
 
-## Repository and exact accepted state
+## Repository and exact current state
 
 Repository: `jeffreystutz/iMCP`  
 Branch: `feat/messages-write-foundation`
 
-The exact fully accepted production head before this prompt-only trajectory commit is:
+Current remote branch head before this prompt-only trajectory commit:
 
-`7bafd275217b731faaf9e3b678edfc33bbf4a3af` — `test: align automatic attachment revalidation ordering`
+`0f2fa87e5c2a07807858a5e51c9cc25404511d79` — report-only head for the visible automatic-send-state milestone.
 
-That head is accepted through supervising code review, hosted CI, and the human attachment Settings/MCP Inspector checkpoint.
+The exact **fully human-accepted production baseline** remains:
+
+`7bafd275217b731faaf9e3b678edfc33bbf4a3af` — accepted attachment ingress/test correction.
+
+After that accepted baseline, the branch also contains the visible automatic-send implementation:
+
+`59701440cd9d9b7b6945bc287c68464a4c026433` — `feat: surface automatic sending state and pause`
+
+That implementation has passed supervising code review and hosted CI on exact report head `0f2fa87e...`, but its separate visual/manual interaction checkpoint has not yet been completed. The user explicitly chose to address the XCTest infrastructure blocker before returning to that manual gate. **Do not modify or redesign that product implementation in this task.**
+
+Upstream baseline for comparison:
+
+`mattt/iMCP` `main` at `b84f266a7649125a407feb3c303570f1798e04dc`.
 
 Before editing:
 
 1. `git pull --ff-only origin feat/messages-write-foundation`;
 2. retrieve and follow the Hexa coding-agent bootstrap required by `AGENTS.md`;
 3. verify repository, branch, clean worktree, remotes, recent history, and local/origin equality;
-4. verify that every commit after `7bafd275217b731faaf9e3b678edfc33bbf4a3af` is prompt/report/governance-only and that there are no unexpected production changes;
-5. inspect the exact current implementations of `App/App.swift`, `App/Views/ContentView.swift`, `App/Views/SettingsView.swift`, `App/Services/MessagesSendingMode.swift`, the menu icon asset sets, and existing sending-mode tests before choosing the smallest implementation.
+4. verify this prompt-only commit is the only commit after `0f2fa87e5c2a07807858a5e51c9cc25404511d79`;
+5. inspect the exact current Xcode project, shared schemes, test target settings, and CI workflow before running experiments;
+6. confirm the local macOS and Xcode versions actually in use and record them in the report.
 
 If repository reality materially contradicts this prompt, STOP and report the contradiction rather than silently redesigning.
 
 Do not amend, rebase, reset, squash, force-push, or rewrite reviewed history.
 
-## Current relevant behavior
+## Problem to solve
 
-The accepted app already has one global, app-owned `MessagesSendingMode` persisted under `MessagesSendingMode.storageKey`:
+The project’s tests build successfully, and the same test bundle executes successfully in hosted GitHub Actions using macOS 26 / Xcode 26.0. On the local development machine, however, both ordinary `xcodebuild ... test` and Xcode Product -> Test fail **before any test case executes** with a launch failure equivalent to:
 
-- `Ask Before Sending` is the factory default;
-- `Send Automatically` is explicit user opt-in;
-- MCP callers cannot enable, override, or weaken it;
-- automatic mode skips only final per-send confirmation for eligible **existing-conversation** text and attachment sends;
-- verified-new direct text recipients still open human-completed Messages composition;
-- verified-new attachment recipients remain unsupported.
+- `Could not launch “imcp-serverTests”`
+- `IDELaunchErrorDomain Code 20`
+- underlying LaunchServices launcher failure.
 
-`GeneralSettingsView` already owns the accepted Settings control and warning for switching into Send Automatically. Returning to Ask Before Sending needs no warning.
+This has reproduced across fresh DerivedData directories and through the normal Xcode GUI, so it is not merely a stale DerivedData or headless-Claude problem.
 
-`App/App.swift` currently chooses the menu-bar icon only from server enablement:
+The goal is to make the project’s unit tests execute reliably in the ordinary local Xcode/xcodebuild development path **without weakening product security, signing, sandbox, entitlements, or runtime behavior merely to coerce the runner**.
 
-- enabled -> `MenuIcon-On`;
-- disabled -> `MenuIcon-Off`.
+A successful result should also be structurally reasonable for a future upstream contribution rather than relying on a fork-only test hack.
 
-`MenuIcon-On` is a 16x16 template SVG using `currentColor`, so macOS controls its normal light/dark foreground treatment. `MenuIcon-Off` already has its own light/dark behavior and represents a disabled server.
+## Important repository facts already established
 
-`ContentView` is the existing menu-bar window. Its first row is `Enable MCP Server`, followed by service controls and the existing menu actions.
+Verify these facts yourself before relying on them.
 
-## Settled product decision
+### Upstream test target
 
-When automatic sending is operationally active, iMCP must make that state visible **before the user opens Settings** and make it one action to stop.
+At upstream `b84f266...`, `imcp-serverTests` is a standalone macOS unit-test bundle whose only current source is `CLITests/ServiceGroupConfigurationTests.swift`.
 
-The accepted design is:
+Upstream test-target settings do **not** contain `TEST_HOST` or `BUNDLE_LOADER`, and the target has no dependency on `iMCP.app`.
 
-1. **Menu-bar icon indicator**
-   - When the MCP server is enabled **and** global Sending mode is Send Automatically, keep the existing base iMCP glyph visually native/monochrome and add a **small amber/orange status dot or accent**.
-   - Do **not** tint the entire glyph.
-   - Do **not** change or paint the menu-bar item's background.
-   - Ask Before Sending + server enabled must retain the current normal `MenuIcon-On` appearance.
-   - Server disabled must retain the current `MenuIcon-Off` appearance and takes precedence over the automatic indicator. The persisted Sending mode is not changed merely because the server is disabled.
+The shared `imcp-serverTests.xcscheme` is the same scheme file in upstream and the current fork.
 
-2. **In-menu operational status and Pause**
-   - When the server is enabled and Sending mode is Send Automatically, show a compact status surface near the top of the existing menu-bar window, immediately understandable as **“Automatic sending is on”**.
-   - Provide one prominent, single-action **Pause** / **Pause automatic sending** affordance in that surface.
-   - Include concise secondary copy making the scope truthful: eligible **existing-conversation text and attachment** sends can submit without per-send confirmation; new-recipient text still opens Messages for human review/send.
-   - Do not imply automatic new-recipient sending or delivery guarantees.
-   - When the server is disabled, do not present automatic sending as currently active in the menu window. The setting remains persisted, so re-enabling the server restores the automatic indicator/status if the mode was not paused in Settings.
+Upstream CI currently lints and builds but does not execute the test scheme.
 
-3. **Pause semantics**
-   - Pause is **not** a second state machine.
-   - One click simply writes the global Sending mode back to `Ask Before Sending` using the existing storage key/model.
-   - No confirmation dialog is needed for Pause because it only makes behavior safer.
-   - The icon/status surface must update reactively and disappear immediately.
-   - Pause must not disable the MCP server, disconnect clients, alter confirmation-method preference, or change any destination/file/runtime semantics.
+### Fork test-target evolution
 
-## Implementation guidance
+To add `AppTests` that use `@testable import iMCP`, this feature branch repurposed the existing `imcp-serverTests` target into an app-hosted test bundle. Relative to upstream it now:
 
-Preserve the existing upstream UI architecture and make the smallest coherent change.
+- includes the `AppTests/*.swift` sources in the same target;
+- depends on the `iMCP` app target;
+- sets `BUNDLE_LOADER = "$(TEST_HOST)"`;
+- sets `TEST_HOST = "$(BUILT_PRODUCTS_DIR)/iMCP.app/Contents/MacOS/iMCP"`.
 
-Use the same `MessagesSendingMode.storageKey` / `MessagesSendingMode.decode` source of truth everywhere. Do not introduce a separate “paused” boolean, duplicate persistent policy, timer, client-specific state, or new authorization layer.
+The current app Debug configuration also contains the upstream-derived settings that disable ordinary code signing for the Debug app (`CODE_SIGNING_ALLOWED = NO`, `CODE_SIGNING_REQUIRED = NO`) while retaining sandbox/hardened-runtime/entitlement settings.
 
-For the menu-bar icon, preserve native light/dark/highlight behavior of the base glyph. Because `MenuIcon-On` is currently a template image, simply putting amber inside that same template asset would cause the whole asset to be template-tinted. Prefer a SwiftUI/custom `MenuBarExtra` label that overlays a small amber/orange dot/accent on the existing template image **if the public API supports that cleanly in this repository**. If that approach is not viable, a dedicated automatic-mode asset with light/dark-safe base-glyph treatment plus amber accent is acceptable. Keep the implementation public-API-only, minimal, and visually native.
+These facts make the app-host launch/signing boundary a strong **hypothesis**, not a proven diagnosis. Hosted Xcode 26.0 still launches and runs the same tests; local Xcode 26.6 has not.
 
-Do not modify `MenuBarExtraAccess` dependency behavior merely to implement the icon. Do not use private APIs, Accessibility automation, status-item hacks, or background-window tricks.
+There is also a potential upstream-architecture concern: an existing upstream standalone CLI-test target was changed into an app-hosted mixed CLI/app test target. Do not assume that is the final architecture simply because it exists today.
 
-The menu status row belongs in the existing `ContentView`; do not create a separate window or settings pane. Reuse the current visual language and spacing rather than inventing a new design system.
+## Goal
 
-A small pure helper for state derivation is fine if it materially improves correctness/testability, but do not build a framework around this two-condition state.
+Establish the root cause of the local XCTest launch failure with controlled evidence, then implement the **smallest proven infrastructure correction** only if it is clearly bounded and does not create a material product/development-security tradeoff.
 
-## Invariants that must remain unchanged
+The desired end state is:
 
-- Preserve the original upstream connection approval and remembered/trusted-client behavior exactly; do not remove, refactor, or reinterpret `trustedClients`.
-- Do not use `clientInfo.name` as a Messages-specific authorization boundary.
-- Do not change the global Sending mode's runtime semantics for text or attachments.
-- Do not change the existing Settings warning for entering Send Automatically except for a tiny wording consistency fix if objectively necessary for the new visible status language.
-- Do not alter destination resolution, exact-existing-group behavior, destination/file revalidation, verified-new composition, attachment grant behavior, Automation/TCC ordering, AppleScript dispatch, one-dispatch/no-retry behavior, privacy/redaction, or submitted-not-delivered truthfulness.
-- Do not add circuit-breaker behavior yet.
-- Do not add Recent Send Activity yet.
-- No real Messages sends and no private Messages/Contacts reads for verification.
+- an ordinary local `xcodebuild ... test` actually executes the relevant XCTest suite on the current local Xcode rather than failing at LaunchServices;
+- the app still builds normally;
+- existing product/security behavior is unchanged;
+- hosted CI remains compatible;
+- the test structure has a credible path to upstream review.
 
-## Automated verification
+## Investigation sequence
 
-Add focused automated coverage for any new non-view logic you introduce. Prefer deterministic unit tests over fragile SwiftUI snapshot/UI automation.
+Follow this sequence rather than trying random Xcode settings.
 
-At minimum:
+### 1. Reproduce and capture the current failure once
 
-1. extend `MessagesSendingModeTests` or another focused test only if new state-selection/pause logic exists outside direct SwiftUI bindings;
-2. verify stale/corrupt stored values still fail closed to Ask Before Sending if shared decode behavior is touched;
-3. verify Pause cannot produce a third persistent state if a helper is introduced;
-4. `swift format lint --strict --recursive .`;
-5. `git diff --check`;
-6. Debug app build;
-7. `imcp-serverTests` build-for-testing and one ordinary full-suite test attempt.
+From the exact current branch state, use a fresh disposable DerivedData directory and run the ordinary current test command, equivalent to:
 
-The current machine has repeatedly hit `IDELaunchErrorDomain` code 20 before local XCTest launch. Make one normal full-suite attempt. If the same LaunchServices failure recurs before tests execute, record that exact infrastructure limitation and continue with build-for-testing rather than spending time debugging the runner or inventing alternate GUI automation. Do not claim tests executed if they did not.
+```sh
+xcodebuild \
+  -project iMCP.xcodeproj \
+  -scheme imcp-serverTests \
+  -configuration Debug \
+  -destination 'platform=macOS' \
+  -derivedDataPath <fresh-disposable-path> \
+  test
+```
 
-If ordinary focused/full XCTest execution works, report the actual counts/results.
+Do not use `-quiet` for diagnosis. Record the meaningful error/domain/cause in the sanitized report. Do not loop on the same failing command.
 
-Verify any new asset catalog entries compile cleanly. If production source/assets changed, produce the normal signed ManualVerification app artifact if the existing project workflow makes that available without unrelated changes, and verify signing/entitlements remain unchanged. Do not modify entitlements for this task.
+### 2. Inspect the built test host and resolved build settings
 
-## Manual visual/interaction checkpoint
+For the failed build products, inspect at least:
 
-This milestone is not manually accepted by automated tests or code inspection. Prepare this compact checkpoint for the user; do not claim it passed yourself unless you genuinely have an ordinary interactive environment and can observe it directly without automation workarounds.
+- resolved `TEST_HOST` / `BUNDLE_LOADER` for `imcp-serverTests`;
+- resolved app Debug code-signing settings, including command-line/sdk-specific precedence;
+- `codesign -d` / `codesign --verify` results for the built `iMCP.app` and its executable as appropriate;
+- architecture/file type if relevant;
+- whether the built app can be launched normally by an ordinary public macOS mechanism (`open` or directly executing its binary) without introducing UI automation or private APIs.
 
-1. With server enabled and Sending mode = Ask Before Sending, confirm the menu-bar icon looks exactly like the current normal enabled icon and no automatic-status row appears.
-2. In Settings, switch to Send Automatically using the already-accepted warning flow.
-3. Confirm the menu-bar icon keeps the normal base glyph and gains only a small amber/orange status dot/accent. Confirm there is no custom background treatment and the icon remains legible in the current macOS appearance; check both light/dark appearance if easy.
-4. Open the iMCP menu and confirm a compact near-top surface clearly says `Automatic sending is on`, accurately scopes automatic sending to eligible existing-conversation text/attachment sends, and offers a one-action Pause.
-5. Click Pause once. Confirm the global mode immediately becomes Ask Before Sending, the amber indicator disappears, the status surface disappears, and Settings reflects Ask Before Sending. No extra confirmation should appear.
-6. Set Send Automatically again, then disable the MCP server. Confirm the existing disabled/off icon takes precedence and the menu does not claim automatic sending is currently active. Re-enable the server and confirm the amber indicator/status returns because the configured mode remained automatic.
+Use privacy-safe, bounded diagnostics only. Do not dump unrelated system logs. If a targeted system log query is necessary to obtain the underlying LaunchServices cause, constrain it tightly to the test launch time/process and sanitize the report.
 
-No real message or attachment send is required for this checkpoint.
+### 3. Establish the untouched upstream control
+
+Create a **temporary detached worktree** (or equivalently isolated checkout) at exact upstream baseline `b84f266a7649125a407feb3c303570f1798e04dc`. Do not modify or commit from that control worktree.
+
+Using the same local Xcode version and a fresh DerivedData directory, run upstream’s unchanged `imcp-serverTests` scheme.
+
+Record whether its standalone test bundle actually executes. This is a key control:
+
+- if upstream standalone tests run locally, the failure is specific to the fork’s app-host conversion or related build settings;
+- if upstream standalone tests fail with the same LaunchServices error, the hypothesis is wrong and the issue is broader Xcode/environment behavior.
+
+Remove the disposable control worktree when finished if safe to do so.
+
+### 4. Test the signing/host hypothesis without persistent project mutation
+
+If evidence still points to the app-host launch boundary, use **command-line build-setting overrides and fresh disposable DerivedData** to test whether making the Debug test host launchable through normal local/ad-hoc signing causes the same test scheme to execute.
+
+First inspect `xcodebuild -showBuildSettings` so you understand actual precedence, especially the existing sdk-specific identity setting. Do not blindly guess at signing flags.
+
+A valid experiment may override settings such as `CODE_SIGNING_ALLOWED`, `CODE_SIGNING_REQUIRED`, `CODE_SIGN_IDENTITY`, or related team/style values for that disposable invocation, but:
+
+- do not modify project files for the experiment;
+- do not alter Release signing;
+- do not remove sandbox/hardened-runtime/entitlements merely to get a green result;
+- do not grant Full Disk Access, change SIP, use private APIs, or use Accessibility automation;
+- do not treat a build-only result as proof — the test cases must actually begin executing.
+
+If the signing experiment makes tests execute, compare the resulting host signature/launchability with the failing host and record the causal evidence.
+
+### 5. Use version comparison only if it materially narrows the cause
+
+If both Xcode 26.0 and the current Xcode are already installed locally, a single matched comparison may be useful because hosted Xcode 26.0 succeeds while local Xcode 26.6 fails. Do not install/downgrade Xcode or spend substantial time on version archaeology for this task.
+
+## Fix authority and stop conditions
+
+You may implement and commit a fix **only after the root cause is demonstrated**.
+
+A bounded fix is acceptable if it is limited to test/project/scheme/build configuration and all of the following are true:
+
+- the causal experiment clearly predicts the fix;
+- ordinary local XCTest execution succeeds afterward;
+- normal Debug development behavior is not materially weakened;
+- Release signing/entitlements are unchanged;
+- app sandbox, Hardened Runtime, TCC/Automation behavior, and Messages runtime semantics are unchanged;
+- the change is credible for upstream review rather than a machine-specific workaround.
+
+Examples of potentially bounded outcomes include a correct test-host/build-configuration setting or another small scheme/project correction established by evidence.
+
+**STOP and report evidence/options without implementing a broad redesign** if any of these are true:
+
+- the only proven fix requires changing the ordinary Debug app’s signing identity in a way that may materially affect persistent TCC/permission behavior;
+- the clean solution appears to require a new dedicated `iMCPTests` target, restoring `imcp-serverTests` to standalone semantics, or otherwise restructuring test targets;
+- the clean solution appears to require extracting app/domain code into a library/framework/Swift package;
+- evidence points to an Xcode 26.6 regression with no repository-side correction that is clearly safe;
+- more than one materially different architecture is viable and the choice has meaningful upstream-maintenance tradeoffs;
+- fixing launch would require weakening sandbox, entitlements, Hardened Runtime, privacy, or production security.
+
+For a stop outcome, give the supervisor concrete options with exact project implications and a recommendation, but do not silently choose the larger architecture.
+
+## Upstreamability requirement
+
+Treat `mattt/iMCP` as the architectural baseline.
+
+Do not delete or weaken the upstream CLI test coverage merely to accommodate app tests. Specifically, recognize that upstream’s `imcp-serverTests` target was originally standalone. If the evidence suggests separate CLI and app-test targets are cleaner, document that as an architecture option rather than performing the split under this bounded investigation unless it turns out to be a truly mechanical, consequence-free correction.
+
+Do not edit upstream remotes or open an upstream PR.
+
+## Product/security invariants
+
+This task is test infrastructure only.
+
+- No changes to Messages public tool schemas or behavior.
+- No changes to global Sending mode semantics.
+- No changes to connection approval / `trustedClients` behavior.
+- No changes to destination resolution/revalidation, attachment grants, Automation/TCC ordering, AppleScript dispatch, privacy/redaction, or one-dispatch/no-retry behavior.
+- No changes to app entitlements or sandbox permissions unless a contradiction proves the current project is malformed; if that occurs, STOP and report rather than changing them.
+- No real Messages sends.
+- No private Messages/Contacts reads.
+- No test fixtures containing private user data.
+- No Accessibility automation, private framework use, SIP changes, injection, or machine-specific launch hacks.
+
+## Verification for an implemented bounded fix
+
+If and only if you implement a proven correction, run:
+
+1. the focused test(s) needed to prove the launch path works;
+2. the ordinary full `imcp-serverTests` suite locally and report the actual executed test count/result;
+3. `swift format lint --strict --recursive .`;
+4. `git diff --check`;
+5. `plutil -lint iMCP.xcodeproj/project.pbxproj` if the project file changed;
+6. normal Debug `iMCP` app build;
+7. `build-for-testing` as a secondary build check, not a substitute for executed tests;
+8. inspect resolved signing/test-host settings after the fix and confirm Release configuration did not change.
+
+Do not claim local XCTest success unless test cases actually executed.
+
+Hosted CI will be re-run by the supervisor after the pushed review-ready result. Do not open a PR merely to trigger it.
+
+If no safe bounded fix is implemented, still perform enough non-mutating verification to make the diagnosis/report useful, but do not manufacture a commit just to claim progress.
+
+## Manual verification boundary
+
+If a bounded fix is implemented and command-line XCTest executes locally, the supervisor may still ask the user to confirm normal Xcode Product -> Test behavior. Do not use GUI automation to simulate that checkpoint.
+
+The separate visible automatic-send UI manual checkpoint remains pending and is **not part of this task**.
 
 ## Documentation/report handoff
 
-Write a concise self-contained report to:
+Write a concise, sanitized, self-contained investigation report to:
 
-`docs/project-reports/automatic-send-visible-state-and-pause-2026-08-18.md`
+`docs/project-reports/xctest-launch-diagnosis-2026-08-18.md`
 
 Include:
 
-- repository/branch;
-- accepted starting implementation SHA `7bafd275217b731faaf9e3b678edfc33bbf4a3af`;
-- ending production SHA(s);
-- exact files/symbols/assets changed;
-- icon rendering approach chosen and why it preserves native menu-bar behavior;
-- Pause implementation and proof that it writes the existing global Ask mode rather than a second state;
-- focused/full verification actually executed, distinguishing `build-for-testing` from executed tests;
-- any local XCTest launch limitation;
-- signing/entitlement verification if performed;
-- unresolved manual visual/interaction gate;
-- confirmation that connection auth/trusted-client behavior and Messages runtime semantics were untouched.
+- repository/branch and exact starting branch head;
+- local macOS/Xcode version used;
+- upstream control SHA and outcome;
+- current target/scheme/test-host differences from upstream;
+- initial failure evidence;
+- resolved test-host/signing facts;
+- each bounded experiment and outcome;
+- demonstrated root cause, or the narrowest remaining uncertainty if not proven;
+- any implemented project/scheme change and why the evidence supports it;
+- actual local XCTest execution count/result if achieved;
+- normal build/static verification;
+- explicit confirmation of unchanged Release/security/product behavior;
+- if stopped, the smallest viable architecture options, tradeoffs, and recommended next decision;
+- recommended next action.
 
-Do not include private Messages/Contacts content, raw logs, secrets, local private file paths, or chain-of-thought.
+Do not include raw full logs, local private filesystem paths, secrets, Messages/Contacts data, or chain-of-thought.
 
 ## Git handoff
 
-Use additive commits only. A suitable implementation commit message is:
+Use additive commits only.
 
-`feat: surface automatic sending state and pause`
+If a safe bounded fix is proven, commit it with an outcome-oriented message such as:
 
-A separate report-only commit is fine if useful. Stage only task-owned files.
+`fix: make app-hosted tests launch locally`
+
+Then add the report in a separate report-only commit if useful.
+
+If the investigation concludes that a material architecture decision is required, **do not make speculative production/project changes**. Commit only the sanitized report, with a message such as:
+
+`docs: diagnose XCTest launch failure`
 
 Push normally to `origin/feat/messages-write-foundation`, verify local HEAD equals origin, and leave the worktree clean.
 
-Do not open an upstream PR, merge anything, force-push, or rewrite history.
+Do not merge, force-push, rewrite history, or open an upstream PR.
 
 ## Stopping point
 
-STOP after the visible automatic-mode indicator, in-menu status/Pause action, focused verification, full applicable build/test attempt, and sanitized report are committed and pushed for supervising review.
+STOP when either:
 
-Do **not** start the automatic-send circuit breaker, Recent Send Activity, final consistency sweep, or upstream PR decomposition.
+1. a root cause is proven, the smallest safe bounded correction is implemented, local XCTest actually executes, verification/report are complete, and commits are pushed; **or**
+2. evidence shows the correct solution requires a material test-architecture/development-signing choice, in which case push the diagnosis report only and stop for supervising/user decision.
+
+Do not resume circuit-breaker, Recent Send Activity, visible-state manual acceptance, or any other product milestone in this task.
 
 When complete, the user should only need to say **done**.
