@@ -7,8 +7,28 @@ struct ContentView: View {
     @Binding var isEnabled: Bool
     @Binding var isMenuPresented: Bool
     @Environment(\.openSettings) private var openSettings
+    @AppStorage(MessagesSendingMode.storageKey)
+    private var sendingModeRaw = MessagesSendingMode.defaultValue.rawValue
 
     private let aboutWindowController: AboutWindowController
+
+    /// Mirrors the same `MenuBarIconAppearance` the menu-bar glyph uses, so the
+    /// status surface below appears/disappears in exact agreement with the
+    /// amber indicator rather than deriving its own second notion of "active."
+    private var isAutomaticSendingActive: Bool {
+        MenuBarIconAppearance.resolve(
+            isServerEnabled: isEnabled,
+            sendingMode: MessagesSendingMode.decode(sendingModeRaw)
+        )
+        .isAutomaticSendingActive
+    }
+
+    /// Pause writes the existing global Sending mode back to Ask Before
+    /// Sending — the same storage key `GeneralSettingsView` reads and writes.
+    /// There is no separate paused flag or second state machine.
+    private func pauseAutomaticSending() {
+        sendingModeRaw = MessagesSendingMode.askBeforeSending.rawValue
+    }
 
     private var serviceConfigs: [ServiceConfig] {
         serverController.computedServiceConfigs
@@ -48,6 +68,38 @@ struct ContentView: View {
                 Task {
                     await serverController.setEnabled(isEnabled)
                 }
+            }
+
+            if isAutomaticSendingActive {
+                VStack(alignment: .leading, spacing: 6) {
+                    Divider()
+
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 6, height: 6)
+                        Text("Automatic sending is on")
+                            .font(.system(size: 12, weight: .semibold))
+                        Spacer()
+                    }
+
+                    Text(
+                        "Eligible existing-conversation text and attachment sends can submit without asking. A new recipient still opens Messages for you to review and send."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                    Button("Pause Automatic Sending") {
+                        pauseAutomaticSending()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .controlSize(.small)
+                }
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+                .padding(.horizontal, 14)
             }
 
             if isEnabled {
